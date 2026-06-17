@@ -1,0 +1,35 @@
+[package]
+name = "matter-peek-rpc"
+description = "Local WebSocket/JSON RPC server exposing matter-peek-core to UIs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "matter-peek-rpc"
+path = "src/main.rs"
+
+[dependencies]
+matter-peek-core = { path = "../core" }
+matter-peek-proto = { path = "../proto" }
+rs-matter = { workspace = true }
+
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+async-net = { workspace = true }
+async-channel = { workspace = true }
+async-tungstenite = { workspace = true }
+async-executor = { workspace = true }
+async-io = { workspace = true }
+futures-lite = { workspace = true }
+futures-util = { workspace = true }
+embassy-futures = { workspace = true }
+embassy-time = { workspace = true }
+embassy-time-queue-utils = { workspace = true }
+rand = { workspace = true }
+static_cell = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }

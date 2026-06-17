@@ -20,9 +20,31 @@ Matter accessory end-to-end. Diagnostics + log retrieval land next.
 ```
 core/   matter-peek-core — the reusable controller library (wraps rs-matter)
 cli/    headless CLI for spikes / testing (binary: matter-peek)
-rpc/    WS/JSON server over core::api            (Phase 1)
-uniffi/ mobile bindings over core::api           (Phase 3)
-web/    web UI — WS/JSON client                   (Phase 1)
+proto/  matter-peek-proto — wire contract (serde) shared by rpc + UIs
+rpc/    matter-peek-rpc — local WS/JSON server over the core (binary)
+web/    matter-peek-web — Yew/Wasm web UI (WS/JSON client; separate wasm crate)
+uniffi/ mobile bindings over the core           (Phase 3)
+```
+
+## Run the web stack (Phase 1)
+
+Three processes: a Matter accessory, the RPC server, and the web UI.
+
+```sh
+# 1. An accessory (here, rs-matter's system_tests with a crash log)
+( cd ../rs-matter && cargo run --bin system_tests -- --crash_log /tmp/crash.log )
+
+# 2. The RPC server (native; default ws://127.0.0.1:8087)
+cargo run -p matter-peek-rpc
+
+# 3. The web UI (needs `trunk` + the wasm32 target on nightly)
+( cd web && trunk serve )   # then open the printed http://… URL
+```
+
+Headless smoke test of the full server↔core↔device pipe (no browser):
+
+```sh
+cargo run -p matter-peek-rpc --example ws_client
 ```
 
 ## Build & run the spike

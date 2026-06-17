@@ -1,0 +1,15 @@
+[package]
+name = "matter-peek-proto"
+description = "Wire contract (serde types) shared by the matter-peek RPC server and UIs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# `std` (re-enabled here; the workspace dep is default-features=false) is needed
+# for serde's internally-tagged enum deserialization (`#[serde(tag = ...)]`).
+# `std` is fine for the web/wasm target too.
+serde = { workspace = true, features = ["derive", "std"] }

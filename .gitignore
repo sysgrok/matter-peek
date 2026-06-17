@@ -1,4 +1,8 @@
-/target
+# Build output — match the root `target/` and any nested one (e.g. web/target/,
+# since the wasm `web` crate is its own workspace with its own target dir).
+target/
+/dist
+**/dist
 **/*.rs.bk
 .DS_Store
 # Cargo.lock is committed — this is an application workspace (reproducible builds).

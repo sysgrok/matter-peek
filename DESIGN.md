@@ -254,10 +254,21 @@ back to the controller while the request is still in flight. Small logs instead
 ride back inline in the response's `log_content` — both paths are handled.
 (Discovery/mDNS is still stubbed — the CLI takes an explicit peer address.)
 
-**Phase 1 — Core API + RPC + minimal web UI (lock-step).**
-Define `core::model` + `core::api`; expose via `rpc/` (WS/JSON); build a
-minimal web UI that drives the spike's flow through the UI. Iterate the API
-shape against real UI needs. Add `Persistent` policy + local store + tags +
+**Phase 1 — Core API + RPC + minimal web UI (lock-step).** *(in progress — vertical slice working)*
+Done: the `proto/` wire contract (serde, wasm-friendly), the `rpc/` server (an
+**actor** task owning a per-command Matter stack + transport pump, behind a
+WS/JSON `async-tungstenite`/`async-net` server on one `LocalExecutor`), and a
+Yew/Wasm `web/` UI that runs the full vertical and renders streamed step events
++ the result. Validated end-to-end (browser-shaped frames → WS → actor → core →
+live `system_tests` device → response, incl. 5000-byte multi-block BDX log)
+via the `rpc` `ws_client` example.
+
+Chosen contract shape: `ClientMsg{req_id, Request}` → `ServerMsg::{Response,
+Event}`; the first op is `RunVertical{peer_addr, passcode, policy}`. This is the
+artifact the UniFFI mobile surface will mirror.
+
+Still to do in Phase 1: **mDNS discovery** (the big gap — UI/CLI still take an
+explicit peer addr), then `Persistent` policy + local store + tags +
 Identify-blink + re-sync handling.
 
 **Phase 2 — Health dashboard + subscriptions.**

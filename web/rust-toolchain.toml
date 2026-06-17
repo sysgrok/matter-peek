@@ -1,0 +1,5 @@
+# The web (wasm) crate builds with nightly + the wasm32 target. The repo's
+# default toolchain is `esp` (for the embedded crates), which can't target wasm.
+[toolchain]
+channel = "nightly"
+targets = ["wasm32-unknown-unknown"]
