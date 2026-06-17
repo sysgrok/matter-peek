@@ -1,0 +1,20 @@
+[package]
+name = "matter-peek-core"
+description = "Vendor-agnostic Matter diagnostic controller core (wraps rs-matter)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "matter_peek_core"
+
+[dependencies]
+rs-matter = { workspace = true }
+log = { workspace = true }
+embassy-futures = { workspace = true }
+embassy-time = { workspace = true }
+async-io = { workspace = true }
+rand = { workspace = true }

@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+.DS_Store
+# Cargo.lock is committed — this is an application workspace (reproducible builds).
+
+# editor / tooling
+/.idea
+/.vscode
+*.swp

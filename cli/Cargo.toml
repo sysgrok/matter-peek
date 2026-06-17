@@ -1,0 +1,28 @@
+[package]
+name = "matter-peek-cli"
+description = "Headless CLI for driving matter-peek-core (spikes / testing)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "matter-peek"
+path = "src/main.rs"
+
+[dependencies]
+matter-peek-core = { path = "../core" }
+rs-matter = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+embassy-futures = { workspace = true }
+embassy-time = { workspace = true }
+# Provides the timer-queue implementation the embassy-time std driver links
+# against (`__embassy_time_queue_item_from_waker`). The binary that runs the
+# executor must select a queue size.
+embassy-time-queue-utils = { workspace = true }
+futures-lite = { workspace = true }
+rand = { workspace = true }
+static_cell = { workspace = true }

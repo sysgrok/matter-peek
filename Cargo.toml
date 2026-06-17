@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "cli",
+    # "rpc",     # Phase 1 — WS/JSON server over core::api
+    # "uniffi",  # Phase 3 — mobile bindings
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Ivan Markov <ivan.markov@gmail.com>"]
+publish = false
+repository = "https://github.com/sysgrok/matter-peek"
+rust-version = "1.84"
+
+[workspace.dependencies]
+# rs-matter is the Matter stack we wrap. Pinned to the sysgrok `next` fork to
+# match the rest of the workspaces; flip to a local path for co-development.
+rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next", default-features = false, features = ["os", "rustcrypto", "log"] }
+
+log = "0.4"
+env_logger = "0.11"
+embassy-futures = "0.1"
+embassy-time = { version = "0.5", features = ["std"] }
+embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
+async-io = "2"
+futures-lite = "2"
+rand = { version = "0.8", features = ["std", "std_rng"] }
+static_cell = "2"
+
+[patch.crates-io]
+# Uncomment for local co-development against the working clones:
+# rs-matter = { path = "../rs-matter/rs-matter" }
