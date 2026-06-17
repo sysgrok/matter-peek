@@ -57,7 +57,7 @@ where
             if json.is_empty() {
                 continue;
             }
-            if write.send(Message::Text(json.into())).await.is_err() {
+            if write.send(Message::Text(json)).await.is_err() {
                 break;
             }
         }

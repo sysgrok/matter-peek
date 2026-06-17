@@ -26,7 +26,10 @@ struct StepLine {
 enum Msg {
     PeerAddr(String),
     Passcode(String),
+    Discriminator(String),
     Run,
+    Discover,
+    PickDevice(String),
     Step(StepLine),
     Done(proto::Response),
     Error(String),
@@ -35,7 +38,11 @@ enum Msg {
 struct App {
     peer_addr: String,
     passcode: String,
+    /// Optional discriminator filter for discovery (empty = any).
+    discriminator: String,
     running: bool,
+    discovering: bool,
+    discovered: Vec<proto::DiscoveredDevice>,
     steps: Vec<StepLine>,
     result: Option<proto::Response>,
     error: Option<String>,
@@ -49,7 +56,10 @@ impl Component for App {
         Self {
             peer_addr: "[::1]:5540".into(),
             passcode: "20202021".into(),
+            discriminator: String::new(),
             running: false,
+            discovering: false,
+            discovered: Vec::new(),
             steps: Vec::new(),
             result: None,
             error: None,
@@ -65,6 +75,39 @@ impl Component for App {
             Msg::Passcode(v) => {
                 self.passcode = v;
                 false
+            }
+            Msg::Discriminator(v) => {
+                self.discriminator = v;
+                false
+            }
+            Msg::Discover => {
+                let discriminator = match self.discriminator.trim() {
+                    "" => None,
+                    s => match s.parse::<u16>() {
+                        Ok(d) => Some(d),
+                        Err(_) => {
+                            self.error = Some("discriminator must be a u16 (or blank)".into());
+                            return true;
+                        }
+                    },
+                };
+                self.discovering = true;
+                self.discovered.clear();
+                self.error = None;
+                send_request(
+                    ctx.link().clone(),
+                    proto::Request::Discover {
+                        discriminator,
+                        max: 16,
+                    },
+                );
+                true
+            }
+            Msg::PickDevice(addr) => {
+                // Fill the peer address from the picked device; the user then
+                // hits "Run vertical".
+                self.peer_addr = addr;
+                true
             }
             Msg::Run => {
                 let passcode: u32 = match self.passcode.trim().parse() {
@@ -84,7 +127,7 @@ impl Component for App {
                     passcode,
                     policy: proto::FabricPolicy::Ephemeral,
                 };
-                run_vertical(ctx.link().clone(), req);
+                send_request(ctx.link().clone(), req);
                 true
             }
             Msg::Step(line) => {
@@ -93,7 +136,11 @@ impl Component for App {
             }
             Msg::Done(resp) => {
                 self.running = false;
-                self.result = Some(resp);
+                self.discovering = false;
+                match resp {
+                    proto::Response::Discovered { devices } => self.discovered = devices,
+                    other => self.result = Some(other),
+                }
                 true
             }
             Msg::Error(e) => {
@@ -109,7 +156,19 @@ impl Component for App {
         html! {
             <>
                 <h1>{ "matter-peek" }</h1>
-                <p>{ "Run the diagnostic vertical against a Matter device." }</p>
+                <p>{ "Discover a Matter device, then run the diagnostic vertical against it." }</p>
+
+                <div class="row">
+                    <label>{ "Discriminator" }</label>
+                    <input placeholder="any" value={self.discriminator.clone()}
+                        oninput={link.callback(|e: InputEvent| Msg::Discriminator(input_value(e)))} />
+                    <button disabled={self.discovering || self.running}
+                        onclick={link.callback(|_| Msg::Discover)}>
+                        { if self.discovering { "Discovering…" } else { "Discover devices" } }
+                    </button>
+                </div>
+
+                { self.view_discovered(link) }
 
                 <div class="row">
                     <label>{ "Peer addr" }</label>
@@ -137,6 +196,26 @@ impl Component for App {
 }
 
 impl App {
+    fn view_discovered(&self, link: &html::Scope<Self>) -> Html {
+        if self.discovered.is_empty() {
+            return html! {};
+        }
+        html! {
+            <div class="steps">
+                { for self.discovered.iter().map(|d| {
+                    let addr = d.addr.clone();
+                    let onclick = link.callback(move |_| Msg::PickDevice(addr.clone()));
+                    html! {
+                        <div class="step done">
+                            { format!("{}  (id={:#018x})  ", d.addr, d.commissionable_id) }
+                            <button {onclick}>{ "Use" }</button>
+                        </div>
+                    }
+                }) }
+            </div>
+        }
+    }
+
     fn view_steps(&self) -> Html {
         if self.steps.is_empty() {
             return html! {};
@@ -163,7 +242,9 @@ impl App {
             Some(proto::Response::Error { message }) => html! {
                 <p class="err">{ format!("Server error: {message}") }</p>
             },
-            None => html! {},
+            // `Discovered` is routed to `self.discovered` (see `Msg::Done`), not
+            // stored as a result.
+            Some(proto::Response::Discovered { .. }) | None => html! {},
         }
     }
 }
@@ -192,8 +273,8 @@ fn format_result(v: &proto::VerticalResult) -> String {
 }
 
 /// Open a WS, send the request, and pump server frames back as component
-/// messages until the matching response arrives.
-fn run_vertical(link: html::Scope<App>, request: proto::Request) {
+/// messages (step events, then the final response) until it completes.
+fn send_request(link: html::Scope<App>, request: proto::Request) {
     spawn_local(async move {
         let ws = match WebSocket::open(WS_URL) {
             Ok(ws) => ws,

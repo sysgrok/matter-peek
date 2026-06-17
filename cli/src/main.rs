@@ -29,6 +29,7 @@ use log::{error, info};
 use rs_matter::crypto::default_crypto;
 use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::error::{Error, ErrorCode};
+use rs_matter::transport::network::mdns::CommissionableFilter;
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::init::InitMaybeUninit;
 use rs_matter::Matter;
@@ -39,7 +40,6 @@ use matter_peek_core::controller::{bind_controller_socket, FabricIdentity};
 use matter_peek_core::{Controller, DiagSet, FabricPolicy, LogIntent};
 
 const DEFAULT_PASSCODE: u32 = 20202021;
-const DEFAULT_PEER_ADDR: &str = "[::1]:5540";
 const DEVICE_NODE_ID: u64 = 112234;
 
 static CTRL_MATTER: StaticCell<Matter> = StaticCell::new();
@@ -55,10 +55,13 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    info!(
-        "matter-peek: passcode={} peer={}",
-        args.passcode, args.peer_addr
-    );
+    match &args.peer_addr {
+        Some(a) => info!("matter-peek: passcode={} peer={a}", args.passcode),
+        None => info!(
+            "matter-peek: passcode={} peer=<discover via mDNS>",
+            args.passcode
+        ),
+    }
 
     match futures_lite::future::block_on(run(args)) {
         Ok(outcome) => {
@@ -77,7 +80,8 @@ fn main() -> ExitCode {
 
 struct Args {
     passcode: u32,
-    peer_addr: SocketAddr,
+    /// `None` → discover the device via mDNS; `Some` → use this explicit address.
+    peer_addr: Option<SocketAddr>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -88,10 +92,15 @@ fn parse_args() -> Result<Args, String> {
             .map_err(|e| format!("passcode must be u32: {e}"))?,
         None => DEFAULT_PASSCODE,
     };
-    let peer_addr_str = iter.next().unwrap_or_else(|| DEFAULT_PEER_ADDR.to_string());
-    let peer_addr = peer_addr_str
-        .parse::<SocketAddr>()
-        .map_err(|e| format!("peer addr must be SocketAddr (e.g. [::1]:5540): {e}"))?;
+    // Second arg: an explicit `[::1]:5540` address, or the literal `discover`
+    // (also the default when omitted) to find the device via mDNS.
+    let peer_addr = match iter.next().as_deref() {
+        None | Some("discover") => None,
+        Some(s) => Some(
+            s.parse::<SocketAddr>()
+                .map_err(|e| format!("peer addr must be SocketAddr or 'discover': {e}"))?,
+        ),
+    };
     Ok(Args {
         passcode,
         peer_addr,
@@ -99,8 +108,6 @@ fn parse_args() -> Result<Args, String> {
 }
 
 async fn run(args: Args) -> Result<matter_peek_core::CommissionOutcome, Error> {
-    let socket = bind_controller_socket()?;
-
     let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
     let matter = CTRL_MATTER.uninit().init_with(Matter::init(
         &TEST_DEV_DET,
@@ -112,9 +119,34 @@ async fn run(args: Args) -> Result<matter_peek_core::CommissionOutcome, Error> {
 
     let controller = Controller::new(matter, &crypto, FabricIdentity::default());
 
-    // The transport pump must stay alive throughout the flow.
+    // Resolve the target address *before* binding the transport socket: discovery
+    // uses its own mDNS path (separate socket / DBus) and doesn't need the Matter
+    // transport pump. Knowing the peer first lets us bind a socket in the peer's
+    // address family (see `bind_controller_socket_for`).
+    let peer_addr = match args.peer_addr {
+        Some(a) => a,
+        None => {
+            info!("=== Discovering a commissionable device via mDNS ===");
+            let found = controller
+                .discover(&CommissionableFilter::default(), None)
+                .await?;
+            match found.address {
+                rs_matter::transport::network::Address::Udp(a) => a,
+                other => {
+                    error!("discovered non-UDP address: {other:?}");
+                    return Err(ErrorCode::NoNetworkInterface.into());
+                }
+            }
+        }
+    };
+    info!("commissioning device at {peer_addr}");
+
+    // Bind the dual-stack transport socket, then run the pump for the rest of
+    // the flow. (rs-matter canonicalizes peer addresses, so one `[::]:0` socket
+    // serves IPv4 and IPv6 peers alike.)
+    let socket = bind_controller_socket()?;
     let transport_fut = matter.run(&crypto, &socket, &socket, NoNetwork);
-    let flow_fut = flow(&controller, &args);
+    let flow_fut = flow(&controller, &args, peer_addr);
 
     let mut transport_fut = pin!(transport_fut);
     let mut flow_fut = pin!(flow_fut);
@@ -133,10 +165,11 @@ async fn run(args: Args) -> Result<matter_peek_core::CommissionOutcome, Error> {
 async fn flow<'a, C: rs_matter::crypto::Crypto>(
     controller: &Controller<'a, C>,
     args: &Args,
+    peer_addr: SocketAddr,
 ) -> Result<matter_peek_core::CommissionOutcome, Error> {
     let outcome = controller
         .commission(
-            args.peer_addr,
+            peer_addr,
             args.passcode,
             DEVICE_NODE_ID,
             FabricPolicy::Ephemeral,

@@ -19,9 +19,10 @@ repository = "https://github.com/sysgrok/matter-peek"
 rust-version = "1.84"
 
 [workspace.dependencies]
-# rs-matter is the Matter stack we wrap. Pinned to the sysgrok `next` fork to
-# match the rest of the workspaces; flip to a local path for co-development.
-rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next", default-features = false, features = ["os", "rustcrypto", "log"] }
+# rs-matter is the Matter stack we wrap. Pinned to the `canonicalize-peer-addr`
+# branch for the peer-address canonicalization + IPv6-preferring mDNS discovery
+# fixes; move back to `next` once that branch is merged into rs-matter main.
+rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "canonicalize-peer-addr", default-features = false, features = ["os", "rustcrypto", "log"] }
 
 log = "0.4"
 env_logger = "0.11"
@@ -42,6 +43,11 @@ async-tungstenite = "0.28"
 async-executor = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink", "async-await"] }
 
-[patch.crates-io]
-# Uncomment for local co-development against the working clones:
+# mDNS discovery (builtin backend only).
+socket2 = { version = "0.5", features = ["all"] }
+nix = { version = "0.30", features = ["net"] }
+
+# For local co-development against the working clone, override the git dep with
+# a path patch (a git-source patch can't target the same source as the base dep):
+# [patch."https://github.com/sysgrok/rs-matter"]
 # rs-matter = { path = "../rs-matter/rs-matter" }

@@ -267,9 +267,53 @@ Chosen contract shape: `ClientMsg{req_id, Request}` → `ServerMsg::{Response,
 Event}`; the first op is `RunVertical{peer_addr, passcode, policy}`. This is the
 artifact the UniFFI mobile surface will mirror.
 
-Still to do in Phase 1: **mDNS discovery** (the big gap — UI/CLI still take an
-explicit peer addr), then `Persistent` policy + local store + tags +
-Identify-blink + re-sync handling.
+**mDNS discovery** is now wired (`core::discovery`): `Controller::discover`
+runs the compiled-in backend concurrently with
+`Transport::browse_commissionable`. Backend is chosen by **cargo feature**
+(`mdns-avahi` default, `mdns-resolve`, `mdns-astro`, `mdns-builtin`) — OS-native
+daemons preferred, `BuiltinMdns` is a fallback (running our own responder on
+:5353 alongside a system daemon is a same-host-test hack, not a deployment
+mode). The CLI takes `discover` (or no addr) to browse instead of an explicit
+address. **Validated**: against the `system_tests` accessory advertising via
+Avahi, `discover` correctly resolves the device + commissionable id over DBus.
+
+Resolved the LAN-PASE issue at its real root, in **rs-matter** (which we
+maintain). Cause: a dual-stack IPv6 socket reports an IPv4 peer's packets to
+`recv_from` as `::ffff:a.b.c.d`, but the same peer is stored on the session as a
+plain `V4` address; `Address` derives `Eq` over the `SocketAddr` *family
+included*, so session lookup (`peer_addr == rx_peer`) failed → "PAKE session not
+found". Fix: rs-matter canonicalizes IPv4-mapped-IPv6 → true IPv4
+(`Address::canonical`, via `IpAddr::to_canonical`) at both the receive boundary
+(UDP/TCP `recv_from`) and session-address storage, so the derived `Eq` matches
+regardless of socket family. matter-peek keeps a single dual-stack `[::]:0`
+socket (no per-family socket, no `::ffff` mapping). Validated: full
+`discover → commission → diagnostics → 5 KB BDX log → RemoveFabric` over the real
+LAN interface against an Avahi-advertising IPv4 `system_tests` accessory.
+
+Also fixed (same rs-matter branch): mDNS discovery now **prefers IPv6, falling
+back to IPv4**, across all four backends. rs-matter already had a central
+`score_ip_address` (link-local → ULA → global IPv6 → IPv4) but the backends
+deposited only one address, so the scorer never saw the alternative. Now: avahi
+resolves both families (INET6+INET) and deposits both; resolve/astro deposit all
+resolved addresses; zeroconf (one address per callback) is handled in the
+transport rendezvous, which keeps the better-scoring address across deposits.
+Validated: discovery now resolves the device's ULA IPv6 (`fdb5:…`) rather than
+IPv4; the canonicalization fix still covers genuinely IPv4-only devices.
+
+(rs-matter changes are on a local `canonicalize-peer-addr` branch — peer-address
+canonicalization + IPv6-preferring discovery; matter-peek patches `rs-matter` to
+the local clone until they land on `next`.)
+
+Discovery is now **surfaced in the web UI**: a `Discover` proto op (with optional
+discriminator filter) → the actor's `discover_all` loops `browse_commissionable`
+with an `exclude` set to enumerate up to N devices → a `Discovered` pick-list. The
+Yew UI shows a "Discover devices" button + discriminator field and renders the
+results with a "Use" button that fills the peer address. Validated end-to-end via
+the `ws_client discover` example: returns both LAN devices, IPv6-preferred (our
+accessory's ULA + the other device's link-local `fe80::`).
+
+Still to do in Phase 1: `Persistent` policy + local store + tags + Identify-blink
++ re-sync handling.
 
 **Phase 2 — Health dashboard + subscriptions.**
 Live diagnostics via subscription report listening; tag-based filtering UI;

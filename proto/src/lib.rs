@@ -55,6 +55,14 @@ pub enum Request {
         passcode: u32,
         policy: FabricPolicy,
     },
+    /// Browse the local network for commissionable devices via mDNS, returning a
+    /// pick-list. Optional `discriminator` narrows to a single device (useful
+    /// when several commissionable devices are present).
+    Discover {
+        discriminator: Option<u16>,
+        /// Stop after this many matches (the UI caps the list).
+        max: u8,
+    },
 }
 
 /// A reply to a [`Request`].
@@ -64,6 +72,8 @@ pub enum Response {
     /// The vertical completed (possibly with per-step soft failures recorded in
     /// the payload — e.g. logs unavailable on a device that has none).
     Vertical(VerticalResult),
+    /// Devices found by a [`Request::Discover`] (possibly empty).
+    Discovered { devices: Vec<DiscoveredDevice> },
     /// The request failed before producing a result.
     Error { message: String },
 }
@@ -117,6 +127,17 @@ pub enum FabricPolicy {
 pub struct DeviceHandle {
     pub fabric_index: u8,
     pub node_id: u64,
+}
+
+/// A commissionable device found on the network (pre-commissioning).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveredDevice {
+    /// Operational address as a string (e.g. `"[fdb5:…]:5540"`), ready to feed
+    /// back into [`Request::RunVertical`].
+    pub addr: String,
+    /// The commissionable instance id from the advertisement (stable per device
+    /// while its commissioning window is open).
+    pub commissionable_id: u64,
 }
 
 /// The full result of a vertical run, as shown in the UI.

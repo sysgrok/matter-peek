@@ -29,6 +29,7 @@ use rs_matter::Matter;
 
 use rs_matter::dm::clusters::decl::operational_credentials::OperationalCredentialsClient as _;
 use rs_matter::transport::exchange::Exchange;
+use rs_matter::transport::network::mdns::CommissionableFilter;
 
 use crate::model::{
     CommissionOutcome, DeviceHandle, DeviceHealth, DiagSet, FabricPolicy, LogIntent,
@@ -206,6 +207,32 @@ impl<'a, C: Crypto> Controller<'a, C> {
         })
     }
 
+    /// Discover the first commissionable device on the local network matching
+    /// `filter` (default = any), via the compiled-in mDNS backend. Returns its
+    /// address, which can be fed straight into [`Self::commission`].
+    ///
+    /// Runs the mDNS backend concurrently with the browse; the transport pump
+    /// need not be running for this (mDNS is a separate socket / DBus path).
+    pub async fn discover(
+        &self,
+        filter: &CommissionableFilter,
+        timeout_ms: Option<u32>,
+    ) -> Result<crate::discovery::DiscoveredDevice, Error> {
+        crate::discovery::discover_commissionable(self.matter, self.crypto, filter, timeout_ms)
+            .await
+    }
+
+    /// Discover up to `max` commissionable devices matching `filter`, for a UI
+    /// pick-list. Returns whatever was found (possibly empty).
+    pub async fn discover_all(
+        &self,
+        filter: &CommissionableFilter,
+        max: u8,
+        timeout_ms: Option<u32>,
+    ) -> Vec<crate::discovery::DiscoveredDevice> {
+        crate::discovery::discover_all(self.matter, self.crypto, filter, max, timeout_ms).await
+    }
+
     /// Read a diagnostic health snapshot from a previously-commissioned device
     /// over a fresh CASE session. `dev` carries the `(fabric_index, node_id)`
     /// returned by [`Self::commission`] — that's all that's needed to re-address
@@ -280,7 +307,14 @@ where
     }
 }
 
-/// Bind an ephemeral UDP socket for the controller transport.
+/// Bind an ephemeral dual-stack IPv6 UDP socket for the controller transport.
+///
+/// A single `[::]:0` socket serves both IPv4 and IPv6 peers: rs-matter
+/// canonicalizes peer addresses (IPv4-mapped IPv6 → IPv4) on both send-storage
+/// and receive, so the session lookup matches regardless of the socket's family
+/// — no per-family socket or `::ffff` mapping needed. (On Windows/BSD, where
+/// IPv6 sockets can be v6-only by default, a future tweak may need to enable
+/// dual-stack explicitly or pick the family per peer.)
 pub fn bind_controller_socket() -> Result<async_io::Async<UdpSocket>, Error> {
     let bind_addr: SocketAddr = "[::]:0".parse().unwrap();
     let socket =

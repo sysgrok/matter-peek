@@ -19,8 +19,10 @@
 
 pub mod controller;
 pub mod diagnostics;
+pub mod discovery;
 pub mod logs;
 pub mod model;
 
 pub use controller::Controller;
+pub use discovery::DiscoveredDevice;
 pub use model::*;

@@ -21,6 +21,7 @@ use log::{error, info};
 use rs_matter::crypto::default_crypto;
 use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::error::ErrorCode;
+use rs_matter::transport::network::mdns::CommissionableFilter;
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::Matter;
 
@@ -65,7 +66,37 @@ async fn service(cmd: &Command) -> proto::Response {
             passcode,
             policy,
         } => run_vertical(cmd, peer_addr, *passcode, *policy).await,
+        proto::Request::Discover { discriminator, max } => run_discover(*discriminator, *max).await,
     }
+}
+
+/// Browse for commissionable devices and return a pick-list. Discovery uses the
+/// mDNS backend's own socket/DBus path (run inside `discover_all`), so it needs
+/// no Matter transport pump.
+async fn run_discover(discriminator: Option<u16>, max: u8) -> proto::Response {
+    let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
+    let matter = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, 0);
+    let controller = Controller::new(&matter, &crypto, FabricIdentity::default());
+
+    let filter = CommissionableFilter {
+        discriminator,
+        ..Default::default()
+    };
+
+    let devices = controller
+        .discover_all(&filter, max.max(1), None)
+        .await
+        .into_iter()
+        .map(|d| proto::DiscoveredDevice {
+            addr: match d.address {
+                rs_matter::transport::network::Address::Udp(a) => a.to_string(),
+                other => format!("{other:?}"),
+            },
+            commissionable_id: d.commissionable_id,
+        })
+        .collect();
+
+    proto::Response::Discovered { devices }
 }
 
 async fn run_vertical(

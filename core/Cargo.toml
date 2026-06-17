@@ -11,6 +11,17 @@ rust-version.workspace = true
 [lib]
 name = "matter_peek_core"
 
+[features]
+# mDNS backend selection. Pick exactly one per build; the platform-appropriate
+# default is set by the binary crate (rpc/cli). OS-native daemons are preferred
+# over `mdns-builtin` (which contends with any system responder on :5353 and is
+# really a fallback / same-host-test option).
+default = ["mdns-avahi"]
+mdns-avahi = ["rs-matter/zbus"]            # Linux + Avahi
+mdns-resolve = ["rs-matter/zbus"]          # Linux + systemd-resolved
+mdns-astro = ["rs-matter/astro-dnssd"]     # macOS / iOS (Bonjour)
+mdns-builtin = ["dep:socket2", "dep:nix"]  # fallback / Windows / same-host tests
+
 [dependencies]
 rs-matter = { workspace = true }
 log = { workspace = true }
@@ -18,3 +29,6 @@ embassy-futures = { workspace = true }
 embassy-time = { workspace = true }
 async-io = { workspace = true }
 rand = { workspace = true }
+# mDNS discovery (builtin backend only): raw multicast socket + interface enum.
+socket2 = { workspace = true, optional = true }
+nix = { workspace = true, optional = true }
