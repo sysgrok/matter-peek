@@ -27,7 +27,15 @@ use rs_matter::onboard::{CommissionOptions, Commissioner};
 use rs_matter::transport::network::Address;
 use rs_matter::Matter;
 
-use crate::model::{CommissionOutcome, DeviceHandle, DeviceHealth, DiagSet, FabricPolicy};
+use rs_matter::dm::clusters::decl::operational_credentials::OperationalCredentialsClient as _;
+use rs_matter::transport::exchange::Exchange;
+
+use crate::model::{
+    CommissionOutcome, DeviceHandle, DeviceHealth, DiagSet, FabricPolicy, LogIntent,
+};
+
+extern crate alloc;
+use alloc::vec::Vec;
 
 const COMMISSION_TIMEOUT_SECS: u64 = 60;
 
@@ -213,6 +221,46 @@ impl<'a, C: Crypto> Controller<'a, C> {
             which,
         )
         .await
+    }
+
+    /// Retrieve a diagnostic log (`intent`) from a commissioned device, returning
+    /// the raw bytes. Handles inline (small) and BDX-pushed (large) delivery; the
+    /// transport pump must be running in a sibling task.
+    pub async fn retrieve_logs(
+        &self,
+        dev: DeviceHandle,
+        intent: LogIntent,
+    ) -> Result<Vec<u8>, Error> {
+        crate::logs::retrieve_logs(
+            self.matter,
+            self.crypto,
+            dev.fabric_index,
+            dev.node_id,
+            intent,
+        )
+        .await
+    }
+
+    /// Remove our fabric from the device (`RemoveFabric`), self-destructing the
+    /// controller's NOC. This is the `Ephemeral` policy's teardown and also the
+    /// orphaned-fabric cleanup primitive.
+    ///
+    /// `dev.fabric_index` is the device-local fabric slot the device assigned to
+    /// us during commissioning (carried on the [`DeviceHandle`]); a controller is
+    /// allowed to pass its own `FabricIndex` to `RemoveFabric`.
+    pub async fn decommission(&self, dev: DeviceHandle) -> Result<(), Error> {
+        let exchange =
+            Exchange::initiate(self.matter, self.crypto, dev.fabric_index, dev.node_id).await?;
+
+        exchange
+            .operational_credentials()
+            .remove_fabric(0, |req| req.fabric_index(dev.fabric_index.get())?.end())
+            .await?
+            .complete()
+            .await?;
+
+        info!("decommissioned: removed fabric index {}", dev.fabric_index);
+        Ok(())
     }
 }
 

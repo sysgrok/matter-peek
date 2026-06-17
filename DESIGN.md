@@ -240,12 +240,19 @@ and are the same on every transport.
 
 ## 8. Phased plan
 
-**Phase 0 — Vertical spike (validate the core primitives).**
+**Phase 0 — Vertical spike (validate the core primitives).** *(✅ done — live-validated against rs-matter's `system_tests` accessory; both inline and multi-block BDX log paths proven)*
 A headless Rust CLI (`cli/`) against a real or simulated device:
-discover → commission (ephemeral) → read `sw_diag` + `gen_diag` → retrieve
-`CrashLogs` over BDX → `RemoveFabric`. Proves every hard primitive end-to-end
-on the dev desktop before any API/UI design hardens. Templates:
-`tests/commissioning.rs`, `tests/diag_logs.rs`.
+commission (ephemeral) → read `sw_diag` + `gen_diag` → retrieve `CrashLogs`
+over BDX → `RemoveFabric`. Proves every hard primitive end-to-end on the dev
+desktop before any API/UI design hardens. Templates: `tests/commissioning.rs`,
+`tests/diag_logs.rs`, `examples/src/bin/system_tests.rs`.
+
+Note on the BDX receive: `retrieve_logs` runs a `Responder` wrapping
+`Bdx::new(DiagLogsBdxHandler::new(&receiver))` *concurrently* with sending the
+`RetrieveLogsRequest`, because the device opens a separate BDX upload exchange
+back to the controller while the request is still in flight. Small logs instead
+ride back inline in the response's `log_content` — both paths are handled.
+(Discovery/mDNS is still stubbed — the CLI takes an explicit peer address.)
 
 **Phase 1 — Core API + RPC + minimal web UI (lock-step).**
 Define `core::model` + `core::api`; expose via `rpc/` (WS/JSON); build a

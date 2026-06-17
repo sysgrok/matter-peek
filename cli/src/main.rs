@@ -14,9 +14,8 @@
 //! matter-peek: ok fabric_index=<u8> device_node_id=0x<hex>
 //! ```
 //!
-//! Roadmap (next spike steps, see DESIGN.md §8 Phase 0): after commissioning,
-//! read `sw_diag` + `gen_diag`, retrieve `CrashLogs` over BDX, then
-//! `RemoveFabric` to self-destruct the ephemeral fabric.
+//! The full Phase 0 vertical: commission (ephemeral) → read `sw_diag` +
+//! `gen_diag` → retrieve `CrashLogs` over BDX → `RemoveFabric` (self-destruct).
 
 use core::pin::pin;
 
@@ -37,7 +36,7 @@ use rs_matter::Matter;
 use static_cell::StaticCell;
 
 use matter_peek_core::controller::{bind_controller_socket, FabricIdentity};
-use matter_peek_core::{Controller, DiagSet, FabricPolicy};
+use matter_peek_core::{Controller, DiagSet, FabricPolicy, LogIntent};
 
 const DEFAULT_PASSCODE: u32 = 20202021;
 const DEFAULT_PEER_ADDR: &str = "[::1]:5540";
@@ -148,8 +147,20 @@ async fn flow<'a, C: rs_matter::crypto::Crypto>(
     let health = controller.read_health(outcome.handle, DiagSet::ALL).await;
     print_health(&health);
 
-    // TODO (next spike step): retrieve CrashLogs over BDX, then RemoveFabric to
-    // self-destruct the ephemeral fabric.
+    info!("=== Retrieving CrashLogs over BDX ===");
+    match controller
+        .retrieve_logs(outcome.handle, LogIntent::CrashLogs)
+        .await
+    {
+        Ok(bytes) => println!("crash_logs: {} bytes", bytes.len()),
+        Err(e) => error!("crash_logs: retrieve failed: {e:?}"),
+    }
+
+    // Ephemeral policy: self-destruct our fabric on the device.
+    info!("=== Decommissioning (RemoveFabric) ===");
+    if let Err(e) = controller.decommission(outcome.handle).await {
+        error!("decommission failed: {e:?}");
+    }
 
     Ok(outcome)
 }
