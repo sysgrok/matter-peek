@@ -64,3 +64,34 @@ pub struct CommissionOutcome {
     pub handle: DeviceHandle,
     pub policy: FabricPolicy,
 }
+
+/// A health snapshot read from a device's diagnostic clusters.
+///
+/// Every field is optional: not all devices implement every cluster/attribute,
+/// and the tool is vendor-agnostic — readers probe and leave a field `None`
+/// when the device doesn't expose it (or the read fails non-fatally).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeviceHealth {
+    pub general: Option<GeneralDiag>,
+    pub software: Option<SoftwareDiag>,
+    // thread / wifi / ethernet land in a later step.
+}
+
+/// Subset of the General Diagnostics cluster (`0x0033`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GeneralDiag {
+    /// Seconds since the device last booted.
+    pub up_time_secs: Option<u64>,
+    /// Number of reboots since first commissioning.
+    pub reboot_count: Option<u16>,
+    /// Cumulative operational hours.
+    pub total_operational_hours: Option<u32>,
+}
+
+/// Subset of the Software Diagnostics cluster (`0x0034`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SoftwareDiag {
+    pub current_heap_free: Option<u64>,
+    pub current_heap_used: Option<u64>,
+    pub current_heap_high_watermark: Option<u64>,
+}

@@ -37,7 +37,7 @@ use rs_matter::Matter;
 use static_cell::StaticCell;
 
 use matter_peek_core::controller::{bind_controller_socket, FabricIdentity};
-use matter_peek_core::{Controller, FabricPolicy};
+use matter_peek_core::{Controller, DiagSet, FabricPolicy};
 
 const DEFAULT_PASSCODE: u32 = 20202021;
 const DEFAULT_PEER_ADDR: &str = "[::1]:5540";
@@ -115,12 +115,7 @@ async fn run(args: Args) -> Result<matter_peek_core::CommissionOutcome, Error> {
 
     // The transport pump must stay alive throughout the flow.
     let transport_fut = matter.run(&crypto, &socket, &socket, NoNetwork);
-    let flow_fut = controller.commission(
-        args.peer_addr,
-        args.passcode,
-        DEVICE_NODE_ID,
-        FabricPolicy::Ephemeral,
-    );
+    let flow_fut = flow(&controller, &args);
 
     let mut transport_fut = pin!(transport_fut);
     let mut flow_fut = pin!(flow_fut);
@@ -131,5 +126,49 @@ async fn run(args: Args) -> Result<matter_peek_core::CommissionOutcome, Error> {
             Err(ErrorCode::NoExchange.into())
         }
         Either::Second(result) => result,
+    }
+}
+
+/// The spike flow: commission (ephemeral), then read a diagnostic health
+/// snapshot over the freshly-established CASE session.
+async fn flow<'a, C: rs_matter::crypto::Crypto>(
+    controller: &Controller<'a, C>,
+    args: &Args,
+) -> Result<matter_peek_core::CommissionOutcome, Error> {
+    let outcome = controller
+        .commission(
+            args.peer_addr,
+            args.passcode,
+            DEVICE_NODE_ID,
+            FabricPolicy::Ephemeral,
+        )
+        .await?;
+
+    info!("=== Reading diagnostic health snapshot ===");
+    let health = controller.read_health(outcome.handle, DiagSet::ALL).await;
+    print_health(&health);
+
+    // TODO (next spike step): retrieve CrashLogs over BDX, then RemoveFabric to
+    // self-destruct the ephemeral fabric.
+
+    Ok(outcome)
+}
+
+fn print_health(health: &matter_peek_core::DeviceHealth) {
+    if let Some(g) = &health.general {
+        println!(
+            "general: up_time_secs={:?} reboot_count={:?} total_operational_hours={:?}",
+            g.up_time_secs, g.reboot_count, g.total_operational_hours
+        );
+    } else {
+        println!("general: <not read>");
+    }
+    if let Some(s) = &health.software {
+        println!(
+            "software: heap_free={:?} heap_used={:?} heap_high_watermark={:?}",
+            s.current_heap_free, s.current_heap_used, s.current_heap_high_watermark
+        );
+    } else {
+        println!("software: <not read>");
     }
 }

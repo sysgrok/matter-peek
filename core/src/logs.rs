@@ -14,5 +14,13 @@
 //!
 //! The receiver is the seam for the (future) consent-gated cloud upload: instead
 //! of buffering to memory it can stream straight to an HTTPS sink.
+//!
+//! Templates in rs-matter:
+//! - `tests/diag_logs.rs` — the **client receiver** end (our side): a
+//!   `DiagLogsReceiver` collecting a pushed log via `DiagLogsBdxHandler`.
+//! - `examples/src/bin/system_tests.rs` — the device/server end (serves logs via
+//!   `DiagLogsHandler` + a `DiagLogs` provider, `IntentEnum` -> file) *and* a
+//!   controller-side BDX download initiator (`BdxDownloadInitiator`,
+//!   `download_image`) showing the `BdxBuffer`/`PooledBuffers` wiring we reuse.
 
 // Intentionally empty for Phase 0 — see module docs for the Phase 1 plan.

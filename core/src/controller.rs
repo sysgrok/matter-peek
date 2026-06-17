@@ -27,7 +27,7 @@ use rs_matter::onboard::{CommissionOptions, Commissioner};
 use rs_matter::transport::network::Address;
 use rs_matter::Matter;
 
-use crate::model::{CommissionOutcome, DeviceHandle, FabricPolicy};
+use crate::model::{CommissionOutcome, DeviceHandle, DeviceHealth, DiagSet, FabricPolicy};
 
 const COMMISSION_TIMEOUT_SECS: u64 = 60;
 
@@ -196,6 +196,23 @@ impl<'a, C: Crypto> Controller<'a, C> {
             },
             policy,
         })
+    }
+
+    /// Read a diagnostic health snapshot from a previously-commissioned device
+    /// over a fresh CASE session. `dev` carries the `(fabric_index, node_id)`
+    /// returned by [`Self::commission`] — that's all that's needed to re-address
+    /// the device on our fabric.
+    pub async fn read_health(&self, dev: DeviceHandle, which: DiagSet) -> DeviceHealth {
+        // `self.crypto: &C` is `Copy` and impls `Crypto` (blanket `impl Crypto
+        // for &T`), so each per-attribute exchange gets its own crypto handle.
+        crate::diagnostics::read_health(
+            self.matter,
+            self.crypto,
+            dev.fabric_index,
+            dev.node_id,
+            which,
+        )
+        .await
     }
 }
 
