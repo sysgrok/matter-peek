@@ -4,12 +4,19 @@
 //! server (`matter-peek-rpc`) and the UIs (the Yew/Wasm web client now; the
 //! mobile UniFFI surface will mirror these shapes later). This crate is the
 //! single source of truth for the boundary — it deliberately depends on nothing
-//! but `serde`, so it compiles to both native and `wasm32`.
+//! but `serde`, so it compiles to native, `wasm32`, **and embedded** (it is
+//! `no_std` + `alloc`, so a future esp32 on-device adapter shares it).
 //!
 //! Envelope: the client sends [`Request`] frames tagged with a `req_id`; the
 //! server answers with [`Response`] frames carrying the same `req_id`, and emits
 //! unsolicited [`Event`] frames (progress, async results) in between. Every frame
 //! on the socket is one [`ServerMsg`] or [`ClientMsg`].
+
+#![no_std]
+
+extern crate alloc;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 

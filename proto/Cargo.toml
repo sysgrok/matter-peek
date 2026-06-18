@@ -9,7 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# `std` (re-enabled here; the workspace dep is default-features=false) is needed
-# for serde's internally-tagged enum deserialization (`#[serde(tag = ...)]`).
-# `std` is fine for the web/wasm target too.
-serde = { workspace = true, features = ["derive", "std"] }
+# `no_std` + `alloc`: serde's `alloc` feature covers internally-tagged enum
+# deserialization (`#[serde(tag = ...)]`) and `String`/`Vec` without `std`, so
+# this contract compiles for native, wasm32, and embedded alike.
+serde = { workspace = true, features = ["derive", "alloc"] }

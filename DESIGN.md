@@ -224,6 +224,30 @@ What this required (and the rules that keep it true):
   the crypto backend (esp provides a `getrandom` source) and an esp-native mDNS
   backend or `BuiltinMdns`.
 
+`proto` is likewise **`no_std` + `alloc`** (verified on the same bare-metal
+target) — it's the wire contract shared by *every* adapter (desktop WS, Wasm web
+client, future esp), so it must be portable.
+
+### Transport adapters: desktop now, embedded later (not by no_std-ifying `rpc`)
+
+The current `rpc` crate is the **desktop/hosted** adapter — a WS server on
+`async-tungstenite`/`async-net`/`async-executor` (all `std`). It is *intended*
+to be `std`; making it `no_std` is the wrong move, because an on-device esp build
+needs a **different** stack (`edge-http` + `edge-ws` over `edge-nal`/esp-hal,
+`mbedtls` for TLS), not no_std versions of tungstenite.
+
+So the embedded story is a *sibling adapter*, not a port:
+- `rpc` (now) — desktop WS server, `std`. Unchanged.
+- `rpc-embedded` (future, when esp32s3 is real) — `no_std` adapter over
+  `edge-http`/`edge-ws`. Both are thin translators between WS/HTTP frames and
+  `core::Controller` + `proto`.
+- To avoid duplicating the shared logic (the actor: command dispatch, the
+  `Discover`/`RunVertical` handlers, proto↔core conversions), that logic should
+  later be factored into a `no_std` `rpc-core` consumed by both shells. The
+  current `actor.rs` is already mostly `core` calls + `proto` — only socket-bind
+  and the WS server are `std` — so the split is cheap when needed. **Deferred
+  until esp hardware exists to validate against.**
+
 ---
 
 ## 7. The core API (sketch — drives both transports)
