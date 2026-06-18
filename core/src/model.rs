@@ -6,6 +6,8 @@
 
 use core::num::NonZeroU8;
 
+extern crate alloc;
+
 /// How long the controller's fabric (NOC) lives on the device.
 ///
 /// Both models share the same commission / read / fetch primitives; only the
@@ -63,6 +65,25 @@ pub struct DeviceHandle {
 pub struct CommissionOutcome {
     pub handle: DeviceHandle,
     pub policy: FabricPolicy,
+}
+
+/// A persistently-commissioned device, as held in the local store.
+///
+/// Identity (`unique_id`/`serial_number`) is read from BasicInformation at
+/// commission time and is what lets us re-match a device after a factory reset
+/// (its NodeID changes, but its serial/unique-id don't). `tags` are local-only
+/// labels for filtering/grouping in the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredDevice {
+    pub handle: DeviceHandle,
+    /// BasicInformation `UniqueID` (stable across resets), if read.
+    pub unique_id: alloc::string::String,
+    /// BasicInformation `SerialNumber`, if read.
+    pub serial_number: alloc::string::String,
+    /// BasicInformation `NodeLabel` (user-set name from the primary ecosystem).
+    pub node_label: alloc::string::String,
+    /// Local user tags for filtering/grouping.
+    pub tags: alloc::vec::Vec<alloc::string::String>,
 }
 
 /// A health snapshot read from a device's diagnostic clusters.

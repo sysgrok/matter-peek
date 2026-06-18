@@ -25,6 +25,10 @@ mdns-builtin = ["dep:socket2", "dep:nix"]  # fallback / Windows / same-host test
 [dependencies]
 rs-matter = { workspace = true }
 log = { workspace = true }
+# Local store serialization (our own device/tag blob; rs-matter's TLV is
+# `no_std`/heapless-only and doesn't cover std String/Vec).
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true }
 embassy-futures = { workspace = true }
 embassy-time = { workspace = true }
 async-io = { workspace = true }

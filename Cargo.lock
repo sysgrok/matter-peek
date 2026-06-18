@@ -1237,6 +1237,8 @@ dependencies = [
  "nix",
  "rand",
  "rs-matter",
+ "serde",
+ "serde_json",
  "socket2",
 ]
 

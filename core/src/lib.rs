@@ -22,7 +22,9 @@ pub mod diagnostics;
 pub mod discovery;
 pub mod logs;
 pub mod model;
+pub mod persist;
 
 pub use controller::Controller;
 pub use discovery::DiscoveredDevice;
 pub use model::*;
+pub use persist::ControllerStore;
