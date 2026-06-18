@@ -27,6 +27,7 @@ use rs_matter::onboard::{CommissionOptions, Commissioner};
 use rs_matter::transport::network::Address;
 use rs_matter::Matter;
 
+use rs_matter::dm::clusters::decl::identify::IdentifyClient as _;
 use rs_matter::dm::clusters::decl::operational_credentials::OperationalCredentialsClient as _;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::network::mdns::CommissionableFilter;
@@ -287,6 +288,31 @@ impl<'a, C: Crypto> Controller<'a, C> {
             .await?;
 
         info!("decommissioned: removed fabric index {}", dev.fabric_index);
+        Ok(())
+    }
+
+    /// Ask the device to physically identify itself (blink LED / beep) for
+    /// `secs` seconds, via the Identify cluster (`0x0003`) on `endpoint`.
+    ///
+    /// Lets a technician locate which physical unit a UI entry corresponds to —
+    /// the standard Matter "which one is this?" affordance. `endpoint` is the
+    /// application endpoint hosting Identify (commonly `1`); pass `0` to target
+    /// the root node if the device puts Identify there.
+    pub async fn identify(&self, dev: DeviceHandle, endpoint: u16, secs: u16) -> Result<(), Error> {
+        let exchange =
+            Exchange::initiate(self.matter, self.crypto, dev.fabric_index, dev.node_id).await?;
+
+        // `identify` is a DefaultSuccess command — it returns `()` and drains the
+        // response internally (no handle to `.complete()`).
+        exchange
+            .identify()
+            .identify(endpoint, |req| req.identify_time(secs)?.end())
+            .await?;
+
+        info!(
+            "identify: device 0x{:016x} ep{endpoint} for {secs}s",
+            dev.node_id
+        );
         Ok(())
     }
 }

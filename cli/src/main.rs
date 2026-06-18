@@ -189,6 +189,14 @@ async fn flow<'a, C: rs_matter::crypto::Crypto>(
         Err(e) => error!("crash_logs: retrieve failed: {e:?}"),
     }
 
+    // Exercise the Identify primitive (blink the device for 3s). Soft-fail: not
+    // every device hosts Identify on the same endpoint.
+    info!("=== Identify (blink) ===");
+    match controller.identify(outcome.handle, 1, 3).await {
+        Ok(()) => println!("identify: ok (ep1, 3s)"),
+        Err(e) => error!("identify: failed: {e:?}"),
+    }
+
     // Ephemeral policy: self-destruct our fabric on the device.
     info!("=== Decommissioning (RemoveFabric) ===");
     if let Err(e) = controller.decommission(outcome.handle).await {
