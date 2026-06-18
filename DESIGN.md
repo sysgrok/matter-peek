@@ -200,6 +200,30 @@ matter-peek/                         (cargo workspace)
 - `rs-matter` is consumed by `core` only. UI layers never see `rs-matter`
   types — they see `core::model` DTOs.
 
+### `core` is `no_std` + `alloc`
+
+`matter-peek-core` carries no `std` dependency, so it can run on embedded
+targets (a future esp32-with-PSRAM could host matter-peek + a web UI) as well as
+desktop/mobile. Verified by cross-compiling `core --no-default-features` for
+`riscv32imac-unknown-none-elf` (bare metal).
+
+What this required (and the rules that keep it true):
+- `#![no_std]` + `extern crate alloc`; addresses use `core::net`, collections
+  `alloc`.
+- `core` depends on `rs-matter` with `default-features = false` (rs-matter's
+  `os` feature ⇒ `std`); the hosted path is re-enabled only via `core`'s **`std`
+  feature**, which every desktop mDNS backend (`mdns-avahi`/`-resolve`/`-astro`)
+  and the `mdns-builtin` socket backend pull in. An embedded build leaves `std`
+  off and brings its own backend.
+- **`core` never creates sockets or opens files**: the transport socket is built
+  by the binary (`bind_controller_socket` lives in `cli`/`rpc`), and the KV
+  backend is injected — `ControllerStore<S>` is generic over rs-matter's
+  `no_std` `KvBlobStore` trait (`DirKvBlobStore` on desktop; NVS/flash on
+  embedded).
+- Remaining embedded-integration work (not a `core` concern): platform RNG for
+  the crypto backend (esp provides a `getrandom` source) and an esp-native mDNS
+  backend or `BuiltinMdns`.
+
 ---
 
 ## 7. The core API (sketch — drives both transports)

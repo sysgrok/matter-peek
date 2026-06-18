@@ -12,7 +12,10 @@
 //! self-referential `Matter<'a>` lifetimes contained in one async scope. (A
 //! persistent-fabric mode later will keep one stack alive deliberately.)
 
+use core::net::SocketAddr;
 use core::pin::pin;
+
+use std::net::UdpSocket;
 
 use embassy_futures::select::{select, Either};
 
@@ -20,12 +23,12 @@ use log::{error, info};
 
 use rs_matter::crypto::default_crypto;
 use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
-use rs_matter::error::ErrorCode;
+use rs_matter::error::{Error, ErrorCode};
 use rs_matter::transport::network::mdns::CommissionableFilter;
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::Matter;
 
-use matter_peek_core::controller::{bind_controller_socket, FabricIdentity};
+use matter_peek_core::controller::FabricIdentity;
 use matter_peek_core::{Controller, DiagSet, LogIntent};
 
 use matter_peek_proto as proto;
@@ -247,7 +250,19 @@ fn failed(e: &rs_matter::error::Error) -> proto::StepStatus {
     }
 }
 
-// Keep `ErrorCode` import meaningful even if the transport branch's message
-// changes — referenced in the prematurely-exited path's intent.
-#[allow(unused_imports)]
-use ErrorCode as _;
+/// Bind an ephemeral dual-stack IPv6 UDP socket for the controller transport.
+///
+/// Socket creation is the binary's job (so `matter-peek-core` stays `no_std`).
+/// A single `[::]:0` socket serves both IPv4 and IPv6 peers — rs-matter
+/// canonicalizes IPv4-mapped-IPv6 peer addresses so session lookup matches
+/// regardless of the socket's family.
+fn bind_controller_socket() -> Result<async_io::Async<UdpSocket>, Error> {
+    let bind_addr: SocketAddr = "[::]:0".parse().unwrap();
+    let socket =
+        async_io::Async::<UdpSocket>::bind(bind_addr).map_err(|_| ErrorCode::NoNetworkInterface)?;
+    info!(
+        "controller bound on {}",
+        socket.get_ref().local_addr().unwrap()
+    );
+    Ok(socket)
+}

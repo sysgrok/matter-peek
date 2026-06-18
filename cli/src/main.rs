@@ -19,7 +19,7 @@
 
 use core::pin::pin;
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
 use std::process::ExitCode;
 
 use embassy_futures::select::{select, Either};
@@ -36,7 +36,7 @@ use rs_matter::Matter;
 
 use static_cell::StaticCell;
 
-use matter_peek_core::controller::{bind_controller_socket, FabricIdentity};
+use matter_peek_core::controller::FabricIdentity;
 use matter_peek_core::{Controller, DiagSet, FabricPolicy, LogIntent};
 
 const DEFAULT_PASSCODE: u32 = 20202021;
@@ -204,6 +204,25 @@ async fn flow<'a, C: rs_matter::crypto::Crypto>(
     }
 
     Ok(outcome)
+}
+
+/// Bind an ephemeral dual-stack IPv6 UDP socket for the controller transport.
+///
+/// Socket creation is the binary's job (so `matter-peek-core` stays `no_std`):
+/// a single `[::]:0` socket serves both IPv4 and IPv6 peers — rs-matter
+/// canonicalizes IPv4-mapped-IPv6 peer addresses on send-storage and receive, so
+/// session lookup matches regardless of the socket's family. (On Windows/BSD an
+/// IPv6 socket can be v6-only by default — a future tweak may need to enable
+/// dual-stack explicitly there.)
+fn bind_controller_socket() -> Result<async_io::Async<UdpSocket>, Error> {
+    let bind_addr: SocketAddr = "[::]:0".parse().unwrap();
+    let socket =
+        async_io::Async::<UdpSocket>::bind(bind_addr).map_err(|_| ErrorCode::NoNetworkInterface)?;
+    info!(
+        "controller bound on {}",
+        socket.get_ref().local_addr().unwrap()
+    );
+    Ok(socket)
 }
 
 fn print_health(health: &matter_peek_core::DeviceHealth) {

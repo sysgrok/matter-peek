@@ -24,6 +24,9 @@
 //! Exactly one backend feature should be enabled per build; the binary crate
 //! (`rpc`/`cli`) picks the platform-appropriate one.
 
+extern crate alloc;
+use alloc::vec::Vec;
+
 use embassy_futures::select::{select, Either};
 
 use log::info;
@@ -160,19 +163,18 @@ async fn run_backend<C: Crypto>(matter: &Matter<'_>, crypto: C) -> Result<(), Er
     builtin::run(matter, crypto).await
 }
 
-/// A small reminder if the feature set is misconfigured: with no backend
-/// feature, discovery cannot work.
+/// Fallback when no mDNS backend feature is enabled: discovery is unavailable
+/// (returns an error at runtime). The crate still *compiles* without a backend —
+/// important for `no_std` capability checks and for embedded targets that bring
+/// their own backend feature. A real build should enable exactly one of
+/// `mdns-avahi` / `mdns-astro` / `mdns-builtin`.
 #[cfg(not(any(
     feature = "mdns-avahi",
     feature = "mdns-astro",
     feature = "mdns-builtin"
 )))]
 async fn run_backend<C: Crypto>(_matter: &Matter<'_>, _crypto: C) -> Result<(), Error> {
-    compile_error!(
-        "matter-peek-core: enable exactly one mDNS backend feature \
-         (mdns-avahi / mdns-astro / mdns-builtin)"
-    );
-    #[allow(unreachable_code)]
+    log::error!("discovery: no mDNS backend feature enabled");
     Err(ErrorCode::NoNetworkInterface.into())
 }
 

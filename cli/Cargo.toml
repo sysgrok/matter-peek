@@ -23,6 +23,7 @@ embassy-time = { workspace = true }
 # against (`__embassy_time_queue_item_from_waker`). The binary that runs the
 # executor must select a queue size.
 embassy-time-queue-utils = { workspace = true }
+async-io = { workspace = true }
 futures-lite = { workspace = true }
 rand = { workspace = true }
 static_cell = { workspace = true }

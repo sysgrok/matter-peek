@@ -12,9 +12,10 @@
 //!   single TLV blob under a vendor-reserved key. At 50–200 devices, load-all /
 //!   filter-in-memory is trivial and avoids a database entirely.
 //!
-//! Desktop-only for now (`DirKvBlobStore` is `std`; the rest of `core` already
-//! uses `std`); the abstraction is `no_std`-friendly so it can graduate into
-//! rs-matter later.
+//! **`no_std`-clean**: generic over rs-matter's `KvBlobStore` trait — the
+//! concrete backend (`DirKvBlobStore` on desktop; NVS/flash on embedded) is
+//! injected by the binary, never baked into `core`. So the store layer is
+//! portable to esp32 etc., and is a candidate to graduate into rs-matter later.
 
 extern crate alloc;
 use alloc::string::String;
@@ -24,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::fabric::FabricPersist;
-use rs_matter::persist::{DirKvBlobStore, KvBlobStoreAccess, SharedKvBlobStore, VENDOR_KEYS_START};
+use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess, SharedKvBlobStore, VENDOR_KEYS_START};
 
 use crate::model::{DeviceHandle, StoredDevice};
 
@@ -35,26 +36,24 @@ const KV_BUF_LEN: usize = 4096;
 /// collides with rs-matter's own keys (fabrics, basic-info, …).
 const DEVICES_KEY: u16 = VENDOR_KEYS_START;
 
-/// The concrete shared KV store type backing the controller's persistence.
-type Kv = SharedKvBlobStore<DirKvBlobStore, [u8; KV_BUF_LEN]>;
-
-/// Owns the on-disk KV store and exposes the controller's persistence
-/// operations: load/save our fabric (via rs-matter) and our device records.
-pub struct ControllerStore {
-    kv: Kv,
+/// Owns a shared KV store and exposes the controller's persistence operations:
+/// load/save our fabric (via rs-matter) and our device records. Generic over the
+/// `KvBlobStore` backend `S` (injected by the binary).
+pub struct ControllerStore<S> {
+    kv: SharedKvBlobStore<S, [u8; KV_BUF_LEN]>,
 }
 
-impl ControllerStore {
-    /// Open the default on-disk store (`<tmp-dir>/rs-matter`).
-    pub fn new_default() -> Self {
+impl<S: KvBlobStore> ControllerStore<S> {
+    /// Wrap a concrete `KvBlobStore` backend (e.g. `DirKvBlobStore` on desktop).
+    pub const fn new(store: S) -> Self {
         Self {
-            kv: SharedKvBlobStore::new(DirKvBlobStore::new_default(), [0u8; KV_BUF_LEN]),
+            kv: SharedKvBlobStore::new(store, [0u8; KV_BUF_LEN]),
         }
     }
 
     /// The shared KV, for `Matter::load_persist` (load our persisted fabric on
     /// startup) and any other rs-matter persistence.
-    pub fn kv(&self) -> &Kv {
+    pub fn kv(&self) -> &SharedKvBlobStore<S, [u8; KV_BUF_LEN]> {
         &self.kv
     }
 

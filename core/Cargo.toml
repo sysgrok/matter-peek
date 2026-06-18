@@ -12,27 +12,36 @@ rust-version.workspace = true
 name = "matter_peek_core"
 
 [features]
-# mDNS backend selection. Pick exactly one per build; the platform-appropriate
-# default is set by the binary crate (rpc/cli). OS-native daemons are preferred
-# over `mdns-builtin` (which contends with any system responder on :5353 and is
-# really a fallback / same-host-test option).
+# Default is the hosted/desktop build (Avahi backend → `std`). An embedded
+# target builds with `--no-default-features` and selects an embedded-appropriate
+# backend (BuiltinMdns, or a future esp one) + `rs-matter`'s no-os crypto/rng.
 default = ["mdns-avahi"]
-mdns-avahi = ["rs-matter/zbus"]            # Linux + Avahi
-mdns-resolve = ["rs-matter/zbus"]          # Linux + systemd-resolved
-mdns-astro = ["rs-matter/astro-dnssd"]     # macOS / iOS (Bonjour)
-mdns-builtin = ["dep:socket2", "dep:nix"]  # fallback / Windows / same-host tests
+
+# `std`: enable rs-matter's hosted (`os`) path. Pulled in by every std mDNS
+# backend below; an embedded build leaves it off so `core` stays `no_std`.
+std = ["rs-matter/os"]
+
+# mDNS backend selection. Pick exactly one. OS-native daemons (preferred) need
+# `std`; `mdns-builtin` is a same-host-test/fallback responder (also `std`).
+mdns-avahi = ["std", "rs-matter/zbus"]                                # Linux + Avahi
+mdns-resolve = ["std", "rs-matter/zbus"]                              # Linux + systemd-resolved
+mdns-astro = ["std", "rs-matter/astro-dnssd"]                         # macOS / iOS (Bonjour)
+mdns-builtin = ["std", "dep:socket2", "dep:nix", "dep:async-io"]     # fallback / Windows / same-host tests
 
 [dependencies]
-rs-matter = { workspace = true }
+# `core` is `no_std` + `alloc` (portable to esp32 etc.). It depends on rs-matter
+# with NO default features (rs-matter's `os` ⇒ `std`); the hosted `os` path is
+# re-enabled only via this crate's `std` feature. mDNS backends and raw sockets
+# are likewise feature-gated.
+rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "canonicalize-peer-addr", default-features = false, features = ["alloc", "rustcrypto", "log"] }
 log = { workspace = true }
 # Local store serialization (our own device/tag blob; rs-matter's TLV is
-# `no_std`/heapless-only and doesn't cover std String/Vec).
-serde = { workspace = true, features = ["derive", "std"] }
-serde_json = { workspace = true }
+# `no_std`/heapless-only and doesn't cover std String/Vec). `alloc`, not `std`.
+serde = { workspace = true, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
 embassy-futures = { workspace = true }
-embassy-time = { workspace = true }
-async-io = { workspace = true }
-rand = { workspace = true }
-# mDNS discovery (builtin backend only): raw multicast socket + interface enum.
+embassy-time = { version = "0.5", default-features = false }
+# mDNS builtin backend only (std): raw multicast socket + interface enum + async-io.
+async-io = { workspace = true, optional = true }
 socket2 = { workspace = true, optional = true }
 nix = { workspace = true, optional = true }

@@ -1,5 +1,11 @@
 //! matter-peek-core — a vendor-agnostic Matter diagnostic controller.
 //!
+//! **`no_std` + `alloc`.** The core carries no `std` dependency so it can run on
+//! embedded targets (e.g. esp32 with PSRAM) as well as desktop/mobile; only the
+//! optional `mdns-builtin` backend pulls in `std` (raw sockets) and is
+//! feature-gated. Socket creation and the concrete KV backend are injected by
+//! the binary, never created in `core`.
+//!
 //! This crate wraps [`rs_matter`]'s controller-side primitives
 //! ([`Commissioner`](rs_matter::onboard::Commissioner), the IM client, and the
 //! Diagnostic Logs / BDX receiver) behind a small, UI-facing API. The same API
@@ -16,6 +22,10 @@
 //! against an externally-running Matter accessory. `diagnostics` and `logs`
 //! carry the intended signatures over the real `rs-matter` APIs and are filled
 //! in next.
+
+#![no_std]
+
+extern crate alloc;
 
 pub mod controller;
 pub mod diagnostics;

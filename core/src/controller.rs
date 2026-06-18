@@ -7,10 +7,9 @@
 //! and `retrieve_logs` are stubbed against the real rs-matter APIs and filled
 //! in next.
 
+use core::net::SocketAddr;
 use core::num::NonZeroU8;
 use core::pin::pin;
-
-use std::net::{SocketAddr, UdpSocket};
 
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Timer};
@@ -331,25 +330,6 @@ where
             Err(ErrorCode::RxTimeout.into())
         }
     }
-}
-
-/// Bind an ephemeral dual-stack IPv6 UDP socket for the controller transport.
-///
-/// A single `[::]:0` socket serves both IPv4 and IPv6 peers: rs-matter
-/// canonicalizes peer addresses (IPv4-mapped IPv6 → IPv4) on both send-storage
-/// and receive, so the session lookup matches regardless of the socket's family
-/// — no per-family socket or `::ffff` mapping needed. (On Windows/BSD, where
-/// IPv6 sockets can be v6-only by default, a future tweak may need to enable
-/// dual-stack explicitly or pick the family per peer.)
-pub fn bind_controller_socket() -> Result<async_io::Async<UdpSocket>, Error> {
-    let bind_addr: SocketAddr = "[::]:0".parse().unwrap();
-    let socket =
-        async_io::Async::<UdpSocket>::bind(bind_addr).map_err(|_| ErrorCode::NoNetworkInterface)?;
-    info!(
-        "controller bound on {}",
-        socket.get_ref().local_addr().unwrap()
-    );
-    Ok(socket)
 }
 
 // Re-export so callers don't reach into rs-matter for the obvious scalar type.
