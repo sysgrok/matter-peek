@@ -18,10 +18,8 @@ use log::{error, info};
 
 use rs_matter::cert::gen::VALID_FOREVER;
 use rs_matter::cert::{MAX_CERT_TLV_AND_ASN1_LEN, MAX_CERT_TLV_LEN};
-use rs_matter::crypto::{Crypto, RngCore as _, SecretKey as _, SigningSecretKey as _};
+use rs_matter::crypto::Crypto;
 use rs_matter::error::{Error, ErrorCode};
-use rs_matter::onboard::cac::{IcacGenerator, RcacGenerator};
-use rs_matter::onboard::noc::NocGenerator;
 use rs_matter::onboard::{CommissionOptions, Commissioner};
 use rs_matter::transport::network::Address;
 use rs_matter::Matter;
@@ -70,30 +68,29 @@ impl Default for FabricIdentity {
 pub struct Controller<'a, C: Crypto> {
     matter: &'a Matter<'a>,
     crypto: &'a C,
-    identity: FabricIdentity,
 }
 
 impl<'a, C: Crypto> Controller<'a, C> {
-    pub const fn new(matter: &'a Matter<'a>, crypto: &'a C, identity: FabricIdentity) -> Self {
-        Self {
-            matter,
-            crypto,
-            identity,
-        }
+    pub const fn new(matter: &'a Matter<'a>, crypto: &'a C) -> Self {
+        Self { matter, crypto }
     }
 
     /// Commission the device at `peer_addr` using `passcode`, assigning it
-    /// `device_node_id` on our fabric.
+    /// `device_node_id` on the controller fabric `controller_fab_idx`, signing
+    /// the device NOC with `ca`.
     ///
-    /// Installs a fresh offline RCAC→ICAC→NOC chain, adds the fabric to the
-    /// stack, then drives [`Commissioner::commission`] (phase 1, over PASE) and
+    /// The controller fabric + CA must already exist (via
+    /// [`ControllerCa::bootstrap`](crate::ca::ControllerCa::bootstrap), once, for
+    /// either an ephemeral throwaway fabric or a persistent one). This drives
+    /// [`Commissioner::commission`] (phase 1, over PASE) and
     /// [`Commissioner::complete_via_case`] (phase 2, over CASE).
     ///
     /// `policy` is recorded on the outcome; `Ephemeral` self-destruct
-    /// (`RemoveFabric`) is performed by the caller after the work is done (or by
-    /// a future `decommission`).
+    /// (`RemoveFabric`) is performed by the caller after the work is done.
     pub async fn commission(
         &self,
+        ca: &crate::ca::ControllerCa,
+        controller_fab_idx: NonZeroU8,
         peer_addr: SocketAddr,
         passcode: u32,
         device_node_id: u64,
@@ -101,62 +98,13 @@ impl<'a, C: Crypto> Controller<'a, C> {
     ) -> Result<CommissionOutcome, Error> {
         let crypto = self.crypto;
         let matter = self.matter;
-        let id = self.identity;
 
         info!("=== Commissioner::commission (phase 1 — PASE) ===");
 
-        // Offline CA chain: RCAC then ICAC; RCAC priv key discarded immediately.
-        let mut rcac_buf = [0u8; MAX_CERT_TLV_AND_ASN1_LEN];
-        let mut rcac_gen = RcacGenerator::new(&mut rcac_buf);
-        let (rcac_priv, rcac) = rcac_gen.generate(crypto, id.fabric_id, VALID_FOREVER)?;
-
-        let mut icac_buf = [0u8; MAX_CERT_TLV_AND_ASN1_LEN];
-        let mut icac_gen = IcacGenerator::new(&mut icac_buf);
-        let (icac_priv, icac) =
-            icac_gen.generate(crypto, rcac_priv.reference(), rcac, VALID_FOREVER)?;
-        drop(rcac_priv);
-
-        // Controller operational keypair + CSR + canonicalized secret.
-        let controller_secret_key = crypto.generate_secret_key()?;
-        let mut controller_csr_buf = [0u8; 256];
-        let controller_csr = controller_secret_key.csr(&mut controller_csr_buf)?;
-        let mut controller_secret_key_canon = rs_matter::crypto::CanonPkcSecretKey::new();
-        controller_secret_key.write_canon(&mut controller_secret_key_canon)?;
-
-        // NocGenerator signs the controller NOC now, the device NOC during
-        // commissioning. Serial is derived from the NodeID internally.
+        // NocGenerator backed by the controller CA — signs the *device* NOC
+        // during commissioning. Serial is derived from the NodeID internally.
         let mut noc_buf = [0u8; MAX_CERT_TLV_AND_ASN1_LEN];
-        let mut noc_generator =
-            NocGenerator::create(icac_priv.reference(), rcac, icac, &mut noc_buf)?;
-
-        let controller_noc = noc_generator.generate(
-            crypto,
-            controller_csr,
-            id.controller_node_id,
-            &[],
-            VALID_FOREVER,
-        )?;
-
-        // Fabric IPK: 16 random bytes, shared across the fabric.
-        let mut ipk = rs_matter::crypto::CanonAeadKey::new();
-        crypto.rand()?.fill_bytes(ipk.access_mut());
-
-        // Install the fabric in `matter.state.fabrics`.
-        let controller_fab_idx = matter.with_state(|state| {
-            state
-                .fabrics
-                .add(
-                    crypto,
-                    controller_secret_key_canon.reference(),
-                    rcac,
-                    controller_noc,
-                    icac,
-                    Some(ipk.reference()),
-                    id.admin_vendor_id,
-                    id.controller_node_id,
-                )
-                .map(|f| f.fab_idx())
-        })?;
+        let mut noc_generator = ca.noc_generator(&mut noc_buf)?;
 
         // Scratch buffer for the Commissioner (stages RCAC/ICAC across the
         // async on-wire calls). See `Commissioner::new` for the size rule.

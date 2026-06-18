@@ -32,11 +32,28 @@ Two sub-problems:
    transport pump runs continuously alongside). This is a variant of the actor
    we have — one persistent task instead of per-command scopes.
 
-2. **Controller identity persistence — mostly free.** Research finding: a
-   controller fabric is just a `Fabric`, and rs-matter already persists fabrics
-   through `KvBlobStore` via `Matter::load_persist` / save (`fabrics.load_persist`,
-   TLV serialization already implemented). So persisting our RCAC/NOC/IPK is not
-   bespoke work — we install our fabric once, then `load_persist`/save handles it.
+2. **Controller identity persistence — fabric is free; CA signing key is not.**
+   A controller fabric is just a `Fabric`; rs-matter persists fabrics through
+   `KvBlobStore` (`Matter::load_persist` / `FabricPersist::store`, TLV already
+   implemented). The persisted `Fabric` retains the operational key, NOC, RCAC,
+   ICAC and IPK — **everything needed to re-address commissioned devices over
+   CASE** after a restart. But it does **not** retain the **CA signing key**
+   (the RCAC/ICAC private key used to *mint new device NOCs*) — that's the CA's
+   secret, separate from the controller's operational identity. So to keep
+   commissioning *new* devices after a restart, the controller must persist that
+   signing key itself.
+
+   **`ControllerCa` model (both tiers, signing key persisted in KV):**
+   - *RCAC-direct*: RCAC signs NOCs (`[RCAC, NOC]`); persist the RCAC priv key.
+   - *ICAC-tier*: ICAC signs NOCs (`[RCAC, ICAC, NOC]`); persist the ICAC priv key.
+   Tier chosen at build/runtime. On bootstrap: generate the chain once, install
+   the controller fabric (rs-matter persists it), and store the signing key
+   (`CanonPkcSecretKey` raw bytes) as our own KV blob. On restart:
+   `Matter::load_persist` restores the fabric (→ RCAC/ICAC certs + operational
+   key for CASE); we reload the signing key blob and rebuild a `NocGenerator`
+   (`NocGenerator::create(signing_priv, rcac, icac, buf)` — rs-matter documents
+   this exact "create from loaded chain bytes at restart" use) for future
+   commissions. The signing-key blob is the *only* extra secret we manage.
    `rs_matter::persist::DirKvBlobStore` is a ready filesystem-backed KV (no impl
    to write). Remaining work: generate the CA *once* (not per-`commission`) and
    reload it on startup via `load_persist`.

@@ -117,7 +117,16 @@ async fn run(args: Args) -> Result<matter_peek_core::CommissionOutcome, Error> {
         0,
     ));
 
-    let controller = Controller::new(matter, &crypto, FabricIdentity::default());
+    let controller = Controller::new(matter, &crypto);
+
+    // Bootstrap the controller CA + ephemeral fabric (the CLI spike uses the
+    // ephemeral policy: throwaway fabric, removed after the run).
+    let (ca, fab_idx) = matter_peek_core::ca::ControllerCa::bootstrap(
+        &crypto,
+        matter,
+        FabricIdentity::default(),
+        matter_peek_core::ca::CaTier::RcacDirect,
+    )?;
 
     // Resolve the target address *before* binding the transport socket: discovery
     // uses its own mDNS path (separate socket / DBus) and doesn't need the Matter
@@ -146,7 +155,7 @@ async fn run(args: Args) -> Result<matter_peek_core::CommissionOutcome, Error> {
     // serves IPv4 and IPv6 peers alike.)
     let socket = bind_controller_socket()?;
     let transport_fut = matter.run(&crypto, &socket, &socket, NoNetwork);
-    let flow_fut = flow(&controller, &args, peer_addr);
+    let flow_fut = flow(&controller, &ca, fab_idx, &args, peer_addr);
 
     let mut transport_fut = pin!(transport_fut);
     let mut flow_fut = pin!(flow_fut);
@@ -164,11 +173,15 @@ async fn run(args: Args) -> Result<matter_peek_core::CommissionOutcome, Error> {
 /// snapshot over the freshly-established CASE session.
 async fn flow<'a, C: rs_matter::crypto::Crypto>(
     controller: &Controller<'a, C>,
+    ca: &matter_peek_core::ca::ControllerCa,
+    fab_idx: core::num::NonZeroU8,
     args: &Args,
     peer_addr: SocketAddr,
 ) -> Result<matter_peek_core::CommissionOutcome, Error> {
     let outcome = controller
         .commission(
+            ca,
+            fab_idx,
             peer_addr,
             args.passcode,
             DEVICE_NODE_ID,

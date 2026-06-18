@@ -27,6 +27,7 @@
 
 extern crate alloc;
 
+pub mod ca;
 pub mod controller;
 pub mod diagnostics;
 pub mod discovery;

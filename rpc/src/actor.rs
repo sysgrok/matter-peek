@@ -79,7 +79,7 @@ async fn service(cmd: &Command) -> proto::Response {
 async fn run_discover(discriminator: Option<u16>, max: u8) -> proto::Response {
     let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
     let matter = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, 0);
-    let controller = Controller::new(&matter, &crypto, FabricIdentity::default());
+    let controller = Controller::new(&matter, &crypto);
 
     let filter = CommissionableFilter {
         discriminator,
@@ -133,13 +133,36 @@ async fn run_vertical(
     // construction rs-matter's own e2e tests use (`Matter::new`, not boxed/
     // `StaticCell`, which would pin the lifetime to `'static`).
     let matter = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, 0);
-    let controller = Controller::new(&matter, &crypto, FabricIdentity::default());
+    let controller = Controller::new(&matter, &crypto);
+
+    // Ephemeral policy: bootstrap a throwaway controller CA + fabric for this run.
+    let (ca, fab_idx) = match matter_peek_core::ca::ControllerCa::bootstrap(
+        &crypto,
+        &matter,
+        FabricIdentity::default(),
+        matter_peek_core::ca::CaTier::RcacDirect,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return proto::Response::Error {
+                message: format!("CA bootstrap failed: {e:?}"),
+            }
+        }
+    };
 
     // Run the transport pump concurrently with the flow; whichever finishes
     // first ends the scope (the flow normally finishes; the pump only ends on
     // error).
     let mut transport = pin!(matter.run(&crypto, &socket, &socket, NoNetwork));
-    let mut flow = pin!(vertical_flow(cmd, &controller, peer_addr, passcode, policy));
+    let mut flow = pin!(vertical_flow(
+        cmd,
+        &controller,
+        &ca,
+        fab_idx,
+        peer_addr,
+        passcode,
+        policy
+    ));
 
     match select(&mut transport, &mut flow).await {
         Either::First(r) => {
@@ -154,10 +177,13 @@ async fn run_vertical(
 
 /// The actual vertical, identical in spirit to the CLI flow but reporting each
 /// step as a [`proto::Event`].
+#[allow(clippy::too_many_arguments)]
 async fn vertical_flow<C: rs_matter::crypto::Crypto>(
     cmd: &Command,
     controller: &Controller<'_, C>,
-    peer_addr: std::net::SocketAddr,
+    ca: &matter_peek_core::ca::ControllerCa,
+    fab_idx: core::num::NonZeroU8,
+    peer_addr: core::net::SocketAddr,
     passcode: u32,
     policy: proto::FabricPolicy,
 ) -> proto::Response {
@@ -166,7 +192,14 @@ async fn vertical_flow<C: rs_matter::crypto::Crypto>(
     // --- Commission ---
     emit(cmd, Step::Commission, started()).await;
     let outcome = match controller
-        .commission(peer_addr, passcode, DEVICE_NODE_ID, convert::policy(policy))
+        .commission(
+            ca,
+            fab_idx,
+            peer_addr,
+            passcode,
+            DEVICE_NODE_ID,
+            convert::policy(policy),
+        )
         .await
     {
         Ok(o) => {
