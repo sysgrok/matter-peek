@@ -41,6 +41,20 @@ where
     executor().spawn(fut).detach();
 }
 
+/// Drive the thread-local executor until `fut` completes, returning its output.
+///
+/// The companion to [`spawn`]: spawn the actor (and any background tasks), then
+/// `block_on` the main loop. Used by alternative shells (e.g. the MCP stdio
+/// server) that reuse the actor but supply their own top-level future instead of
+/// the WS server.
+pub fn block_on<F, T>(fut: F) -> T
+where
+    F: Future<Output = T>,
+{
+    let ex = executor();
+    futures_lite::future::block_on(ex.run(fut))
+}
+
 /// Run the RPC server: start the actor, then serve WS connections on `addr`,
 /// driving the thread-local executor to completion.
 pub fn run(addr: &str) -> std::io::Result<()> {

@@ -1241,6 +1241,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "matter-peek-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "blocking",
+ "embassy-time-queue-utils",
+ "env_logger",
+ "futures-lite",
+ "log",
+ "matter-peek-proto",
+ "matter-peek-rpc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "matter-peek-proto"
 version = "0.1.0"
 dependencies = [

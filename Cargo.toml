@@ -5,6 +5,7 @@ members = [
     "cli",
     "proto",
     "rpc",
+    "mcp",
     # "uniffi",  # Phase 3 — mobile bindings
     # "web" is a separate wasm crate, excluded from the native workspace build.
 ]
