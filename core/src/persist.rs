@@ -120,6 +120,35 @@ impl<S: KvBlobStore> ControllerStore<S> {
         let wire = StoredDeviceList::from_model(devices);
         Persist::new(&self.kv).store_tlv(DEVICES_KEY, wire)
     }
+
+    /// Replace the local tag set of the device with this `node_id`, persisting
+    /// the change. Tags are normalized (trimmed, empties dropped, de-duplicated,
+    /// order preserved). Returns `true` if a matching device was found and
+    /// updated, `false` if no such device is stored (nothing written).
+    ///
+    /// Tags are controller-local metadata only — they never touch the device.
+    pub fn set_tags(&self, node_id: u64, tags: &[String]) -> Result<bool, Error> {
+        let mut devices = self.load_devices()?;
+        let Some(dev) = devices.iter_mut().find(|d| d.handle.node_id == node_id) else {
+            return Ok(false);
+        };
+        dev.tags = normalize_tags(tags);
+        self.save_devices(&devices)?;
+        Ok(true)
+    }
+}
+
+/// Trim whitespace, drop empty tags, and de-duplicate (first occurrence wins),
+/// preserving input order.
+fn normalize_tags(tags: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in tags {
+        let t = t.trim();
+        if !t.is_empty() && !out.iter().any(|e| e == t) {
+            out.push(String::from(t));
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

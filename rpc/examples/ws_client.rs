@@ -20,6 +20,7 @@ fn main() {
     //   ws_client [URL] list
     //   ws_client [URL] peek <node_id_hex_or_dec>
     //   ws_client [URL] identify <node_id> [secs]
+    //   ws_client [URL] settags <node_id> <comma,separated,tags>
     //   ws_client [URL] persistent <addr> [passcode]   (persistent commission)
     //   ws_client [URL] <addr> [passcode]               (ephemeral vertical)
     let mut args = std::env::args().skip(1);
@@ -47,6 +48,16 @@ fn main() {
         "identify" => proto::Request::Identify {
             node_id: parse_node(arg3.as_deref().unwrap_or("0")),
             secs: 3,
+        },
+        "settags" => proto::Request::SetTags {
+            node_id: parse_node(arg3.as_deref().unwrap_or("0")),
+            tags: args
+                .next()
+                .unwrap_or_default()
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect(),
         },
         "persistent" => proto::Request::RunVertical {
             peer_addr: arg3.clone().unwrap_or_else(|| "[::1]:5540".into()),

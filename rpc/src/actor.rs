@@ -171,6 +171,7 @@ async fn service<C: Crypto>(cmd: &Command, ctx: &ActorCtx<'_, C>) -> proto::Resp
             peek_device(ctx, *node_id, *with_logs).await
         }
         proto::Request::Identify { node_id, secs } => identify(ctx, *node_id, *secs).await,
+        proto::Request::SetTags { node_id, tags } => set_tags(ctx, *node_id, tags),
     }
 }
 
@@ -257,6 +258,20 @@ async fn identify<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64, secs: u16) -> 
         Ok(()) => proto::Response::Ok,
         Err(e) => proto::Response::Error {
             message: format!("identify failed: {e:?}"),
+        },
+    }
+}
+
+/// Replace a stored device's local tags, then return the refreshed device list
+/// (so the UI updates in one round-trip).
+fn set_tags<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64, tags: &[String]) -> proto::Response {
+    match ctx.store.set_tags(node_id, tags) {
+        Ok(true) => list_devices(ctx),
+        Ok(false) => proto::Response::Error {
+            message: format!("no stored device with node_id 0x{node_id:016x}"),
+        },
+        Err(e) => proto::Response::Error {
+            message: format!("set tags failed: {e:?}"),
         },
     }
 }

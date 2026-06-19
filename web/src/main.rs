@@ -34,6 +34,12 @@ enum Msg {
     ListDevices,
     Peek(u64),
     Identify(u64),
+    /// Edit the tag-input text for a given device (node_id).
+    TagsInput(u64, String),
+    /// Persist the edited tags for a given device.
+    SaveTags(u64),
+    /// Filter the stored list by tag substring.
+    TagFilter(String),
     Step(StepLine),
     Done(proto::Response),
     Error(String),
@@ -54,6 +60,11 @@ struct App {
     discovered: Vec<proto::DiscoveredDevice>,
     /// The controller's persistently-commissioned devices (from the store).
     stored: Vec<proto::StoredDeviceInfo>,
+    /// Per-device tag-input text (node_id → comma-separated edit buffer). Seeded
+    /// from the device's current tags when the list arrives.
+    tag_inputs: HashMap<u64, String>,
+    /// Filter the stored list to devices whose tags contain this substring.
+    tag_filter: String,
     steps: Vec<StepLine>,
     result: Option<proto::Response>,
     /// Transient status line for stored-device ops (peek result / identify ack).
@@ -76,6 +87,8 @@ impl Component for App {
             busy_stored: false,
             discovered: Vec::new(),
             stored: Vec::new(),
+            tag_inputs: HashMap::new(),
+            tag_filter: String::new(),
             steps: Vec::new(),
             result: None,
             stored_status: None,
@@ -186,6 +199,31 @@ impl Component for App {
                 );
                 true
             }
+            Msg::TagsInput(node_id, text) => {
+                self.tag_inputs.insert(node_id, text);
+                false
+            }
+            Msg::TagFilter(text) => {
+                self.tag_filter = text;
+                true
+            }
+            Msg::SaveTags(node_id) => {
+                let tags = self
+                    .tag_inputs
+                    .get(&node_id)
+                    .map(|s| {
+                        s.split(',')
+                            .map(|t| t.trim().to_string())
+                            .filter(|t| !t.is_empty())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                self.busy_stored = true;
+                self.stored_status = Some(format!("Saving tags for node 0x{node_id:016x}…"));
+                self.error = None;
+                send_request(ctx.link().clone(), proto::Request::SetTags { node_id, tags });
+                true
+            }
             Msg::Step(line) => {
                 self.steps.push(line);
                 true
@@ -198,6 +236,12 @@ impl Component for App {
                     proto::Response::Discovered { devices } => self.discovered = devices,
                     proto::Response::Devices { devices } => {
                         self.stored_status = Some(format!("{} stored device(s)", devices.len()));
+                        // Seed each device's tag-edit buffer from its (normalized)
+                        // stored tags, so the input reflects server truth.
+                        self.tag_inputs = devices
+                            .iter()
+                            .map(|d| (d.handle.node_id, d.tags.join(", ")))
+                            .collect();
                         self.stored = devices;
                     }
                     proto::Response::Peek {
@@ -343,6 +387,16 @@ impl App {
     /// actions. The basis for the persistent-fabric workflow: commission once
     /// (Persistent), then re-address devices over CASE without re-commissioning.
     fn view_stored(&self, link: &html::Scope<Self>) -> Html {
+        let filter = self.tag_filter.trim().to_lowercase();
+        let visible: Vec<&proto::StoredDeviceInfo> = self
+            .stored
+            .iter()
+            .filter(|d| {
+                filter.is_empty()
+                    || d.tags.iter().any(|t| t.to_lowercase().contains(&filter))
+            })
+            .collect();
+
         html! {
             <div class="stored">
                 <div class="row">
@@ -353,6 +407,20 @@ impl App {
                     </button>
                 </div>
 
+                {
+                    if self.stored.is_empty() {
+                        html! {}
+                    } else {
+                        html! {
+                            <div class="row">
+                                <label>{ "Filter by tag" }</label>
+                                <input placeholder="any" value={self.tag_filter.clone()}
+                                    oninput={link.callback(|e: InputEvent| Msg::TagFilter(input_value(e)))} />
+                            </div>
+                        }
+                    }
+                }
+
                 { for self.stored_status.iter().map(|s| html!{
                     <pre class="result">{ s.clone() }</pre>
                 }) }
@@ -360,10 +428,12 @@ impl App {
                 {
                     if self.stored.is_empty() {
                         html! { <p class="hint">{ "No stored devices. Commission one with \"Persistent\" checked." }</p> }
+                    } else if visible.is_empty() {
+                        html! { <p class="hint">{ format!("No stored devices tagged like \"{}\".", self.tag_filter.trim()) }</p> }
                     } else {
                         html! {
                             <div class="steps">
-                                { for self.stored.iter().map(|d| self.view_stored_one(d, link)) }
+                                { for visible.into_iter().map(|d| self.view_stored_one(d, link)) }
                             </div>
                         }
                     }
@@ -376,6 +446,8 @@ impl App {
         let node_id = d.handle.node_id;
         let peek = link.callback(move |_| Msg::Peek(node_id));
         let identify = link.callback(move |_| Msg::Identify(node_id));
+        let save_tags = link.callback(move |_| Msg::SaveTags(node_id));
+        let on_tags = link.callback(move |e: InputEvent| Msg::TagsInput(node_id, input_value(e)));
 
         // Prefer a human label, falling back to the stable identifiers.
         let title = if !d.node_label.is_empty() {
@@ -388,19 +460,26 @@ impl App {
             format!("node 0x{node_id:016x}")
         };
 
+        // The edit buffer falls back to the device's current tags (it's seeded
+        // on list, but a never-listed device still shows its tags).
+        let tag_text = self
+            .tag_inputs
+            .get(&node_id)
+            .cloned()
+            .unwrap_or_else(|| d.tags.join(", "));
+
         html! {
             <div class="step done">
                 <div>
                     <strong>{ title }</strong>
                     { format!("  (fab {} · node 0x{:016x})", d.handle.fabric_index, node_id) }
                 </div>
-                {
-                    if d.tags.is_empty() {
-                        html! {}
-                    } else {
-                        html! { <div class="hint">{ format!("tags: {}", d.tags.join(", ")) }</div> }
-                    }
-                }
+                <div class="row">
+                    <label>{ "Tags" }</label>
+                    <input placeholder="comma,separated" value={tag_text}
+                        oninput={on_tags} />
+                    <button disabled={self.busy_stored} onclick={save_tags}>{ "Save" }</button>
+                </div>
                 <div class="row">
                     <button disabled={self.busy_stored} onclick={peek}>{ "Peek" }</button>
                     <button disabled={self.busy_stored} onclick={identify}>{ "Identify" }</button>

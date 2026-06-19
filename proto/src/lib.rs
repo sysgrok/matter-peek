@@ -80,6 +80,11 @@ pub enum Request {
     /// Ask a persisted device to physically identify itself (blink/beep) for
     /// `secs` seconds via the Identify cluster — the "which unit is this?" UX.
     Identify { node_id: u64, secs: u16 },
+    /// Replace the local tag set of a stored device (controller-local metadata
+    /// for filtering/grouping; never touches the device). The server normalizes
+    /// (trim / drop empties / de-dup) and answers with the refreshed
+    /// [`Response::Devices`] list.
+    SetTags { node_id: u64, tags: Vec<String> },
 }
 
 /// A reply to a [`Request`].
