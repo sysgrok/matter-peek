@@ -184,6 +184,19 @@ impl ControllerCa {
         self.tier
     }
 
+    /// The RCAC's public key (P-256 SubjectPublicKey, 65-byte uncompressed EC
+    /// point), parsed from our held RCAC cert. This is the canonical identity of
+    /// the *fabric root*: a `FabricDescriptor.root_public_key` on a device equal
+    /// to this means that fabric was created by **our** CA — used by the
+    /// orphaned-fabric sweep to recognize (and reclaim) fabrics we left behind.
+    ///
+    /// Returned owned (the cert accessor borrows the TLV) and works for both
+    /// tiers and after `reload` (always derived from the cert, never the key).
+    pub fn rcac_public_key(&self) -> Result<Vec<u8>, Error> {
+        let cert = rs_matter::cert::CertRef::new(rs_matter::tlv::TLVElement::new(&self.rcac));
+        Ok(cert.pubkey()?.to_vec())
+    }
+
     /// Build a [`NocGenerator`] backed by this CA's chain + signing key, into the
     /// caller-provided scratch buffer. Used to sign both the controller's own NOC
     /// (at bootstrap) and device NOCs (at every commission).

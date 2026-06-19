@@ -25,7 +25,11 @@ use rs_matter::transport::network::Address;
 use rs_matter::Matter;
 
 use rs_matter::dm::clusters::decl::identify::IdentifyClient as _;
-use rs_matter::dm::clusters::decl::operational_credentials::OperationalCredentialsClient as _;
+use rs_matter::dm::clusters::decl::operational_credentials::{
+    OperationalCredentialsAttrReads as _, OperationalCredentialsAttrResponses as _,
+    OperationalCredentialsClient as _,
+};
+use rs_matter::im::client::ImClient as _;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::network::mdns::CommissionableFilter;
 
@@ -99,6 +103,21 @@ impl<'a, C: Crypto> Controller<'a, C> {
         let crypto = self.crypto;
         let matter = self.matter;
 
+        // Reclaim any fabric slot we leaked on this device in a previous run
+        // (commissioned, then crashed before RemoveFabric). Best-effort over the
+        // PASE window, before AddNOC — so a device whose fabric table is full of
+        // our orphans doesn't reject the new commission with `TableFull`.
+        let reclaimed = self
+            .sweep_orphaned_fabrics(ca, controller_fab_idx, peer_addr, passcode)
+            .await
+            .unwrap_or_else(|e| {
+                info!("orphaned-fabric sweep skipped (non-fatal): {e:?}");
+                0
+            });
+        if reclaimed > 0 {
+            info!("orphaned-fabric sweep: reclaimed {reclaimed} stale fabric slot(s)");
+        }
+
         info!("=== Commissioner::commission (phase 1 — PASE) ===");
 
         // NocGenerator backed by the controller CA — signs the *device* NOC
@@ -153,6 +172,107 @@ impl<'a, C: Crypto> Controller<'a, C> {
             },
             policy,
         })
+    }
+
+    /// Remove any fabric the device still holds that belongs to **us** — i.e.
+    /// orphans from a previous run that commissioned this device but crashed
+    /// before `RemoveFabric`. Runs over the **PASE** window (no fabric of ours is
+    /// needed yet), the canonical Matter re-commissioning cleanup.
+    ///
+    /// "Ours" = the device's `FabricDescriptor.root_public_key` equals our RCAC
+    /// public key **and** its `fabric_id` equals ours (belt-and-suspenders). A
+    /// non-fabric-filtered read returns every fabric on the device, so we can see
+    /// them all over PASE.
+    ///
+    /// Best-effort and non-destructive to *other* admins: only our own fabrics
+    /// match. Returns the count removed. Errors are surfaced to the caller, which
+    /// treats the whole sweep as optional (a device with no orphans, or one that
+    /// refuses the read, just proceeds to normal commissioning).
+    async fn sweep_orphaned_fabrics(
+        &self,
+        ca: &crate::ca::ControllerCa,
+        controller_fab_idx: NonZeroU8,
+        peer_addr: SocketAddr,
+        passcode: u32,
+    ) -> Result<usize, Error> {
+        const ROOT_ENDPOINT: rs_matter::dm::EndptId = 0;
+
+        let our_rcac_pubkey = ca.rcac_public_key()?;
+        let our_fabric_id = self.matter.with_state(|state| {
+            Ok::<_, Error>(state.fabrics.fabric(controller_fab_idx)?.fabric_id())
+        })?;
+
+        let peer = Address::Udp(peer_addr);
+
+        // Read the full Fabrics list (non-fabric-filtered) over PASE and collect
+        // the fabric indices whose root pubkey + fabric_id match ours. We copy
+        // the small set of indices out of the borrowed response before it drops.
+        let exchange = Exchange::initiate_pase(self.matter, self.crypto, peer, passcode).await?;
+        let mut chunk = exchange
+            .read_with(|msg| {
+                msg.attr_requests()?
+                    .operational_credentials_read()
+                    .fabrics(ROOT_ENDPOINT)?
+                    .end()?
+                    .fabric_filtered(false)?
+                    .end()
+            })
+            .await?;
+
+        let mut ours: Vec<u8> = Vec::new();
+        {
+            let resp = chunk.response()?;
+            for (_endpoint, result) in resp.operational_credentials_read_resp().fabrics() {
+                let list = result?;
+                for fabric in &list {
+                    let fabric = fabric?;
+                    // `root_public_key` is a TLV octet string (`Octets`, derefs to
+                    // `[u8]`); `fabric_index` is the optional ctx-254 field.
+                    let matches_us = *fabric.root_public_key()? == *our_rcac_pubkey.as_slice()
+                        && fabric.fabric_id()? == our_fabric_id;
+                    if let (true, Some(idx)) = (matches_us, fabric.fabric_index()?) {
+                        ours.push(idx);
+                    }
+                }
+            }
+        }
+        while let Some(next) = chunk.complete().await? {
+            chunk = next;
+        }
+
+        if ours.is_empty() {
+            return Ok(0);
+        }
+        info!(
+            "orphaned-fabric sweep: {} fabric(s) on device belong to us {:?}",
+            ours.len(),
+            ours
+        );
+
+        // Remove each — one PASE exchange per RemoveFabric (mirrors how the
+        // Commissioner opens a fresh PASE exchange per step on the same session).
+        let mut removed = 0usize;
+        for idx in ours {
+            let exchange =
+                Exchange::initiate_pase(self.matter, self.crypto, peer, passcode).await?;
+            match exchange
+                .operational_credentials()
+                .remove_fabric(ROOT_ENDPOINT, |req| req.fabric_index(idx)?.end())
+                .await
+            {
+                Ok(handle) => {
+                    handle.complete().await?;
+                    info!("orphaned-fabric sweep: removed our stale fabric index {idx}");
+                    removed += 1;
+                }
+                Err(e) => {
+                    // Don't abort the whole sweep on one failure — keep reclaiming.
+                    error!("orphaned-fabric sweep: RemoveFabric({idx}) failed: {e:?}");
+                }
+            }
+        }
+
+        Ok(removed)
     }
 
     /// Discover the first commissionable device on the local network matching
