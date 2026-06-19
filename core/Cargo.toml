@@ -33,12 +33,8 @@ mdns-builtin = ["std", "dep:socket2", "dep:nix", "dep:async-io"]     # fallback 
 # with NO default features (rs-matter's `os` ⇒ `std`); the hosted `os` path is
 # re-enabled only via this crate's `std` feature. mDNS backends and raw sockets
 # are likewise feature-gated.
-rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "canonicalize-peer-addr", default-features = false, features = ["alloc", "rustcrypto", "log"] }
+rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "alloc-tlv", default-features = false, features = ["alloc", "rustcrypto", "log"] }
 log = { workspace = true }
-# Local store serialization (our own device/tag blob; rs-matter's TLV is
-# `no_std`/heapless-only and doesn't cover std String/Vec). `alloc`, not `std`.
-serde = { workspace = true, features = ["derive", "alloc"] }
-serde_json = { version = "1", default-features = false, features = ["alloc"] }
 embassy-futures = { workspace = true }
 embassy-time = { version = "0.5", default-features = false }
 # mDNS builtin backend only (std): raw multicast socket + interface enum + async-io.

@@ -21,20 +21,24 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use serde::{Deserialize, Serialize};
-
-use rs_matter::error::{Error, ErrorCode};
+use rs_matter::error::Error;
 use rs_matter::fabric::FabricPersist;
-use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess, SharedKvBlobStore, VENDOR_KEYS_START};
+use rs_matter::persist::{
+    KvBlobStore, KvBlobStoreAccess, Persist, SharedKvBlobStore, VENDOR_KEYS_START,
+};
+use rs_matter::tlv::{FromTLV, OctetsVec, TLVElement, ToTLV};
 
 use crate::model::{DeviceHandle, StoredDevice};
 
 /// Scratch buffer size for the KV store (fits a fabric blob or our device list).
 const KV_BUF_LEN: usize = 4096;
 
-/// Our device-list blob lives in the vendor-reserved key range so it never
-/// collides with rs-matter's own keys (fabrics, basic-info, …).
+/// Our blobs live in the vendor-reserved key range so they never collide with
+/// rs-matter's own keys (fabrics, basic-info, …).
 const DEVICES_KEY: u16 = VENDOR_KEYS_START;
+/// The controller CA's signing key + tier (the one secret rs-matter's fabric
+/// persistence doesn't cover).
+const CA_KEY: u16 = VENDOR_KEYS_START + 1;
 
 /// Owns a shared KV store and exposes the controller's persistence operations:
 /// load/save our fabric (via rs-matter) and our device records. Generic over the
@@ -63,16 +67,47 @@ impl<S: KvBlobStore> ControllerStore<S> {
         FabricPersist::new(&self.kv).store(fabric)
     }
 
+    /// Persist the controller CA's signing key + tier (TLV). The cert chain is
+    /// *not* stored here — on reload it comes from the (rs-matter-persisted)
+    /// fabric. The key bytes are exposed only transiently, straight into the TLV
+    /// octet-string; they are not held in a long-lived plain buffer.
+    pub fn save_ca(&self, ca: &crate::ca::ControllerCa) -> Result<(), Error> {
+        let wire = CaBlob {
+            icac_tier: matches!(ca.tier(), crate::ca::CaTier::Icac),
+            signing_key: OctetsVec::from_vec(ca.signing_key().access().to_vec()),
+        };
+        Persist::new(&self.kv).store_tlv(CA_KEY, wire)
+    }
+
+    /// Load the persisted CA signing key + tier, if present. The key is returned
+    /// inside a zero-on-drop [`CanonPkcSecretKey`], never a plain `[u8; N]`.
+    pub fn load_ca(
+        &self,
+    ) -> Result<Option<(crate::ca::CaTier, rs_matter::crypto::CanonPkcSecretKey)>, Error> {
+        self.kv.access(|kv, buf| match kv.load(CA_KEY, buf)? {
+            Some(data) => {
+                let blob = CaBlob::from_tlv(&TLVElement::new(data))?;
+                let tier = if blob.icac_tier {
+                    crate::ca::CaTier::Icac
+                } else {
+                    crate::ca::CaTier::RcacDirect
+                };
+                let mut key = rs_matter::crypto::CanonPkcSecretKey::new();
+                key.try_load_from_slice(&blob.signing_key)?;
+                Ok(Some((tier, key)))
+            }
+            None => Ok(None),
+        })
+    }
+
     /// Load all stored device records (empty if none persisted yet).
     ///
-    /// Our device list is our own data, so we serialize it with serde/JSON
-    /// rather than rs-matter's `no_std`/heapless TLV (which doesn't cover std
-    /// `String`/`Vec`). Loaded via the raw `KvBlobStore`.
+    /// Serialized as rs-matter TLV (using the `alloc` `String`/`Vec` TLV impls),
+    /// loaded via the raw `KvBlobStore`.
     pub fn load_devices(&self) -> Result<Vec<StoredDevice>, Error> {
         self.kv.access(|kv, buf| match kv.load(DEVICES_KEY, buf)? {
             Some(data) => {
-                let list: StoredDeviceList =
-                    serde_json::from_slice(data).map_err(|_| Error::from(ErrorCode::Invalid))?;
+                let list = StoredDeviceList::from_tlv(&TLVElement::new(data))?;
                 Ok(list.into_model())
             }
             None => Ok(Vec::new()),
@@ -83,25 +118,33 @@ impl<S: KvBlobStore> ControllerStore<S> {
     /// scale).
     pub fn save_devices(&self, devices: &[StoredDevice]) -> Result<(), Error> {
         let wire = StoredDeviceList::from_model(devices);
-        let json = serde_json::to_vec(&wire).map_err(|_| Error::from(ErrorCode::Invalid))?;
-        self.kv.access(|kv, buf| kv.store(DEVICES_KEY, &json, buf))
+        Persist::new(&self.kv).store_tlv(DEVICES_KEY, wire)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Wire (JSON) representation of the device list.
+// Wire (TLV) representations.
 //
 // `StoredDevice` (the model) uses `DeviceHandle` (a `NonZeroU8` fabric index);
-// the wire form is a flat, serde-friendly mirror. Kept separate so the model
-// stays transport-agnostic and free of serde derives.
+// the wire form is a flat, TLV-friendly mirror. Kept separate so the model stays
+// transport-agnostic and free of TLV derives.
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize)]
+/// Persisted controller-CA secret: the signing key + which tier it signs as.
+#[derive(ToTLV, FromTLV)]
+struct CaBlob {
+    /// `true` ⇒ ICAC tier (signing key is the ICAC priv); `false` ⇒ RCAC-direct.
+    icac_tier: bool,
+    /// The RCAC or ICAC private key, as a TLV octet string (not a u8 array).
+    signing_key: OctetsVec,
+}
+
+#[derive(ToTLV, FromTLV)]
 struct StoredDeviceList {
     devices: Vec<StoredDeviceWire>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(ToTLV, FromTLV)]
 struct StoredDeviceWire {
     fabric_index: u8,
     node_id: u64,

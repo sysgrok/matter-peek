@@ -1237,8 +1237,6 @@ dependencies = [
  "log",
  "nix",
  "rs-matter",
- "serde",
- "serde_json",
  "socket2",
 ]
 
@@ -1833,7 +1831,7 @@ dependencies = [
 [[package]]
 name = "rs-matter"
 version = "0.1.1"
-source = "git+https://github.com/sysgrok/rs-matter?branch=canonicalize-peer-addr#482348146a628ff0cfd491a37310a17446bd00ac"
+source = "git+https://github.com/sysgrok/rs-matter?branch=alloc-tlv#9491e2c11330b5b12104449f65487dba0a6703bf"
 dependencies = [
  "aes",
  "astro-dnssd",
@@ -1897,7 +1895,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-codegen"
 version = "0.1.0"
-source = "git+https://github.com/sysgrok/rs-matter?branch=canonicalize-peer-addr#482348146a628ff0cfd491a37310a17446bd00ac"
+source = "git+https://github.com/sysgrok/rs-matter?branch=alloc-tlv#9491e2c11330b5b12104449f65487dba0a6703bf"
 dependencies = [
  "convert_case",
  "miette",
@@ -1916,7 +1914,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-macros"
 version = "0.1.0"
-source = "git+https://github.com/sysgrok/rs-matter?branch=canonicalize-peer-addr#482348146a628ff0cfd491a37310a17446bd00ac"
+source = "git+https://github.com/sysgrok/rs-matter?branch=alloc-tlv#9491e2c11330b5b12104449f65487dba0a6703bf"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

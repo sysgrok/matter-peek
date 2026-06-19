@@ -102,9 +102,63 @@ impl ControllerCa {
         Ok((ca, fab_idx))
     }
 
+    /// Startup entry point for **persistent** mode: reuse the controller's CA +
+    /// fabric if previously persisted, else bootstrap a fresh one and persist it.
+    ///
+    /// Precondition: `matter.load_persist(store.kv())` has already run (so any
+    /// previously-saved fabric is loaded). The decision:
+    /// - if a fabric for `identity` (matched by vendor + node id) is present
+    ///   *and* a CA signing-key blob is stored, [`Self::reload`] from them;
+    /// - otherwise [`Self::bootstrap`] a new CA/fabric and persist both.
+    ///
+    /// Returns the CA and our controller fabric index.
+    pub fn ensure<C: Crypto, S: rs_matter::persist::KvBlobStore>(
+        crypto: &C,
+        matter: &rs_matter::Matter<'_>,
+        store: &crate::persist::ControllerStore<S>,
+        identity: FabricIdentity,
+        tier: CaTier,
+    ) -> Result<(Self, core::num::NonZeroU8), Error> {
+        // Look for our already-loaded fabric + its cert chain.
+        let existing = matter.with_state(|state| {
+            for fabric in state.fabrics.iter() {
+                if fabric.vendor_id() == identity.admin_vendor_id
+                    && fabric.node_id() == identity.controller_node_id
+                {
+                    return Some((
+                        fabric.fab_idx(),
+                        fabric.root_ca().to_vec(),
+                        fabric.icac().to_vec(),
+                    ));
+                }
+            }
+            None
+        });
+
+        if let Some((fab_idx, rcac, icac)) = existing {
+            if let Some((stored_tier, signing_key)) = store.load_ca()? {
+                log::info!("controller: reusing persisted fabric (idx {fab_idx})");
+                return Ok((Self::reload(stored_tier, rcac, icac, signing_key), fab_idx));
+            }
+            // Fabric present but no CA key — inconsistent persisted state; fall
+            // through to a fresh bootstrap (the stale fabric is harmless/ignored).
+            log::warn!("controller: fabric present but no CA key; bootstrapping fresh");
+        }
+
+        log::info!("controller: bootstrapping a new CA + fabric");
+        let (ca, fab_idx) = Self::bootstrap(crypto, matter, identity, tier)?;
+        store.save_ca(&ca)?;
+        // Persist the freshly-installed fabric by borrowing it in place (`Fabric`
+        // is intentionally not `Clone` — it holds secrets), saving within the
+        // state lock.
+        matter.with_state(|state| store.save_fabric(state.fabrics.fabric(fab_idx)?))?;
+        Ok((ca, fab_idx))
+    }
+
     /// Rebuild the CA from persisted state after a restart: the cert chain comes
     /// from the (already `load_persist`-ed) fabric, the signing key from our KV
-    /// blob.
+    /// blob. The signing key stays in a zero-on-drop [`CanonPkcSecretKey`]
+    /// throughout — never a plain `[u8; N]`.
     pub fn reload(
         tier: CaTier,
         rcac: Vec<u8>,
@@ -119,9 +173,11 @@ impl ControllerCa {
         }
     }
 
-    /// The signing key bytes to persist (32-byte canonical scalar).
-    pub fn signing_key_bytes(&self) -> [u8; 32] {
-        *self.signing_key.reference().access()
+    /// A reference to the signing key, for persistence. Keeps the secret inside
+    /// `CryptoSensitive`; the caller should expose the raw bytes only transiently
+    /// (e.g. straight into a write buffer).
+    pub fn signing_key(&self) -> rs_matter::crypto::CanonPkcSecretKeyRef<'_> {
+        self.signing_key.reference()
     }
 
     pub fn tier(&self) -> CaTier {
