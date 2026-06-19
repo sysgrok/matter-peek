@@ -27,9 +27,13 @@ enum Msg {
     PeerAddr(String),
     Passcode(String),
     Discriminator(String),
+    Persistent(bool),
     Run,
     Discover,
     PickDevice(String),
+    ListDevices,
+    Peek(u64),
+    Identify(u64),
     Step(StepLine),
     Done(proto::Response),
     Error(String),
@@ -40,11 +44,20 @@ struct App {
     passcode: String,
     /// Optional discriminator filter for discovery (empty = any).
     discriminator: String,
+    /// Commission persistently (keep the device on our fabric + in the store)
+    /// rather than the throwaway ephemeral fabric.
+    persistent: bool,
     running: bool,
     discovering: bool,
+    /// A persistent-device op (list / peek / identify) is in flight.
+    busy_stored: bool,
     discovered: Vec<proto::DiscoveredDevice>,
+    /// The controller's persistently-commissioned devices (from the store).
+    stored: Vec<proto::StoredDeviceInfo>,
     steps: Vec<StepLine>,
     result: Option<proto::Response>,
+    /// Transient status line for stored-device ops (peek result / identify ack).
+    stored_status: Option<String>,
     error: Option<String>,
 }
 
@@ -57,11 +70,15 @@ impl Component for App {
             peer_addr: "[::1]:5540".into(),
             passcode: "20202021".into(),
             discriminator: String::new(),
+            persistent: false,
             running: false,
             discovering: false,
+            busy_stored: false,
             discovered: Vec::new(),
+            stored: Vec::new(),
             steps: Vec::new(),
             result: None,
+            stored_status: None,
             error: None,
         }
     }
@@ -78,6 +95,10 @@ impl Component for App {
             }
             Msg::Discriminator(v) => {
                 self.discriminator = v;
+                false
+            }
+            Msg::Persistent(v) => {
+                self.persistent = v;
                 false
             }
             Msg::Discover => {
@@ -122,12 +143,47 @@ impl Component for App {
                 self.result = None;
                 self.error = None;
 
+                let policy = if self.persistent {
+                    proto::FabricPolicy::Persistent
+                } else {
+                    proto::FabricPolicy::Ephemeral
+                };
                 let req = proto::Request::RunVertical {
                     peer_addr: self.peer_addr.trim().to_string(),
                     passcode,
-                    policy: proto::FabricPolicy::Ephemeral,
+                    policy,
                 };
                 send_request(ctx.link().clone(), req);
+                true
+            }
+            Msg::ListDevices => {
+                self.busy_stored = true;
+                self.stored_status = None;
+                self.error = None;
+                send_request(ctx.link().clone(), proto::Request::ListDevices);
+                true
+            }
+            Msg::Peek(node_id) => {
+                self.busy_stored = true;
+                self.stored_status = Some(format!("Peeking node 0x{node_id:016x}…"));
+                self.error = None;
+                send_request(
+                    ctx.link().clone(),
+                    proto::Request::PeekDevice {
+                        node_id,
+                        with_logs: false,
+                    },
+                );
+                true
+            }
+            Msg::Identify(node_id) => {
+                self.busy_stored = true;
+                self.stored_status = Some(format!("Identifying node 0x{node_id:016x} (blink 3s)…"));
+                self.error = None;
+                send_request(
+                    ctx.link().clone(),
+                    proto::Request::Identify { node_id, secs: 3 },
+                );
                 true
             }
             Msg::Step(line) => {
@@ -137,14 +193,38 @@ impl Component for App {
             Msg::Done(resp) => {
                 self.running = false;
                 self.discovering = false;
+                self.busy_stored = false;
                 match resp {
                     proto::Response::Discovered { devices } => self.discovered = devices,
-                    other => self.result = Some(other),
+                    proto::Response::Devices { devices } => {
+                        self.stored_status = Some(format!("{} stored device(s)", devices.len()));
+                        self.stored = devices;
+                    }
+                    proto::Response::Peek {
+                        handle,
+                        health,
+                        crash_log_bytes,
+                    } => {
+                        self.stored_status = Some(format_peek(&handle, &health, crash_log_bytes));
+                    }
+                    proto::Response::Ok => {
+                        self.stored_status = Some("Identify acknowledged — device should blink.".into());
+                    }
+                    // A persistent commission populates the store; refresh the list.
+                    other @ proto::Response::Vertical(_) => {
+                        self.result = Some(other);
+                        if self.persistent {
+                            self.busy_stored = true;
+                            send_request(ctx.link().clone(), proto::Request::ListDevices);
+                        }
+                    }
+                    proto::Response::Error { message } => self.error = Some(message),
                 }
                 true
             }
             Msg::Error(e) => {
                 self.running = false;
+                self.busy_stored = false;
                 self.error = Some(e);
                 true
             }
@@ -181,6 +261,14 @@ impl Component for App {
                         oninput={link.callback(|e: InputEvent| Msg::Passcode(input_value(e)))} />
                 </div>
                 <div class="row">
+                    <label>{ "Persistent" }</label>
+                    <input type="checkbox" checked={self.persistent}
+                        onchange={link.callback(|e: Event| Msg::Persistent(checkbox_checked(e)))} />
+                    <span class="hint">
+                        { "keep the device on our fabric + in the store (else throwaway)" }
+                    </span>
+                </div>
+                <div class="row">
                     <button disabled={self.running}
                         onclick={link.callback(|_| Msg::Run)}>
                         { if self.running { "Running…" } else { "Run vertical" } }
@@ -189,6 +277,9 @@ impl Component for App {
 
                 { self.view_steps() }
                 { self.view_result() }
+
+                { self.view_stored(link) }
+
                 { for self.error.iter().map(|e| html!{ <p class="err">{ format!("Error: {e}") }</p> }) }
             </>
         }
@@ -242,11 +333,109 @@ impl App {
             Some(proto::Response::Error { message }) => html! {
                 <p class="err">{ format!("Server error: {message}") }</p>
             },
-            // `Discovered` is routed to `self.discovered` (see `Msg::Done`), not
-            // stored as a result.
-            Some(proto::Response::Discovered { .. }) | None => html! {},
+            // Stored-device responses (Devices / Peek / Ok) and Discovered are
+            // routed to their own state in `Msg::Done`, not shown here.
+            Some(_) | None => html! {},
         }
     }
+
+    /// The persistently-commissioned device list, with per-device Peek / Identify
+    /// actions. The basis for the persistent-fabric workflow: commission once
+    /// (Persistent), then re-address devices over CASE without re-commissioning.
+    fn view_stored(&self, link: &html::Scope<Self>) -> Html {
+        html! {
+            <div class="stored">
+                <div class="row">
+                    <h2>{ "Stored devices" }</h2>
+                    <button disabled={self.busy_stored}
+                        onclick={link.callback(|_| Msg::ListDevices)}>
+                        { if self.busy_stored { "Working…" } else { "Refresh" } }
+                    </button>
+                </div>
+
+                { for self.stored_status.iter().map(|s| html!{
+                    <pre class="result">{ s.clone() }</pre>
+                }) }
+
+                {
+                    if self.stored.is_empty() {
+                        html! { <p class="hint">{ "No stored devices. Commission one with \"Persistent\" checked." }</p> }
+                    } else {
+                        html! {
+                            <div class="steps">
+                                { for self.stored.iter().map(|d| self.view_stored_one(d, link)) }
+                            </div>
+                        }
+                    }
+                }
+            </div>
+        }
+    }
+
+    fn view_stored_one(&self, d: &proto::StoredDeviceInfo, link: &html::Scope<Self>) -> Html {
+        let node_id = d.handle.node_id;
+        let peek = link.callback(move |_| Msg::Peek(node_id));
+        let identify = link.callback(move |_| Msg::Identify(node_id));
+
+        // Prefer a human label, falling back to the stable identifiers.
+        let title = if !d.node_label.is_empty() {
+            d.node_label.clone()
+        } else if !d.unique_id.is_empty() {
+            format!("uid {}", d.unique_id)
+        } else if !d.serial_number.is_empty() {
+            format!("sn {}", d.serial_number)
+        } else {
+            format!("node 0x{node_id:016x}")
+        };
+
+        html! {
+            <div class="step done">
+                <div>
+                    <strong>{ title }</strong>
+                    { format!("  (fab {} · node 0x{:016x})", d.handle.fabric_index, node_id) }
+                </div>
+                {
+                    if d.tags.is_empty() {
+                        html! {}
+                    } else {
+                        html! { <div class="hint">{ format!("tags: {}", d.tags.join(", ")) }</div> }
+                    }
+                }
+                <div class="row">
+                    <button disabled={self.busy_stored} onclick={peek}>{ "Peek" }</button>
+                    <button disabled={self.busy_stored} onclick={identify}>{ "Identify" }</button>
+                </div>
+            </div>
+        }
+    }
+}
+
+/// One-line-per-field summary of a `PeekDevice` result, for the status pre.
+fn format_peek(
+    handle: &proto::DeviceHandle,
+    health: &proto::DeviceHealth,
+    crash_log_bytes: Option<usize>,
+) -> String {
+    let mut s = format!(
+        "peek node 0x{:016x} (fab {})\n",
+        handle.node_id, handle.fabric_index
+    );
+    if let Some(g) = &health.general {
+        s.push_str(&format!(
+            "general: up_time_secs={:?} reboot_count={:?} total_operational_hours={:?}\n",
+            g.up_time_secs, g.reboot_count, g.total_operational_hours
+        ));
+    }
+    if let Some(sw) = &health.software {
+        s.push_str(&format!(
+            "software: heap_free={:?} heap_used={:?} heap_high_watermark={:?}\n",
+            sw.current_heap_free, sw.current_heap_used, sw.current_heap_high_watermark
+        ));
+    }
+    if let Some(n) = crash_log_bytes {
+        s.push_str(&format!("crash_log_bytes: {n}\n"));
+    }
+    s
 }
 
 fn format_result(v: &proto::VerticalResult) -> String {
@@ -334,6 +523,15 @@ fn input_value(e: InputEvent) -> String {
     e.target()
         .and_then(|t| t.dyn_into::<HtmlInputElement>().ok())
         .map(|i| i.value())
+        .unwrap_or_default()
+}
+
+fn checkbox_checked(e: Event) -> bool {
+    use wasm_bindgen::JsCast;
+    use web_sys::HtmlInputElement;
+    e.target()
+        .and_then(|t| t.dyn_into::<HtmlInputElement>().ok())
+        .map(|i| i.checked())
         .unwrap_or_default()
 }
 
