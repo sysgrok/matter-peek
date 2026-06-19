@@ -15,23 +15,49 @@ use matter_peek_proto as proto;
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    // `ws_client [WS_URL] discover` → browse; otherwise run the vertical.
+    // Usage:
+    //   ws_client [URL] discover
+    //   ws_client [URL] list
+    //   ws_client [URL] peek <node_id_hex_or_dec>
+    //   ws_client [URL] identify <node_id> [secs]
+    //   ws_client [URL] persistent <addr> [passcode]   (persistent commission)
+    //   ws_client [URL] <addr> [passcode]               (ephemeral vertical)
     let mut args = std::env::args().skip(1);
     let url = args.next().unwrap_or_else(|| "ws://127.0.0.1:8087".into());
     let arg2 = args.next().unwrap_or_else(|| "[::1]:5540".into());
-    let passcode: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(20202021);
+    let arg3 = args.next();
 
-    let request = if arg2 == "discover" {
-        proto::Request::Discover {
+    let parse_node = |s: &str| -> u64 {
+        s.strip_prefix("0x")
+            .and_then(|h| u64::from_str_radix(h, 16).ok())
+            .or_else(|| s.parse().ok())
+            .unwrap_or(0)
+    };
+
+    let request = match arg2.as_str() {
+        "discover" => proto::Request::Discover {
             discriminator: None,
             max: 16,
-        }
-    } else {
-        proto::Request::RunVertical {
-            peer_addr: arg2,
-            passcode,
+        },
+        "list" => proto::Request::ListDevices,
+        "peek" => proto::Request::PeekDevice {
+            node_id: parse_node(arg3.as_deref().unwrap_or("0")),
+            with_logs: false,
+        },
+        "identify" => proto::Request::Identify {
+            node_id: parse_node(arg3.as_deref().unwrap_or("0")),
+            secs: 3,
+        },
+        "persistent" => proto::Request::RunVertical {
+            peer_addr: arg3.clone().unwrap_or_else(|| "[::1]:5540".into()),
+            passcode: args.next().and_then(|s| s.parse().ok()).unwrap_or(20202021),
+            policy: proto::FabricPolicy::Persistent,
+        },
+        addr => proto::Request::RunVertical {
+            peer_addr: addr.to_string(),
+            passcode: arg3.and_then(|s| s.parse().ok()).unwrap_or(20202021),
             policy: proto::FabricPolicy::Ephemeral,
-        }
+        },
     };
 
     futures_lite::future::block_on(async move {

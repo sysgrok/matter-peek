@@ -86,6 +86,35 @@ pub struct StoredDevice {
     pub tags: alloc::vec::Vec<alloc::string::String>,
 }
 
+/// Device identity read from the BasicInformation cluster at commission time.
+///
+/// The spec-stable string identifiers (`UniqueID`, `SerialNumber`, `NodeLabel`)
+/// are **optional** and, additionally, rs-matter's generated client doesn't emit
+/// readers for `char_string` attributes — so they're often empty. As a fallback
+/// we always capture a composite **fingerprint** from the *mandatory* numeric
+/// attributes (`VendorID`, `ProductID`, `Hardware`/`SoftwareVersion`), which
+/// every device serves. Re-matching prefers `unique_id` → `serial_number` →
+/// `fingerprint`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeviceIdentity {
+    pub unique_id: alloc::string::String,
+    pub serial_number: alloc::string::String,
+    pub node_label: alloc::string::String,
+    /// Composite of the mandatory numeric BasicInformation attributes — not
+    /// globally unique, but a stable per-model fingerprint and the fallback when
+    /// the string identifiers are absent.
+    pub fingerprint: DeviceFingerprint,
+}
+
+/// The always-available numeric BasicInformation attributes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeviceFingerprint {
+    pub vendor_id: Option<u16>,
+    pub product_id: Option<u16>,
+    pub hardware_version: Option<u16>,
+    pub software_version: Option<u32>,
+}
+
 /// A health snapshot read from a device's diagnostic clusters.
 ///
 /// Every field is optional: not all devices implement every cluster/attribute,

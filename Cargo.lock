@@ -838,7 +838,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1831,7 +1831,7 @@ dependencies = [
 [[package]]
 name = "rs-matter"
 version = "0.1.1"
-source = "git+https://github.com/sysgrok/rs-matter?branch=alloc-tlv#9491e2c11330b5b12104449f65487dba0a6703bf"
+source = "git+https://github.com/sysgrok/rs-matter?branch=im-client-gen#ffa4c8374c38bd0f8543aa6e6c5a02c4a63c8391"
 dependencies = [
  "aes",
  "astro-dnssd",
@@ -1895,7 +1895,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-codegen"
 version = "0.1.0"
-source = "git+https://github.com/sysgrok/rs-matter?branch=alloc-tlv#9491e2c11330b5b12104449f65487dba0a6703bf"
+source = "git+https://github.com/sysgrok/rs-matter?branch=im-client-gen#ffa4c8374c38bd0f8543aa6e6c5a02c4a63c8391"
 dependencies = [
  "convert_case",
  "miette",
@@ -1914,7 +1914,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-macros"
 version = "0.1.0"
-source = "git+https://github.com/sysgrok/rs-matter?branch=alloc-tlv#9491e2c11330b5b12104449f65487dba0a6703bf"
+source = "git+https://github.com/sysgrok/rs-matter?branch=im-client-gen#ffa4c8374c38bd0f8543aa6e6c5a02c4a63c8391"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1938,7 +1938,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2179,7 +2179,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

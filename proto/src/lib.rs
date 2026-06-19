@@ -70,6 +70,16 @@ pub enum Request {
         /// Stop after this many matches (the UI caps the list).
         max: u8,
     },
+    /// List the devices the controller has persistently commissioned (from the
+    /// local store). The basis for the persistent-fabric device list UI.
+    ListDevices,
+    /// Re-address an already-commissioned (persisted) device by its NodeID over a
+    /// fresh CASE session — no re-commissioning — and read its health (+ optional
+    /// `CrashLogs`). Returns [`Response::Peek`].
+    PeekDevice { node_id: u64, with_logs: bool },
+    /// Ask a persisted device to physically identify itself (blink/beep) for
+    /// `secs` seconds via the Identify cluster — the "which unit is this?" UX.
+    Identify { node_id: u64, secs: u16 },
 }
 
 /// A reply to a [`Request`].
@@ -81,6 +91,16 @@ pub enum Response {
     Vertical(VerticalResult),
     /// Devices found by a [`Request::Discover`] (possibly empty).
     Discovered { devices: Vec<DiscoveredDevice> },
+    /// The controller's persistently-commissioned devices (from the store).
+    Devices { devices: Vec<StoredDeviceInfo> },
+    /// Result of a [`Request::PeekDevice`].
+    Peek {
+        handle: DeviceHandle,
+        health: DeviceHealth,
+        crash_log_bytes: Option<usize>,
+    },
+    /// A [`Request::Identify`] / other fire-and-forget op succeeded.
+    Ok,
     /// The request failed before producing a result.
     Error { message: String },
 }
@@ -145,6 +165,19 @@ pub struct DiscoveredDevice {
     /// The commissionable instance id from the advertisement (stable per device
     /// while its commissioning window is open).
     pub commissionable_id: u64,
+}
+
+/// A device the controller has persistently commissioned (from the local store).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredDeviceInfo {
+    pub handle: DeviceHandle,
+    /// BasicInformation `UniqueID` (stable across resets).
+    pub unique_id: String,
+    pub serial_number: String,
+    /// User-set name (from the primary ecosystem, if it wrote `NodeLabel`).
+    pub node_label: String,
+    /// Local user tags for filtering/grouping.
+    pub tags: Vec<String>,
 }
 
 /// The full result of a vertical run, as shown in the UI.

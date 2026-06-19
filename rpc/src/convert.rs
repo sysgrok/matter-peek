@@ -39,6 +39,16 @@ pub fn handle(h: core::DeviceHandle) -> proto::DeviceHandle {
     }
 }
 
+pub fn stored_device(d: core::StoredDevice) -> proto::StoredDeviceInfo {
+    proto::StoredDeviceInfo {
+        handle: handle(d.handle),
+        unique_id: d.unique_id,
+        serial_number: d.serial_number,
+        node_label: d.node_label,
+        tags: d.tags,
+    }
+}
+
 pub fn policy(p: proto::FabricPolicy) -> core::FabricPolicy {
     match p {
         proto::FabricPolicy::Persistent => core::FabricPolicy::Persistent,

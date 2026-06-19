@@ -198,6 +198,14 @@ impl<'a, C: Crypto> Controller<'a, C> {
         .await
     }
 
+    /// Read a device's stable identity (`UniqueID` / `SerialNumber` /
+    /// `NodeLabel`) from BasicInformation over a fresh CASE session. Used at
+    /// commission time to populate the persistent store.
+    pub async fn read_basic_info(&self, dev: DeviceHandle) -> crate::model::DeviceIdentity {
+        crate::basic_info::read_basic_info(self.matter, self.crypto, dev.fabric_index, dev.node_id)
+            .await
+    }
+
     /// Retrieve a diagnostic log (`intent`) from a commissioned device, returning
     /// the raw bytes. Handles inline (small) and BDX-pushed (large) delivery; the
     /// transport pump must be running in a sibling task.
