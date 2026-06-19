@@ -235,3 +235,171 @@ impl StoredDeviceList {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{DeviceFingerprint, DeviceHandle};
+    use alloc::collections::BTreeMap;
+    use alloc::string::ToString;
+    use alloc::vec;
+    use core::num::NonZeroU8;
+
+    /// An in-memory [`KvBlobStore`] for tests — a `BTreeMap<u16, Vec<u8>>`. No
+    /// filesystem, no device; exercises the real `ControllerStore` persistence
+    /// logic (TLV serde + load/save/upsert) in isolation.
+    #[derive(Default)]
+    struct MemKv {
+        blobs: BTreeMap<u16, Vec<u8>>,
+    }
+
+    impl KvBlobStore for MemKv {
+        fn load<'a>(&mut self, key: u16, buf: &'a mut [u8]) -> Result<Option<&'a [u8]>, Error> {
+            match self.blobs.get(&key) {
+                Some(data) => {
+                    buf[..data.len()].copy_from_slice(data);
+                    Ok(Some(&buf[..data.len()]))
+                }
+                None => Ok(None),
+            }
+        }
+
+        fn store(&mut self, key: u16, data: &[u8], _buf: &mut [u8]) -> Result<(), Error> {
+            self.blobs.insert(key, data.to_vec());
+            Ok(())
+        }
+
+        fn remove(&mut self, key: u16, _buf: &mut [u8]) -> Result<(), Error> {
+            self.blobs.remove(&key);
+            Ok(())
+        }
+    }
+
+    fn store() -> ControllerStore<MemKv> {
+        ControllerStore::new(MemKv::default())
+    }
+
+    fn fp(vid: u16, pid: u16) -> DeviceFingerprint {
+        DeviceFingerprint {
+            vendor_id: Some(vid),
+            product_id: Some(pid),
+            hardware_version: Some(3),
+            software_version: Some(4),
+        }
+    }
+
+    fn device(node_id: u64, serial: &str, tags: &[&str]) -> StoredDevice {
+        StoredDevice {
+            handle: DeviceHandle {
+                fabric_index: NonZeroU8::new(1).unwrap(),
+                node_id,
+            },
+            unique_id: "uid-".to_string() + serial,
+            serial_number: serial.to_string(),
+            node_label: "label".to_string(),
+            fingerprint: fp(0x1234, 0x5678),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn load_devices_empty_when_nothing_stored() {
+        let s = store();
+        assert!(s.load_devices().unwrap().is_empty());
+    }
+
+    #[test]
+    fn save_then_load_round_trips_all_fields() {
+        let s = store();
+        let devices = vec![
+            device(101, "sn-a", &["kitchen", "hue"]),
+            device(102, "sn-b", &[]),
+        ];
+        s.save_devices(&devices).unwrap();
+
+        let loaded = s.load_devices().unwrap();
+        // Full equality: handle, all identity strings, fingerprint, and tags must
+        // survive the TLV round-trip exactly.
+        assert_eq!(loaded, devices);
+    }
+
+    #[test]
+    fn save_replaces_the_whole_list() {
+        let s = store();
+        s.save_devices(&[device(101, "sn-a", &["t1"])]).unwrap();
+        s.save_devices(&[device(202, "sn-z", &["t2"])]).unwrap();
+
+        let loaded = s.load_devices().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].handle.node_id, 202);
+    }
+
+    #[test]
+    fn set_tags_updates_matching_device() {
+        let s = store();
+        s.save_devices(&[
+            device(101, "sn-a", &["old"]),
+            device(102, "sn-b", &["keep"]),
+        ])
+        .unwrap();
+
+        let found = s
+            .set_tags(101, &["new1".to_string(), "new2".to_string()])
+            .unwrap();
+        assert!(found);
+
+        let loaded = s.load_devices().unwrap();
+        let d101 = loaded.iter().find(|d| d.handle.node_id == 101).unwrap();
+        let d102 = loaded.iter().find(|d| d.handle.node_id == 102).unwrap();
+        assert_eq!(d101.tags, vec!["new1".to_string(), "new2".to_string()]);
+        // The other device is untouched.
+        assert_eq!(d102.tags, vec!["keep".to_string()]);
+    }
+
+    #[test]
+    fn set_tags_normalizes_trim_dedup_drop_empty() {
+        let s = store();
+        s.save_devices(&[device(101, "sn-a", &[])]).unwrap();
+
+        // "  a ", "a" (dup), "" (empty), "b" → ["a", "b"]
+        let raw = vec![
+            "  a ".to_string(),
+            "a".to_string(),
+            "".to_string(),
+            "b".to_string(),
+        ];
+        assert!(s.set_tags(101, &raw).unwrap());
+
+        let loaded = s.load_devices().unwrap();
+        assert_eq!(loaded[0].tags, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn set_tags_returns_false_for_unknown_node() {
+        let s = store();
+        s.save_devices(&[device(101, "sn-a", &["t"])]).unwrap();
+
+        assert!(!s.set_tags(999, &["x".to_string()]).unwrap());
+        // Nothing changed.
+        let loaded = s.load_devices().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].tags, vec!["t".to_string()]);
+    }
+
+    #[test]
+    fn fingerprint_survives_round_trip_including_none_fields() {
+        let s = store();
+        let mut d = device(101, "sn-a", &[]);
+        // A partial fingerprint (some None) must round-trip faithfully.
+        d.fingerprint = DeviceFingerprint {
+            vendor_id: Some(9),
+            product_id: None,
+            hardware_version: None,
+            software_version: Some(42),
+        };
+        s.save_devices(&[d.clone()]).unwrap();
+
+        let loaded = s.load_devices().unwrap();
+        assert_eq!(loaded[0].fingerprint, d.fingerprint);
+    }
+}
