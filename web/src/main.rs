@@ -474,6 +474,7 @@ impl App {
                     <strong>{ title }</strong>
                     { format!("  (fab {} · node 0x{:016x})", d.handle.fabric_index, node_id) }
                 </div>
+                <div class="hint">{ fingerprint_line(&d.fingerprint) }</div>
                 <div class="row">
                     <label>{ "Tags" }</label>
                     <input placeholder="comma,separated" value={tag_text}
@@ -517,6 +518,20 @@ fn format_peek(
     s
 }
 
+/// Compact one-line fingerprint summary for a stored-device card.
+fn fingerprint_line(fp: &proto::Fingerprint) -> String {
+    fn show<T: core::fmt::Display>(v: Option<T>) -> String {
+        v.map(|x| x.to_string()).unwrap_or_else(|| "—".to_string())
+    }
+    format!(
+        "vid:{} pid:{} hw:{} sw:{}",
+        show(fp.vendor_id),
+        show(fp.product_id),
+        show(fp.hardware_version),
+        show(fp.software_version),
+    )
+}
+
 fn format_result(v: &proto::VerticalResult) -> String {
     let mut s = String::new();
     s.push_str(&format!(
@@ -537,6 +552,12 @@ fn format_result(v: &proto::VerticalResult) -> String {
     }
     s.push_str(&format!("crash_log_bytes: {:?}\n", v.crash_log_bytes));
     s.push_str(&format!("decommissioned: {}\n", v.decommissioned));
+    if let Some(node_id) = v.rematch_candidate {
+        s.push_str(&format!(
+            "↳ possible match: same model as stored device 0x{node_id:016x} — \
+             check Stored devices to confirm/link\n"
+        ));
+    }
     s
 }
 

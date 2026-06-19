@@ -180,6 +180,11 @@ struct StoredDeviceWire {
     unique_id: String,
     serial_number: String,
     node_label: String,
+    // Numeric fingerprint (per-model), for re-match suggestions + display.
+    fp_vendor_id: Option<u16>,
+    fp_product_id: Option<u16>,
+    fp_hardware_version: Option<u16>,
+    fp_software_version: Option<u32>,
     tags: Vec<String>,
 }
 
@@ -194,6 +199,10 @@ impl StoredDeviceList {
                     unique_id: d.unique_id.clone(),
                     serial_number: d.serial_number.clone(),
                     node_label: d.node_label.clone(),
+                    fp_vendor_id: d.fingerprint.vendor_id,
+                    fp_product_id: d.fingerprint.product_id,
+                    fp_hardware_version: d.fingerprint.hardware_version,
+                    fp_software_version: d.fingerprint.software_version,
                     tags: d.tags.clone(),
                 })
                 .collect(),
@@ -214,6 +223,12 @@ impl StoredDeviceList {
                     unique_id: w.unique_id,
                     serial_number: w.serial_number,
                     node_label: w.node_label,
+                    fingerprint: crate::model::DeviceFingerprint {
+                        vendor_id: w.fp_vendor_id,
+                        product_id: w.fp_product_id,
+                        hardware_version: w.fp_hardware_version,
+                        software_version: w.fp_software_version,
+                    },
                     tags: w.tags,
                 })
             })

@@ -45,6 +45,12 @@ pub fn stored_device(d: core::StoredDevice) -> proto::StoredDeviceInfo {
         unique_id: d.unique_id,
         serial_number: d.serial_number,
         node_label: d.node_label,
+        fingerprint: proto::Fingerprint {
+            vendor_id: d.fingerprint.vendor_id,
+            product_id: d.fingerprint.product_id,
+            hardware_version: d.fingerprint.hardware_version,
+            software_version: d.fingerprint.software_version,
+        },
         tags: d.tags,
     }
 }

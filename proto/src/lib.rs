@@ -181,8 +181,20 @@ pub struct StoredDeviceInfo {
     pub serial_number: String,
     /// User-set name (from the primary ecosystem, if it wrote `NodeLabel`).
     pub node_label: String,
+    /// Per-model numeric fingerprint (vendor/product/hw/sw), for display + the
+    /// re-match link suggestion.
+    pub fingerprint: Fingerprint,
     /// Local user tags for filtering/grouping.
     pub tags: Vec<String>,
+}
+
+/// The numeric BasicInformation fingerprint, mirrored for the wire.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fingerprint {
+    pub vendor_id: Option<u16>,
+    pub product_id: Option<u16>,
+    pub hardware_version: Option<u16>,
+    pub software_version: Option<u32>,
 }
 
 /// The full result of a vertical run, as shown in the UI.
@@ -194,6 +206,11 @@ pub struct VerticalResult {
     pub crash_log_bytes: Option<usize>,
     /// Whether the fabric was removed afterward (ephemeral policy).
     pub decommissioned: bool,
+    /// Set when the just-commissioned device's *per-model fingerprint* matched an
+    /// existing stored device (but no per-unit id did): the `node_id` of that
+    /// existing device, offered to the UI as a "link these?" suggestion. `None`
+    /// when the device was an exact re-match (auto-merged) or genuinely new.
+    pub rematch_candidate: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

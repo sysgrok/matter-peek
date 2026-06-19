@@ -377,13 +377,17 @@ async fn vertical_flow<C: Crypto>(
     };
 
     // --- Persist (Persistent) | Decommission (Ephemeral) ---
+    let mut rematch_candidate = None;
     let decommissioned = match policy {
         proto::FabricPolicy::Persistent => {
             // Keep the device: persist our fabric (extended by AddNOC) + a store
             // record (with BasicInformation identity) so it can be re-addressed
-            // over CASE later without re-commissioning.
-            if let Err(e) = persist_commissioned(ctx, outcome.handle).await {
-                error!("actor: persisting commissioned device failed: {e:?}");
+            // over CASE later without re-commissioning. Re-matching reuses the
+            // record of a re-commissioned unit; a fingerprint-only hit comes back
+            // as a candidate to surface for linking.
+            match persist_commissioned(ctx, outcome.handle).await {
+                Ok(candidate) => rematch_candidate = candidate,
+                Err(e) => error!("actor: persisting commissioned device failed: {e:?}"),
             }
             false
         }
@@ -407,37 +411,95 @@ async fn vertical_flow<C: Crypto>(
         health: convert::health(health),
         crash_log_bytes,
         decommissioned,
+        rematch_candidate,
     })
 }
 
-/// Persist a just-commissioned device under the `Persistent` policy: save our
-/// (now device-bearing) fabric and a store record with the device's stable
-/// identity read from BasicInformation.
+/// Persist a freshly-commissioned device, re-matching it against the store so a
+/// re-commissioned unit reuses its existing record (and the user's tags / label)
+/// rather than spawning a duplicate.
+///
+/// Returns `Some(existing_node_id)` when only the per-model fingerprint matched
+/// (a [`MatchResult::Candidate`]) — surfaced so the UI can offer to *link* the
+/// two; a strong-id ([`MatchResult::Exact`]) merge and a brand-new device both
+/// return `None`.
 async fn persist_commissioned<C: Crypto>(
     ctx: &ActorCtx<'_, C>,
     handle: DeviceHandle,
-) -> Result<(), Error> {
+) -> Result<Option<u64>, Error> {
+    use matter_peek_core::{match_device, MatchResult, StoredDevice};
+
     // Save the updated controller fabric (it now lists the new device's NOC).
     ctx.matter
         .with_state(|state| ctx.store.save_fabric(state.fabrics.fabric(ctx.fab_idx)?))?;
 
-    // Read the device's stable identity (best-effort) and upsert the record.
+    // Read the device's stable identity (best-effort) and classify it.
     let ident = ctx.controller.read_basic_info(handle).await;
     let mut devices = ctx.store.load_devices().unwrap_or_default();
+    let outcome = match_device(&ident, &devices);
+
+    // Drop any record carrying this exact node_id (a clean re-run of the same id).
     devices.retain(|d| d.handle.node_id != handle.node_id);
-    devices.push(matter_peek_core::StoredDevice {
-        handle,
-        unique_id: ident.unique_id,
-        serial_number: ident.serial_number,
-        node_label: ident.node_label,
-        tags: alloc_vec_new(),
-    });
-    ctx.store.save_devices(&devices)
+
+    let mut candidate = None;
+    match outcome {
+        // Strong-id match: this is the same physical unit, re-addressed. Reuse
+        // its record — carry over the user's tags + node_label — and just update
+        // the handle + refresh the read identity.
+        MatchResult::Exact { node_id } => {
+            let prior = devices.iter().position(|d| d.handle.node_id == node_id);
+            let (tags, label) = prior
+                .map(|i| {
+                    let d = devices.remove(i);
+                    (d.tags, d.node_label)
+                })
+                .unwrap_or_default();
+            // Keep an existing user label if BasicInformation didn't serve one.
+            let node_label = if ident.node_label.is_empty() {
+                label
+            } else {
+                ident.node_label.clone()
+            };
+            devices.push(StoredDevice {
+                handle,
+                unique_id: ident.unique_id,
+                serial_number: ident.serial_number,
+                node_label,
+                fingerprint: ident.fingerprint,
+                tags,
+            });
+        }
+        // Fingerprint-only: possibly the same unit, possibly a sibling of the
+        // same model. Add it as a NEW record (don't silently merge) but flag the
+        // candidate so the UI can offer to link them.
+        MatchResult::Candidate { node_id } => {
+            candidate = Some(node_id);
+            devices.push(new_record(handle, &ident));
+        }
+        MatchResult::New => {
+            devices.push(new_record(handle, &ident));
+        }
+    }
+
+    ctx.store.save_devices(&devices)?;
+    Ok(candidate)
 }
 
 extern crate alloc;
-fn alloc_vec_new() -> alloc::vec::Vec<alloc::string::String> {
-    alloc::vec::Vec::new()
+
+/// A brand-new store record (no tags yet) from a fresh identity read.
+fn new_record(
+    handle: DeviceHandle,
+    ident: &matter_peek_core::DeviceIdentity,
+) -> matter_peek_core::StoredDevice {
+    matter_peek_core::StoredDevice {
+        handle,
+        unique_id: ident.unique_id.clone(),
+        serial_number: ident.serial_number.clone(),
+        node_label: ident.node_label.clone(),
+        fingerprint: ident.fingerprint,
+        tags: alloc::vec::Vec::new(),
+    }
 }
 
 /// Next device NodeID: one past the current store max, so persistent re-runs
