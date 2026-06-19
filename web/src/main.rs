@@ -23,7 +23,16 @@ struct StepLine {
     status: proto::StepStatus,
 }
 
+/// Which top-level tab is showing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Discover,
+    Commission,
+    Devices,
+}
+
 enum Msg {
+    SelectTab(Tab),
     PeerAddr(String),
     Passcode(String),
     Discriminator(String),
@@ -46,6 +55,7 @@ enum Msg {
 }
 
 struct App {
+    tab: Tab,
     peer_addr: String,
     passcode: String,
     /// Optional discriminator filter for discovery (empty = any).
@@ -78,6 +88,7 @@ impl Component for App {
 
     fn create(_ctx: &Context<Self>) -> Self {
         Self {
+            tab: Tab::Discover,
             peer_addr: "[::1]:5540".into(),
             passcode: "20202021".into(),
             discriminator: String::new(),
@@ -98,6 +109,17 @@ impl Component for App {
 
     fn update(&mut self, ctx: &Context<Self>, msg: Msg) -> bool {
         match msg {
+            Msg::SelectTab(tab) => {
+                self.tab = tab;
+                // Lazily refresh the device list the first time the user opens
+                // the Devices tab with an empty list.
+                if tab == Tab::Devices && self.stored.is_empty() && !self.busy_stored {
+                    self.busy_stored = true;
+                    self.stored_status = None;
+                    send_request(ctx.link().clone(), proto::Request::ListDevices);
+                }
+                true
+            }
             Msg::PeerAddr(v) => {
                 self.peer_addr = v;
                 false
@@ -138,9 +160,10 @@ impl Component for App {
                 true
             }
             Msg::PickDevice(addr) => {
-                // Fill the peer address from the picked device; the user then
-                // hits "Run vertical".
+                // Fill the peer address from the picked device and jump to the
+                // Commission tab so the user can run the vertical.
                 self.peer_addr = addr;
+                self.tab = Tab::Commission;
                 true
             }
             Msg::Run => {
@@ -254,12 +277,14 @@ impl Component for App {
                     proto::Response::Ok => {
                         self.stored_status = Some("Identify acknowledged — device should blink.".into());
                     }
-                    // A persistent commission populates the store; refresh the list.
+                    // A persistent commission populates the store; refresh the
+                    // list and surface it on the Devices tab.
                     other @ proto::Response::Vertical(_) => {
                         self.result = Some(other);
                         if self.persistent {
                             self.busy_stored = true;
                             send_request(ctx.link().clone(), proto::Request::ListDevices);
+                            self.tab = Tab::Devices;
                         }
                     }
                     proto::Response::Error { message } => self.error = Some(message),
@@ -279,75 +304,164 @@ impl Component for App {
         let link = ctx.link();
         html! {
             <>
-                <h1>{ "matter-peek" }</h1>
-                <p>{ "Discover a Matter device, then run the diagnostic vertical against it." }</p>
+                <section class="hero is-primary is-small">
+                    <div class="hero-body">
+                        <p class="title">{ "matter-peek" }</p>
+                        <p class="subtitle">
+                            { "A vendor-agnostic Matter diagnostic controller" }
+                        </p>
+                    </div>
+                </section>
 
-                <div class="row">
-                    <label>{ "Discriminator" }</label>
-                    <input placeholder="any" value={self.discriminator.clone()}
-                        oninput={link.callback(|e: InputEvent| Msg::Discriminator(input_value(e)))} />
-                    <button disabled={self.discovering || self.running}
-                        onclick={link.callback(|_| Msg::Discover)}>
-                        { if self.discovering { "Discovering…" } else { "Discover devices" } }
-                    </button>
-                </div>
+                <main class="app container section">
+                    { self.view_tabs(link) }
+                    { for self.error.iter().map(|e| html!{
+                        <div class="notification is-danger is-light">
+                            <strong>{ "Error: " }</strong>{ e.clone() }
+                        </div>
+                    }) }
 
-                { self.view_discovered(link) }
-
-                <div class="row">
-                    <label>{ "Peer addr" }</label>
-                    <input value={self.peer_addr.clone()}
-                        oninput={link.callback(|e: InputEvent| Msg::PeerAddr(input_value(e)))} />
-                </div>
-                <div class="row">
-                    <label>{ "Passcode" }</label>
-                    <input value={self.passcode.clone()}
-                        oninput={link.callback(|e: InputEvent| Msg::Passcode(input_value(e)))} />
-                </div>
-                <div class="row">
-                    <label>{ "Persistent" }</label>
-                    <input type="checkbox" checked={self.persistent}
-                        onchange={link.callback(|e: Event| Msg::Persistent(checkbox_checked(e)))} />
-                    <span class="hint">
-                        { "keep the device on our fabric + in the store (else throwaway)" }
-                    </span>
-                </div>
-                <div class="row">
-                    <button disabled={self.running}
-                        onclick={link.callback(|_| Msg::Run)}>
-                        { if self.running { "Running…" } else { "Run vertical" } }
-                    </button>
-                </div>
-
-                { self.view_steps() }
-                { self.view_result() }
-
-                { self.view_stored(link) }
-
-                { for self.error.iter().map(|e| html!{ <p class="err">{ format!("Error: {e}") }</p> }) }
+                    {
+                        match self.tab {
+                            Tab::Discover => self.view_discover_tab(link),
+                            Tab::Commission => self.view_commission_tab(link),
+                            Tab::Devices => self.view_devices_tab(link),
+                        }
+                    }
+                </main>
             </>
         }
     }
 }
 
 impl App {
+    /// The top-level Bulma tab bar.
+    fn view_tabs(&self, link: &html::Scope<Self>) -> Html {
+        let tab = |t: Tab, label: &str| {
+            let active = self.tab == t;
+            let onclick = link.callback(move |_| Msg::SelectTab(t));
+            html! {
+                <li class={classes!(active.then_some("is-active"))}>
+                    <a {onclick}>{ label.to_string() }</a>
+                </li>
+            }
+        };
+        html! {
+            <div class="tabs is-boxed is-medium">
+                <ul>
+                    { tab(Tab::Discover, "Discover") }
+                    { tab(Tab::Commission, "Commission") }
+                    { tab(Tab::Devices, "Devices") }
+                </ul>
+            </div>
+        }
+    }
+
+    // --- Discover tab -----------------------------------------------------
+
+    fn view_discover_tab(&self, link: &html::Scope<Self>) -> Html {
+        html! {
+            <div class="box">
+                <h2 class="title is-5">{ "Find commissionable devices" }</h2>
+                <div class="field is-grouped">
+                    <div class="control">
+                        <input class="input" placeholder="discriminator (any)"
+                            value={self.discriminator.clone()}
+                            oninput={link.callback(|e: InputEvent| Msg::Discriminator(input_value(e)))} />
+                    </div>
+                    <div class="control">
+                        <button class={classes!("button", "is-primary", self.discovering.then_some("is-loading"))}
+                            disabled={self.discovering || self.running}
+                            onclick={link.callback(|_| Msg::Discover)}>
+                            { "Discover" }
+                        </button>
+                    </div>
+                </div>
+
+                { self.view_discovered(link) }
+            </div>
+        }
+    }
+
     fn view_discovered(&self, link: &html::Scope<Self>) -> Html {
         if self.discovered.is_empty() {
-            return html! {};
+            return html! {
+                <p class="has-text-grey">{ "No devices found yet. Click Discover to scan the local network." }</p>
+            };
         }
         html! {
-            <div class="steps">
-                { for self.discovered.iter().map(|d| {
-                    let addr = d.addr.clone();
-                    let onclick = link.callback(move |_| Msg::PickDevice(addr.clone()));
-                    html! {
-                        <div class="step done">
-                            { format!("{}  (id={:#018x})  ", d.addr, d.commissionable_id) }
-                            <button {onclick}>{ "Use" }</button>
+            <table class="table is-fullwidth is-hoverable">
+                <thead>
+                    <tr><th>{ "Address" }</th><th>{ "Commissionable id" }</th><th></th></tr>
+                </thead>
+                <tbody>
+                    { for self.discovered.iter().map(|d| {
+                        let addr = d.addr.clone();
+                        let onclick = link.callback(move |_| Msg::PickDevice(addr.clone()));
+                        html! {
+                            <tr>
+                                <td class="mono">{ d.addr.clone() }</td>
+                                <td class="mono">{ format!("{:#018x}", d.commissionable_id) }</td>
+                                <td class="has-text-right">
+                                    <button class="button is-small is-link is-light" {onclick}>{ "Use" }</button>
+                                </td>
+                            </tr>
+                        }
+                    }) }
+                </tbody>
+            </table>
+        }
+    }
+
+    // --- Commission tab ---------------------------------------------------
+
+    fn view_commission_tab(&self, link: &html::Scope<Self>) -> Html {
+        html! {
+            <>
+                <div class="box">
+                    <h2 class="title is-5">{ "Commission a device" }</h2>
+
+                    <div class="field">
+                        <label class="label">{ "Peer address" }</label>
+                        <div class="control">
+                            <input class="input mono" value={self.peer_addr.clone()}
+                                oninput={link.callback(|e: InputEvent| Msg::PeerAddr(input_value(e)))} />
                         </div>
-                    }
-                }) }
-            </div>
+                    </div>
+
+                    <div class="field">
+                        <label class="label">{ "Passcode" }</label>
+                        <div class="control">
+                            <input class="input mono" value={self.passcode.clone()}
+                                oninput={link.callback(|e: InputEvent| Msg::Passcode(input_value(e)))} />
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <label class="checkbox">
+                            <input type="checkbox" checked={self.persistent}
+                                onchange={link.callback(|e: Event| Msg::Persistent(checkbox_checked(e)))} />
+                            { " Persistent" }
+                        </label>
+                        <p class="help">
+                            { "Keep the device on our fabric + in the store (else commission on a throwaway fabric and self-destruct)." }
+                        </p>
+                    </div>
+
+                    <div class="field">
+                        <div class="control">
+                            <button class={classes!("button", "is-primary", self.running.then_some("is-loading"))}
+                                disabled={self.running}
+                                onclick={link.callback(|_| Msg::Run)}>
+                                { "Run vertical" }
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                { self.view_steps() }
+                { self.view_result() }
+            </>
         }
     }
 
@@ -356,15 +470,22 @@ impl App {
             return html! {};
         }
         html! {
-            <div class="steps">
-                { for self.steps.iter().map(|s| {
-                    let (cls, txt) = match &s.status {
-                        proto::StepStatus::Started => ("started", "started".to_string()),
-                        proto::StepStatus::Done => ("done", "done".to_string()),
-                        proto::StepStatus::Failed { message } => ("failed", format!("failed: {message}")),
-                    };
-                    html! { <div class={classes!("step", cls)}>{ format!("{:?}: {txt}", s.step) }</div> }
-                }) }
+            <div class="box">
+                <h3 class="title is-6">{ "Progress" }</h3>
+                <div class="tags are-medium">
+                    { for self.steps.iter().map(|s| {
+                        let (cls, txt) = match &s.status {
+                            proto::StepStatus::Started => ("is-warning", "started".to_string()),
+                            proto::StepStatus::Done => ("is-success", "done".to_string()),
+                            proto::StepStatus::Failed { message } => ("is-danger", format!("failed: {message}")),
+                        };
+                        html! {
+                            <span class={classes!("tag", cls)}>
+                                { format!("{:?}: {txt}", s.step) }
+                            </span>
+                        }
+                    }) }
+                </div>
             </div>
         }
     }
@@ -372,10 +493,18 @@ impl App {
     fn view_result(&self) -> Html {
         match &self.result {
             Some(proto::Response::Vertical(v)) => html! {
-                <div class="result">{ format_result(v) }</div>
+                <div class="box">
+                    <h3 class="title is-6">{ "Result" }</h3>
+                    { for v.rematch_candidate.map(|node_id| html!{
+                        <div class="notification is-info is-light">
+                            { format!("↳ Possible match: same model as stored device 0x{node_id:016x} — open Devices to confirm/link.") }
+                        </div>
+                    }) }
+                    <pre class="result">{ format_result(v) }</pre>
+                </div>
             },
             Some(proto::Response::Error { message }) => html! {
-                <p class="err">{ format!("Server error: {message}") }</p>
+                <div class="notification is-danger is-light">{ format!("Server error: {message}") }</div>
             },
             // Stored-device responses (Devices / Peek / Ok) and Discovered are
             // routed to their own state in `Msg::Done`, not shown here.
@@ -383,28 +512,32 @@ impl App {
         }
     }
 
+    // --- Devices tab ------------------------------------------------------
+
     /// The persistently-commissioned device list, with per-device Peek / Identify
     /// actions. The basis for the persistent-fabric workflow: commission once
     /// (Persistent), then re-address devices over CASE without re-commissioning.
-    fn view_stored(&self, link: &html::Scope<Self>) -> Html {
+    fn view_devices_tab(&self, link: &html::Scope<Self>) -> Html {
         let filter = self.tag_filter.trim().to_lowercase();
         let visible: Vec<&proto::StoredDeviceInfo> = self
             .stored
             .iter()
-            .filter(|d| {
-                filter.is_empty()
-                    || d.tags.iter().any(|t| t.to_lowercase().contains(&filter))
-            })
+            .filter(|d| filter.is_empty() || d.tags.iter().any(|t| t.to_lowercase().contains(&filter)))
             .collect();
 
         html! {
-            <div class="stored">
-                <div class="row">
-                    <h2>{ "Stored devices" }</h2>
-                    <button disabled={self.busy_stored}
-                        onclick={link.callback(|_| Msg::ListDevices)}>
-                        { if self.busy_stored { "Working…" } else { "Refresh" } }
-                    </button>
+            <div class="box">
+                <div class="level is-mobile">
+                    <div class="level-left">
+                        <h2 class="title is-5">{ "Stored devices" }</h2>
+                    </div>
+                    <div class="level-right">
+                        <button class={classes!("button", "is-small", self.busy_stored.then_some("is-loading"))}
+                            disabled={self.busy_stored}
+                            onclick={link.callback(|_| Msg::ListDevices)}>
+                            { "Refresh" }
+                        </button>
+                    </div>
                 </div>
 
                 {
@@ -412,37 +545,44 @@ impl App {
                         html! {}
                     } else {
                         html! {
-                            <div class="row">
-                                <label>{ "Filter by tag" }</label>
-                                <input placeholder="any" value={self.tag_filter.clone()}
-                                    oninput={link.callback(|e: InputEvent| Msg::TagFilter(input_value(e)))} />
+                            <div class="field">
+                                <div class="control has-icons-left">
+                                    <input class="input" placeholder="filter by tag…"
+                                        value={self.tag_filter.clone()}
+                                        oninput={link.callback(|e: InputEvent| Msg::TagFilter(input_value(e)))} />
+                                    <span class="icon is-small is-left">{ "🔎" }</span>
+                                </div>
                             </div>
                         }
                     }
                 }
 
                 { for self.stored_status.iter().map(|s| html!{
-                    <pre class="result">{ s.clone() }</pre>
+                    <div class="notification is-light"><pre class="result">{ s.clone() }</pre></div>
                 }) }
 
                 {
                     if self.stored.is_empty() {
-                        html! { <p class="hint">{ "No stored devices. Commission one with \"Persistent\" checked." }</p> }
-                    } else if visible.is_empty() {
-                        html! { <p class="hint">{ format!("No stored devices tagged like \"{}\".", self.tag_filter.trim()) }</p> }
-                    } else {
                         html! {
-                            <div class="steps">
-                                { for visible.into_iter().map(|d| self.view_stored_one(d, link)) }
-                            </div>
+                            <p class="has-text-grey">
+                                { "No stored devices yet. Commission one with \"Persistent\" checked." }
+                            </p>
                         }
+                    } else if visible.is_empty() {
+                        html! {
+                            <p class="has-text-grey">
+                                { format!("No stored devices tagged like \"{}\".", self.tag_filter.trim()) }
+                            </p>
+                        }
+                    } else {
+                        html! { <>{ for visible.into_iter().map(|d| self.view_device_card(d, link)) }</> }
                     }
                 }
             </div>
         }
     }
 
-    fn view_stored_one(&self, d: &proto::StoredDeviceInfo, link: &html::Scope<Self>) -> Html {
+    fn view_device_card(&self, d: &proto::StoredDeviceInfo, link: &html::Scope<Self>) -> Html {
         let node_id = d.handle.node_id;
         let peek = link.callback(move |_| Msg::Peek(node_id));
         let identify = link.callback(move |_| Msg::Identify(node_id));
@@ -460,8 +600,6 @@ impl App {
             format!("node 0x{node_id:016x}")
         };
 
-        // The edit buffer falls back to the device's current tags (it's seeded
-        // on list, but a never-listed device still shows its tags).
         let tag_text = self
             .tag_inputs
             .get(&node_id)
@@ -469,21 +607,55 @@ impl App {
             .unwrap_or_else(|| d.tags.join(", "));
 
         html! {
-            <div class="step done">
-                <div>
-                    <strong>{ title }</strong>
-                    { format!("  (fab {} · node 0x{:016x})", d.handle.fabric_index, node_id) }
-                </div>
-                <div class="hint">{ fingerprint_line(&d.fingerprint) }</div>
-                <div class="row">
-                    <label>{ "Tags" }</label>
-                    <input placeholder="comma,separated" value={tag_text}
-                        oninput={on_tags} />
-                    <button disabled={self.busy_stored} onclick={save_tags}>{ "Save" }</button>
-                </div>
-                <div class="row">
-                    <button disabled={self.busy_stored} onclick={peek}>{ "Peek" }</button>
-                    <button disabled={self.busy_stored} onclick={identify}>{ "Identify" }</button>
+            <div class="card mb-4">
+                <div class="card-content">
+                    <div class="level is-mobile mb-2">
+                        <div class="level-left">
+                            <p class="title is-6 mb-0">{ title }</p>
+                        </div>
+                        <div class="level-right">
+                            <span class="tag is-light mono">
+                                { format!("fab {} · 0x{:016x}", d.handle.fabric_index, node_id) }
+                            </span>
+                        </div>
+                    </div>
+
+                    <p class="is-size-7 has-text-grey mono mb-3">{ fingerprint_line(&d.fingerprint) }</p>
+
+                    {
+                        if d.tags.is_empty() {
+                            html! {}
+                        } else {
+                            html! {
+                                <div class="tags mb-2">
+                                    { for d.tags.iter().map(|t| html!{
+                                        <span class="tag is-info is-light">{ t.clone() }</span>
+                                    }) }
+                                </div>
+                            }
+                        }
+                    }
+
+                    <div class="field has-addons mb-2">
+                        <div class="control is-expanded">
+                            <input class="input is-small" placeholder="comma,separated tags"
+                                value={tag_text} oninput={on_tags} />
+                        </div>
+                        <div class="control">
+                            <button class="button is-small" disabled={self.busy_stored} onclick={save_tags}>
+                                { "Save tags" }
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="buttons are-small">
+                        <button class="button is-link is-light" disabled={self.busy_stored} onclick={peek}>
+                            { "Peek" }
+                        </button>
+                        <button class="button is-warning is-light" disabled={self.busy_stored} onclick={identify}>
+                            { "Identify" }
+                        </button>
+                    </div>
                 </div>
             </div>
         }

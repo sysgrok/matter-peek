@@ -4,26 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>matter-peek</title>
+    <!-- Bulma, vendored locally (offline-safe; no CDN at runtime). -->
+    <link data-trunk rel="copy-file" href="bulma.min.css" />
+    <link rel="stylesheet" href="bulma.min.css" />
     <style>
-      body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1c1c1c; }
-      h1 { font-size: 1.4rem; }
-      .row { display: flex; gap: .5rem; align-items: center; margin: .5rem 0; }
-      label { width: 7rem; }
-      input, select { padding: .35rem .5rem; font-size: 1rem; }
-      button { padding: .45rem 1rem; font-size: 1rem; cursor: pointer; }
-      button:disabled { opacity: .5; cursor: default; }
-      .steps { margin-top: 1rem; }
-      .step { padding: .3rem .5rem; border-left: 3px solid #ccc; margin: .25rem 0; font-family: ui-monospace, monospace; font-size: .9rem; }
-      .step.started { border-color: #f0ad4e; }
-      .step.done { border-color: #5cb85c; }
-      .step.failed { border-color: #d9534f; background: #fdf0f0; }
-      .result { margin-top: 1rem; background: #f6f8fa; padding: 1rem; border-radius: 6px; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: .85rem; }
-      .err { color: #d9534f; }
-      h2 { font-size: 1.1rem; margin: 0; }
-      .hint { color: #6a737d; font-size: .85rem; }
-      input[type="checkbox"] { width: auto; }
-      .stored { margin-top: 2rem; border-top: 1px solid #e1e4e8; padding-top: 1rem; }
-      .stored .step.done .row { margin-top: .4rem; }
+      /* A few project tweaks on top of Bulma. */
+      .app { max-width: 860px; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      pre.result { white-space: pre-wrap; }
     </style>
   </head>
   <body></body>
