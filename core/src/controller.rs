@@ -40,7 +40,13 @@ use crate::model::{
 extern crate alloc;
 use alloc::vec::Vec;
 
-const COMMISSION_TIMEOUT_SECS: u64 = 60;
+/// Per-phase (PASE / CASE) timeout for a commission. Kept short so a commission
+/// against an unreachable device fails — and thus becomes retryable / the UI
+/// recovers — promptly, rather than hanging the actor for a minute. A reachable
+/// device commissions in well under a second; even a slow LAN is comfortably
+/// inside this. (Cancellation proper is cooperative at phase boundaries; this
+/// bounds the one phase a cancel can't reach into — see `vertical_flow`.)
+const COMMISSION_TIMEOUT_SECS: u64 = 20;
 
 /// Per-fabric identity the controller installs on a device.
 ///
@@ -100,22 +106,73 @@ impl<'a, C: Crypto> Controller<'a, C> {
         device_node_id: u64,
         policy: FabricPolicy,
     ) -> Result<CommissionOutcome, Error> {
+        match self
+            .commission_cancellable(
+                ca,
+                controller_fab_idx,
+                peer_addr,
+                passcode,
+                device_node_id,
+                policy,
+                || false,
+            )
+            .await?
+        {
+            CommissionFlow::Done(o) => Ok(o),
+            // The no-cancel caller can never observe this.
+            CommissionFlow::Cancelled => unreachable!("cancel closure never returns true"),
+        }
+    }
+
+    /// Like [`Self::commission`], but cooperatively cancellable up to the point of
+    /// no return (AddNOC). `cancel()` is polled at the safe pre-AddNOC boundaries
+    /// (before the orphan sweep, after it, before phase 1) and the orphan sweep —
+    /// the step most prone to hang when re-commissioning a device whose window is
+    /// closed — is *raced* against it. Once phase 1 begins, commissioning is
+    /// atomic and runs to completion (or its timeout); interrupting mid-AddNOC
+    /// could orphan a fabric, so we don't.
+    ///
+    /// Returns [`CommissionFlow::Cancelled`] when cancellation took effect
+    /// before any device fabric was installed (nothing to clean up).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commission_cancellable(
+        &self,
+        ca: &crate::ca::ControllerCa,
+        controller_fab_idx: NonZeroU8,
+        peer_addr: SocketAddr,
+        passcode: u32,
+        device_node_id: u64,
+        policy: FabricPolicy,
+        cancel: impl Fn() -> bool,
+    ) -> Result<CommissionFlow, Error> {
         let crypto = self.crypto;
         let matter = self.matter;
+
+        if cancel() {
+            return Ok(CommissionFlow::Cancelled);
+        }
 
         // Reclaim any fabric slot we leaked on this device in a previous run
         // (commissioned, then crashed before RemoveFabric). Best-effort over the
         // PASE window, before AddNOC — so a device whose fabric table is full of
         // our orphans doesn't reject the new commission with `TableFull`.
-        let reclaimed = self
-            .sweep_orphaned_fabrics(ca, controller_fab_idx, peer_addr, passcode)
-            .await
-            .unwrap_or_else(|e| {
-                info!("orphaned-fabric sweep skipped (non-fatal): {e:?}");
-                0
-            });
-        if reclaimed > 0 {
-            info!("orphaned-fabric sweep: reclaimed {reclaimed} stale fabric slot(s)");
+        //
+        // This is also the step most likely to HANG when re-commissioning a
+        // device whose commissioning window has since closed (its PASE never
+        // completes). So it is both time-bounded *and* raced against `cancel` —
+        // and it is entirely pre-AddNOC, so abandoning it is always safe.
+        let sweep = self.sweep_orphaned_fabrics(ca, controller_fab_idx, peer_addr, passcode);
+        match race_cancel(with_timeout(sweep, "orphan-sweep"), &cancel).await {
+            Raced::Cancelled => return Ok(CommissionFlow::Cancelled),
+            Raced::Done(Ok(reclaimed)) if reclaimed > 0 => {
+                info!("orphaned-fabric sweep: reclaimed {reclaimed} stale fabric slot(s)");
+            }
+            Raced::Done(Ok(_)) => {}
+            Raced::Done(Err(e)) => info!("orphaned-fabric sweep skipped (non-fatal): {e:?}"),
+        }
+
+        if cancel() {
+            return Ok(CommissionFlow::Cancelled);
         }
 
         info!("=== Commissioner::commission (phase 1 — PASE) ===");
@@ -165,13 +222,13 @@ impl<'a, C: Crypto> Controller<'a, C> {
         .await?;
         info!("phase 2 ok: CASE established, CommissioningComplete acknowledged");
 
-        Ok(CommissionOutcome {
+        Ok(CommissionFlow::Done(CommissionOutcome {
             handle: DeviceHandle {
                 fabric_index: phase1.fabric_index,
                 node_id: phase1.device_node_id,
             },
             policy,
-        })
+        }))
     }
 
     /// Remove any fabric the device still holds that belongs to **us** — i.e.
@@ -404,6 +461,44 @@ where
         Either::Second(_) => {
             error!("{what} timed out after {COMMISSION_TIMEOUT_SECS}s");
             Err(ErrorCode::RxTimeout.into())
+        }
+    }
+}
+
+/// Outcome of [`Controller::commission_cancellable`].
+#[derive(Debug)]
+pub enum CommissionFlow {
+    /// Commissioning completed.
+    Done(CommissionOutcome),
+    /// Cancelled at a safe pre-AddNOC point — no device fabric was installed, so
+    /// there is nothing to clean up.
+    Cancelled,
+}
+
+/// Internal result of racing a future against a cancel predicate.
+enum Raced<T> {
+    Done(T),
+    Cancelled,
+}
+
+/// Drive `fut`, but bail with [`Raced::Cancelled`] as soon as `cancel()` returns
+/// true. Cancellation is polled (sampled on a short tick alongside the future),
+/// not edge-triggered — cheap, and enough to make a hung PASE abandonable within
+/// a tick of the user pressing Cancel.
+async fn race_cancel<F, T>(fut: F, cancel: &impl Fn() -> bool) -> Raced<T>
+where
+    F: core::future::Future<Output = T>,
+{
+    let mut fut = pin!(fut);
+    loop {
+        let mut tick = pin!(Timer::after(Duration::from_millis(100)));
+        match select(&mut fut, &mut tick).await {
+            Either::First(out) => return Raced::Done(out),
+            Either::Second(_) => {
+                if cancel() {
+                    return Raced::Cancelled;
+                }
+            }
         }
     }
 }

@@ -16,10 +16,16 @@ use log::{debug, error, info, warn};
 
 use matter_peek_proto as proto;
 
-use crate::actor::Command;
+use crate::actor::{CancelFlag, Command};
 
 /// Serve WS connections forever on `addr`, dispatching to the actor via `tx`.
-pub async fn serve(addr: &str, tx: async_channel::Sender<Command>) -> std::io::Result<()> {
+/// `cancel` is shared with the actor: a `Cancel` request sets it directly,
+/// bypassing the (serial) command queue so it reaches a running vertical.
+pub async fn serve(
+    addr: &str,
+    tx: async_channel::Sender<Command>,
+    cancel: CancelFlag,
+) -> std::io::Result<()> {
     let listener = async_net::TcpListener::bind(addr).await?;
     info!("rpc: listening on ws://{addr}");
 
@@ -27,16 +33,21 @@ pub async fn serve(addr: &str, tx: async_channel::Sender<Command>) -> std::io::R
         let (stream, peer) = listener.accept().await?;
         debug!("rpc: connection from {peer}");
         let tx = tx.clone();
+        let cancel = cancel.clone();
         // One task per connection.
         crate::spawn(async move {
-            if let Err(e) = handle_conn(stream, tx).await {
+            if let Err(e) = handle_conn(stream, tx, cancel).await {
                 debug!("rpc: connection {peer} ended: {e}");
             }
         });
     }
 }
 
-async fn handle_conn<S>(stream: S, tx: async_channel::Sender<Command>) -> anyhow_lite::Result
+async fn handle_conn<S>(
+    stream: S,
+    tx: async_channel::Sender<Command>,
+    cancel: CancelFlag,
+) -> anyhow_lite::Result
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -84,7 +95,7 @@ where
                 }
             };
 
-            dispatch(client_msg, &tx, &out_tx).await;
+            dispatch(client_msg, &tx, &out_tx, &cancel).await;
         }
     };
 
@@ -99,8 +110,25 @@ async fn dispatch(
     msg: proto::ClientMsg,
     tx: &async_channel::Sender<Command>,
     out_tx: &async_channel::Sender<proto::ServerMsg>,
+    cancel: &CancelFlag,
 ) {
     let req_id = msg.req_id;
+
+    // `Cancel` is handled here, NOT enqueued: the actor is busy running the
+    // vertical (the command loop is serial), so a queued Cancel would never be
+    // serviced in time. Setting the shared flag reaches the running vertical,
+    // which polls it at its phase boundaries. Reply immediately.
+    if matches!(msg.request, proto::Request::Cancel) {
+        cancel.set(true);
+        let _ = out_tx
+            .send(proto::ServerMsg::Response {
+                req_id,
+                response: proto::Response::Ok,
+            })
+            .await;
+        return;
+    }
+
     let (ev_tx, ev_rx) = async_channel::unbounded::<proto::Event>();
     let (rep_tx, rep_rx) = async_channel::bounded::<proto::Response>(1);
 

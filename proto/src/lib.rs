@@ -85,6 +85,15 @@ pub enum Request {
     /// (trim / drop empties / de-dup) and answers with the refreshed
     /// [`Response::Devices`] list.
     SetTags { node_id: u64, tags: Vec<String> },
+    /// Request cancellation of the in-flight vertical (commission flow). Handled
+    /// out-of-band (it does not queue behind the running command): the server
+    /// sets a cancel flag the vertical polls at phase boundaries. Cancellation
+    /// only takes effect at a *safe* point — before the device fabric is
+    /// installed it aborts cleanly; once installed, the device is decommissioned
+    /// (RemoveFabric) so nothing is left orphaned. Answered immediately with
+    /// [`Response::Ok`]; the cancelled vertical itself replies
+    /// [`Response::Cancelled`].
+    Cancel,
 }
 
 /// A reply to a [`Request`].
@@ -106,6 +115,11 @@ pub enum Response {
     },
     /// A [`Request::Identify`] / other fire-and-forget op succeeded.
     Ok,
+    /// The in-flight vertical was cancelled at a safepoint. `decommissioned` is
+    /// `true` if the device had already been given our fabric and was therefore
+    /// cleaned up (RemoveFabric) on the way out; `false` if cancellation landed
+    /// before any device state was created.
+    Cancelled { decommissioned: bool },
     /// The request failed before producing a result.
     Error { message: String },
 }

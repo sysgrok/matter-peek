@@ -41,6 +41,7 @@ fn main() {
             max: 16,
         },
         "list" => proto::Request::ListDevices,
+        "cancel" => proto::Request::Cancel,
         "peek" => proto::Request::PeekDevice {
             node_id: parse_node(arg3.as_deref().unwrap_or("0")),
             with_logs: false,

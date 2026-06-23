@@ -11,11 +11,13 @@
 //! this sidesteps the self-referential `Matter<'a>` lifetime entirely: a
 //! `&'static Matter` is freely shared between the pump and the command loop.
 
+use core::cell::Cell;
 use core::net::SocketAddr;
 use core::num::NonZeroU8;
 use core::pin::pin;
 
 use std::net::UdpSocket;
+use std::rc::Rc;
 
 use embassy_futures::select::{select, Either};
 
@@ -50,6 +52,12 @@ const FIRST_DEVICE_NODE_ID: u64 = 112234;
 /// lifetime is `'static` and it can be shared freely across tasks.
 static PERSIST_MATTER: StaticCell<Matter> = StaticCell::new();
 
+/// A cooperative cancel flag for the in-flight vertical, shared (single-threaded,
+/// so `Rc<Cell>` — no atomics) between the server's dispatch (which sets it when
+/// a [`proto::Request::Cancel`] arrives, bypassing the serial command queue) and
+/// the actor (whose vertical polls it at phase boundaries). See [`vertical_flow`].
+pub type CancelFlag = Rc<Cell<bool>>;
+
 /// A unit of work handed to the actor, with the channels to report back on.
 pub struct Command {
     pub req_id: proto::ReqId,
@@ -63,7 +71,7 @@ pub struct Command {
 /// Run the persistent actor: stand up one Matter stack for the process, restore
 /// persisted state, ensure the controller CA + fabric, then service commands
 /// against that shared stack until the channel closes.
-pub async fn run(rx: async_channel::Receiver<Command>) {
+pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
     let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
 
     // One `&'static` stack for the whole process (see module docs). Kept `&mut`
@@ -122,6 +130,7 @@ pub async fn run(rx: async_channel::Receiver<Command>) {
         ca,
         fab_idx,
         store,
+        cancel,
     };
 
     // Transport pump + command loop, concurrently, for the actor's lifetime.
@@ -144,6 +153,9 @@ struct ActorCtx<'a, C: Crypto> {
     ca: ControllerCa,
     fab_idx: NonZeroU8,
     store: ControllerStore<DirKvBlobStore>,
+    /// Cooperative cancel flag for the in-flight vertical (set by the server's
+    /// dispatch, polled by [`vertical_flow`] at phase boundaries).
+    cancel: CancelFlag,
 }
 
 /// Pull commands and service them one at a time against the shared stack.
@@ -172,6 +184,13 @@ async fn service<C: Crypto>(cmd: &Command, ctx: &ActorCtx<'_, C>) -> proto::Resp
         }
         proto::Request::Identify { node_id, secs } => identify(ctx, *node_id, *secs).await,
         proto::Request::SetTags { node_id, tags } => set_tags(ctx, *node_id, tags),
+        // `Cancel` is normally intercepted by the server (it sets the shared flag
+        // out-of-band rather than enqueuing). If one reaches here, no vertical is
+        // running — clear any stale flag and ack.
+        proto::Request::Cancel => {
+            ctx.cancel.set(false);
+            proto::Response::Ok
+        }
     }
 }
 
@@ -321,27 +340,48 @@ async fn vertical_flow<C: Crypto>(
 ) -> proto::Response {
     use proto::VerticalStep as Step;
 
+    // Fresh cancel state for this run (any stale request from a prior vertical is
+    // cleared). The flag is set out-of-band by the server's dispatch and polled
+    // at the phase boundaries below.
+    ctx.cancel.set(false);
+
     // Allocate the device's NodeID: one past the current store max (persistent),
     // so re-runs don't collide; ephemeral reuses the base id (removed anyway).
     let device_node_id = next_device_node_id(ctx);
 
+    // SAFEPOINT 1 — before commission: the device has no fabric of ours yet, so
+    // cancelling here is side-effect-free.
+    if ctx.cancel.get() {
+        return cancelled(false);
+    }
+
     // --- Commission ---
+    // Cancellable up to AddNOC: the closure lets `commission_cancellable` poll
+    // the flag and abandon the (often-hung-on-a-closed-window) orphan sweep / PASE
+    // — all pre-AddNOC, so abandoning is safe and needs no cleanup. A `Cancelled`
+    // here means no device state was created.
     emit(cmd, Step::Commission, started()).await;
+    let cancel = ctx.cancel.clone();
     let outcome = match ctx
         .controller
-        .commission(
+        .commission_cancellable(
             &ctx.ca,
             ctx.fab_idx,
             peer_addr,
             passcode,
             device_node_id,
             convert::policy(policy),
+            move || cancel.get(),
         )
         .await
     {
-        Ok(o) => {
+        Ok(matter_peek_core::controller::CommissionFlow::Done(o)) => {
             emit(cmd, Step::Commission, done()).await;
             o
+        }
+        Ok(matter_peek_core::controller::CommissionFlow::Cancelled) => {
+            emit(cmd, Step::Commission, failed_msg("cancelled")).await;
+            return cancelled(false);
         }
         Err(e) => {
             emit(cmd, Step::Commission, failed(&e)).await;
@@ -350,6 +390,18 @@ async fn vertical_flow<C: Crypto>(
             };
         }
     };
+
+    // SAFEPOINT 2 — after commission: the device now holds our fabric. We don't
+    // interrupt `commission()` itself mid-protocol (it's atomic), but a cancel
+    // request that arrived during it takes effect here. Leaving the fabric would
+    // orphan it, so clean up by decommissioning (RemoveFabric) before returning.
+    if ctx.cancel.get() {
+        let removed = ctx.controller.decommission(outcome.handle).await.is_ok();
+        if !removed {
+            error!("actor: cancel cleanup decommission failed for the just-commissioned device");
+        }
+        return cancelled(removed);
+    }
 
     // --- Read health ---
     emit(cmd, Step::ReadHealth, started()).await;
@@ -375,6 +427,18 @@ async fn vertical_flow<C: Crypto>(
             None
         }
     };
+
+    // SAFEPOINT 3 — after the (read-only) health/logs phases, before we decide
+    // the device's fate. A cancel that arrived during those reads is honored
+    // here: the device is decommissioned regardless of policy (don't persist a
+    // device the user asked to cancel), leaving nothing behind.
+    if ctx.cancel.get() {
+        let removed = ctx.controller.decommission(outcome.handle).await.is_ok();
+        if !removed {
+            error!("actor: cancel cleanup decommission failed");
+        }
+        return cancelled(removed);
+    }
 
     // --- Persist (Persistent) | Decommission (Ephemeral) ---
     let mut rematch_candidate = None;
@@ -534,6 +598,18 @@ fn failed(e: &rs_matter::error::Error) -> proto::StepStatus {
     proto::StepStatus::Failed {
         message: format!("{e:?}"),
     }
+}
+
+fn failed_msg(msg: &str) -> proto::StepStatus {
+    proto::StepStatus::Failed {
+        message: msg.into(),
+    }
+}
+
+/// The reply for a vertical cancelled at a safepoint. `decommissioned` says
+/// whether a just-installed device fabric had to be cleaned up on the way out.
+fn cancelled(decommissioned: bool) -> proto::Response {
+    proto::Response::Cancelled { decommissioned }
 }
 
 /// Bind an ephemeral dual-stack IPv6 UDP socket for the controller transport.

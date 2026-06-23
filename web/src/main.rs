@@ -31,6 +31,9 @@ enum Tab {
     Devices,
 }
 
+/// How long a commission may run before the UI auto-cancels it.
+const COMMISSION_TIMEOUT_SECS: u32 = 90;
+
 enum Msg {
     SelectTab(Tab),
     PeerAddr(String),
@@ -38,6 +41,13 @@ enum Msg {
     Discriminator(String),
     Persistent(bool),
     Run,
+    /// Proceed with a commission despite the "already commissioned this address"
+    /// warning (the user confirmed).
+    RunAnyway,
+    /// Dismiss the re-commission warning without running.
+    DismissRecommission,
+    /// User clicked Cancel (or the timeout fired) — request server-side cancel.
+    Cancel,
     Discover,
     PickDevice(String),
     ListDevices,
@@ -79,6 +89,15 @@ struct App {
     result: Option<proto::Response>,
     /// Transient status line for stored-device ops (peek result / identify ack).
     stored_status: Option<String>,
+    /// A neutral info notice (e.g. cancellation outcome).
+    notice: Option<String>,
+    /// The address we most recently commissioned successfully (and kept). Used to
+    /// warn before a likely-doomed re-commission of the same (now closed-window)
+    /// device.
+    last_commissioned_addr: Option<String>,
+    /// True while showing the "you just commissioned this — re-commission anyway?"
+    /// confirmation, instead of immediately running.
+    confirm_recommission: bool,
     error: Option<String>,
 }
 
@@ -103,6 +122,9 @@ impl Component for App {
             steps: Vec::new(),
             result: None,
             stored_status: None,
+            notice: None,
+            last_commissioned_addr: None,
+            confirm_recommission: false,
             error: None,
         }
     }
@@ -167,29 +189,32 @@ impl Component for App {
                 true
             }
             Msg::Run => {
-                let passcode: u32 = match self.passcode.trim().parse() {
-                    Ok(p) => p,
-                    Err(_) => {
-                        self.error = Some("passcode must be a u32".into());
-                        return true;
-                    }
-                };
-                self.running = true;
-                self.steps.clear();
-                self.result = None;
-                self.error = None;
-
-                let policy = if self.persistent {
-                    proto::FabricPolicy::Persistent
-                } else {
-                    proto::FabricPolicy::Ephemeral
-                };
-                let req = proto::Request::RunVertical {
-                    peer_addr: self.peer_addr.trim().to_string(),
-                    passcode,
-                    policy,
-                };
-                send_request(ctx.link().clone(), req);
+                // Guard: re-commissioning the device we *just* commissioned is
+                // almost always a mistake — its commissioning window has closed,
+                // so PASE will hang. Warn + require confirmation instead.
+                let addr = self.peer_addr.trim().to_string();
+                if self.last_commissioned_addr.as_deref() == Some(addr.as_str()) {
+                    self.confirm_recommission = true;
+                    return true;
+                }
+                self.start_commission(ctx)
+            }
+            Msg::RunAnyway => {
+                self.confirm_recommission = false;
+                self.start_commission(ctx)
+            }
+            Msg::DismissRecommission => {
+                self.confirm_recommission = false;
+                true
+            }
+            Msg::Cancel => {
+                // Only meaningful while a vertical is in flight.
+                if !self.running {
+                    return false;
+                }
+                // Fire-and-forget the cancel on its own WS connection; the
+                // running vertical replies `Cancelled` on its original one.
+                send_cancel();
                 true
             }
             Msg::ListDevices => {
@@ -277,9 +302,26 @@ impl Component for App {
                     proto::Response::Ok => {
                         self.stored_status = Some("Identify acknowledged — device should blink.".into());
                     }
+                    proto::Response::Cancelled { decommissioned } => {
+                        self.notice = Some(if decommissioned {
+                            "Commission cancelled — the device had been added to our fabric and was cleaned up (decommissioned).".into()
+                        } else {
+                            "Commission cancelled before the device was modified.".into()
+                        });
+                    }
                     // A persistent commission populates the store; refresh the
                     // list and surface it on the Devices tab.
                     other @ proto::Response::Vertical(_) => {
+                        // A persistent (kept) device's commissioning window is now
+                        // closed — remember its address to guard a re-commission.
+                        if self.persistent {
+                            if let proto::Response::Vertical(v) = &other {
+                                if !v.decommissioned {
+                                    self.last_commissioned_addr =
+                                        Some(self.peer_addr.trim().to_string());
+                                }
+                            }
+                        }
                         self.result = Some(other);
                         if self.persistent {
                             self.busy_stored = true;
@@ -315,6 +357,9 @@ impl Component for App {
 
                 <main class="app container section">
                     { self.view_tabs(link) }
+                    { for self.notice.iter().map(|n| html!{
+                        <div class="notification is-warning is-light">{ n.clone() }</div>
+                    }) }
                     { for self.error.iter().map(|e| html!{
                         <div class="notification is-danger is-light">
                             <strong>{ "Error: " }</strong>{ e.clone() }
@@ -335,6 +380,43 @@ impl Component for App {
 }
 
 impl App {
+    /// Kick off the commission vertical (shared by `Run` and `RunAnyway`).
+    fn start_commission(&mut self, ctx: &Context<Self>) -> bool {
+        let passcode: u32 = match self.passcode.trim().parse() {
+            Ok(p) => p,
+            Err(_) => {
+                self.error = Some("passcode must be a u32".into());
+                return true;
+            }
+        };
+        self.running = true;
+        self.steps.clear();
+        self.result = None;
+        self.notice = None;
+        self.error = None;
+
+        let policy = if self.persistent {
+            proto::FabricPolicy::Persistent
+        } else {
+            proto::FabricPolicy::Ephemeral
+        };
+        let req = proto::Request::RunVertical {
+            peer_addr: self.peer_addr.trim().to_string(),
+            passcode,
+            policy,
+        };
+        send_request(ctx.link().clone(), req);
+
+        // Safety net: auto-cancel if the vertical runs too long. When the timer
+        // fires we only act if still `running` (a completed run cleared it).
+        let link = ctx.link().clone();
+        spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(COMMISSION_TIMEOUT_SECS * 1000).await;
+            link.send_message(Msg::Cancel);
+        });
+        true
+    }
+
     /// The top-level Bulma tab bar.
     fn view_tabs(&self, link: &html::Scope<Self>) -> Html {
         let tab = |t: Tab, label: &str| {
@@ -418,6 +500,7 @@ impl App {
     fn view_commission_tab(&self, link: &html::Scope<Self>) -> Html {
         html! {
             <>
+                { self.view_recommission_warning(link) }
                 <div class="box">
                     <h2 class="title is-5">{ "Commission a device" }</h2>
 
@@ -449,43 +532,117 @@ impl App {
                     </div>
 
                     <div class="field">
-                        <div class="control">
-                            <button class={classes!("button", "is-primary", self.running.then_some("is-loading"))}
-                                disabled={self.running}
-                                onclick={link.callback(|_| Msg::Run)}>
-                                { "Run vertical" }
-                            </button>
+                        <div class="field is-grouped">
+                            <div class="control">
+                                <button class={classes!("button", "is-primary", self.running.then_some("is-loading"))}
+                                    disabled={self.running}
+                                    onclick={link.callback(|_| Msg::Run)}>
+                                    { "Run vertical" }
+                                </button>
+                            </div>
+                            {
+                                if self.running {
+                                    html! {
+                                        <div class="control">
+                                            <button class="button is-danger is-light"
+                                                onclick={link.callback(|_| Msg::Cancel)}>
+                                                { "Cancel" }
+                                            </button>
+                                        </div>
+                                    }
+                                } else { html! {} }
+                            }
                         </div>
                     </div>
                 </div>
 
-                { self.view_steps() }
+                { self.view_progress() }
                 { self.view_result() }
             </>
         }
     }
 
-    fn view_steps(&self) -> Html {
-        if self.steps.is_empty() {
+    /// The "you just commissioned this device" guard: re-commissioning a device
+    /// whose window has closed will hang, so steer the user to Peek/Identify or
+    /// require an explicit "Commission anyway".
+    fn view_recommission_warning(&self, link: &html::Scope<Self>) -> Html {
+        if !self.confirm_recommission {
             return html! {};
         }
         html! {
-            <div class="box">
-                <h3 class="title is-6">{ "Progress" }</h3>
-                <div class="tags are-medium">
-                    { for self.steps.iter().map(|s| {
-                        let (cls, txt) = match &s.status {
-                            proto::StepStatus::Started => ("is-warning", "started".to_string()),
-                            proto::StepStatus::Done => ("is-success", "done".to_string()),
-                            proto::StepStatus::Failed { message } => ("is-danger", format!("failed: {message}")),
-                        };
-                        html! {
-                            <span class={classes!("tag", cls)}>
-                                { format!("{:?}: {txt}", s.step) }
-                            </span>
-                        }
-                    }) }
+            <div class="notification is-warning">
+                <p class="mb-3">
+                    <strong>{ "This device was just commissioned." }</strong>
+                    { " Its commissioning window has most likely closed, so commissioning \
+                       it again will hang. To inspect it, use " }
+                    <strong>{ "Peek" }</strong>{ " or " }<strong>{ "Identify" }</strong>
+                    { " on the Devices tab. To re-add it, first put the device back into \
+                       pairing mode." }
+                </p>
+                <div class="buttons">
+                    <button class="button is-link"
+                        onclick={link.callback(|_| Msg::SelectTab(Tab::Devices))}>
+                        { "Go to Devices" }
+                    </button>
+                    <button class="button is-warning is-light"
+                        onclick={link.callback(|_| Msg::RunAnyway)}>
+                        { "Commission anyway" }
+                    </button>
+                    <button class="button is-text"
+                        onclick={link.callback(|_| Msg::DismissRecommission)}>
+                        { "Dismiss" }
+                    </button>
                 </div>
+            </div>
+        }
+    }
+
+    /// A real progress bar with the active-phase label behind it. The vertical
+    /// emits a `Step` per phase; we count finished phases for the bar value and
+    /// name the in-flight phase.
+    fn view_progress(&self) -> Html {
+        if self.steps.is_empty() {
+            return html! {};
+        }
+
+        // Total phases: ephemeral runs 4 (incl. Decommission), persistent 3.
+        let total: u32 = if self.persistent { 3 } else { 4 };
+        let done = self.steps.iter().filter(|s| s.status == proto::StepStatus::Done).count() as u32;
+        let failed = self
+            .steps
+            .iter()
+            .any(|s| matches!(s.status, proto::StepStatus::Failed { .. }));
+
+        // The phase label: the last step's name + state.
+        let (label, bar_class) = match self.steps.last() {
+            Some(s) => {
+                let phase = phase_name(s.step);
+                match &s.status {
+                    proto::StepStatus::Started => (format!("{phase}…"), "is-primary"),
+                    proto::StepStatus::Done if done >= total && !self.running => {
+                        ("Done".to_string(), "is-success")
+                    }
+                    proto::StepStatus::Done => (format!("{phase} done"), "is-primary"),
+                    proto::StepStatus::Failed { message } => {
+                        (format!("{phase} failed: {message}"), "is-danger")
+                    }
+                }
+            }
+            None => ("Working…".to_string(), "is-primary"),
+        };
+        let bar_class = if failed { "is-danger" } else { bar_class };
+        let value = done.min(total);
+
+        html! {
+            <div class="box">
+                <div class="level is-mobile mb-2">
+                    <div class="level-left"><span class="has-text-weight-medium">{ label }</span></div>
+                    <div class="level-right"><span class="has-text-grey is-size-7">{ format!("{value}/{total}") }</span></div>
+                </div>
+                <progress class={classes!("progress", bar_class)}
+                    value={value.to_string()} max={total.to_string()}>
+                    { format!("{value}/{total}") }
+                </progress>
             </div>
         }
     }
@@ -787,6 +944,33 @@ fn send_request(link: html::Scope<App>, request: proto::Request) {
             }
         }
     });
+}
+
+/// Fire-and-forget a `Cancel` on its own short-lived WS connection. The running
+/// vertical (on its original connection) replies `Cancelled` when it next polls
+/// the server's cancel flag at a safepoint.
+fn send_cancel() {
+    spawn_local(async move {
+        let Ok(ws) = WebSocket::open(WS_URL) else { return };
+        let (mut write, _read) = ws.split();
+        let client_msg = proto::ClientMsg {
+            req_id: 1,
+            request: proto::Request::Cancel,
+        };
+        if let Ok(json) = serde_json::to_string(&client_msg) {
+            let _ = write.send(Message::Text(json)).await;
+        }
+    });
+}
+
+/// Human-readable name for a vertical phase.
+fn phase_name(step: proto::VerticalStep) -> &'static str {
+    match step {
+        proto::VerticalStep::Commission => "Commissioning",
+        proto::VerticalStep::ReadHealth => "Reading health",
+        proto::VerticalStep::RetrieveLogs => "Retrieving logs",
+        proto::VerticalStep::Decommission => "Decommissioning",
+    }
 }
 
 fn input_value(e: InputEvent) -> String {

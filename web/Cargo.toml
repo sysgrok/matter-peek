@@ -15,6 +15,7 @@ matter-peek-proto = { path = "../proto" }
 
 yew = { version = "0.21", features = ["csr"] }
 gloo-net = { version = "0.6", features = ["websocket"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 futures = "0.3"

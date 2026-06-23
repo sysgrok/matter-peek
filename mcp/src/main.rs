@@ -91,7 +91,10 @@ fn main() -> ExitCode {
     // Matter stack is !Send). `matter_peek_rpc::spawn` puts the actor on the same
     // thread-local executor the loop is driven by.
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<Command>();
-    matter_peek_rpc::spawn(actor::run(cmd_rx));
+    // MCP tool calls are request/response (no streaming, no cancel), so the
+    // actor's cancel flag is supplied but never set here.
+    let cancel: actor::CancelFlag = std::rc::Rc::new(std::cell::Cell::new(false));
+    matter_peek_rpc::spawn(actor::run(cmd_rx, cancel));
 
     let dispatch = ActorDispatch { tx: cmd_tx };
 
