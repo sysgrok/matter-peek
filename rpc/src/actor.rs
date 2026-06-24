@@ -17,11 +17,13 @@ use core::num::NonZeroU8;
 use core::pin::pin;
 
 use std::net::UdpSocket;
+use std::path::PathBuf;
 use std::rc::Rc;
 
+use directories::ProjectDirs;
 use embassy_futures::select::{select, Either};
 
-use log::{error, info};
+use log::{error, info, warn};
 
 use rs_matter::crypto::{default_crypto, Crypto};
 use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
@@ -83,12 +85,16 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
         0,
     ));
 
-    // Directory-backed KV (desktop). rs-matter's `SharedKvBlobStore` now borrows
-    // its scratch buffer, so the actor owns one (`kv_buf`) for the whole run and
-    // lends it to the `ControllerStore`. `load_persist` takes that store's KV
-    // access (which carries the buffer) — a single argument now.
+    // Directory-backed KV (desktop), under the platform-standard data dir so the
+    // controller fabric + device records survive a reboot (unlike `/tmp`).
+    // rs-matter's `SharedKvBlobStore` now borrows its scratch buffer, so the
+    // actor owns one (`kv_buf`) for the whole run and lends it to the
+    // `ControllerStore`. `load_persist` takes that store's KV access (which
+    // carries the buffer) — a single argument now.
+    let dir = store_dir();
+    info!("actor: persistence store at {}", dir.display());
     let kv_buf = kv_buf();
-    let store = ControllerStore::new(DirKvBlobStore::new_default(), &kv_buf);
+    let store = ControllerStore::new(DirKvBlobStore::new(dir), &kv_buf);
     if let Err(e) = matter.load_persist(store.kv()).await {
         error!("actor: load_persist failed: {e:?} (continuing with fresh state)");
     }
@@ -628,4 +634,29 @@ fn bind_controller_socket() -> Result<async_io::Async<UdpSocket>, Error> {
         socket.get_ref().local_addr().unwrap()
     );
     Ok(socket)
+}
+
+/// The directory the persistence store lives in: the platform-standard
+/// per-user data dir (`~/.local/share/matter-peek` on Linux,
+/// `~/Library/Application Support/com.sysgrok.matter-peek` on macOS), created if
+/// missing. Falls back to a `matter-peek` dir under the temp dir if no data dir
+/// can be determined (e.g. `HOME` is unset) or it can't be created — the store
+/// still works, it just won't survive a reboot.
+fn store_dir() -> PathBuf {
+    let preferred = ProjectDirs::from("com", "sysgrok", "matter-peek")
+        .map(|dirs| dirs.data_dir().to_path_buf());
+
+    if let Some(dir) = preferred {
+        match std::fs::create_dir_all(&dir) {
+            Ok(()) => return dir,
+            Err(e) => warn!(
+                "actor: could not create data dir {} ({e}); falling back to temp",
+                dir.display()
+            ),
+        }
+    } else {
+        warn!("actor: no platform data dir available; falling back to temp");
+    }
+
+    std::env::temp_dir().join("matter-peek")
 }

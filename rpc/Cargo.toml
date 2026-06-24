@@ -33,3 +33,6 @@ rand = { workspace = true }
 static_cell = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+# Platform-standard data dir for the persistence store (~/.local/share on Linux,
+# ~/Library/Application Support on macOS) instead of a volatile /tmp path.
+directories = "6"
