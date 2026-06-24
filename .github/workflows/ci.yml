@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    # Nightly run (UTC) to catch breakage from the floating rs-matter git dep.
+    - cron: '50 3 * * *'
+  workflow_dispatch:
+
+# Cancel an in-progress run for the same ref when a new commit lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail the build on any rustc/cargo warning, not just clippy lints.
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  # Native workspace (core / proto / rpc / cli / mcp), on stable. The default
+  # `mdns-avahi` feature pulls rs-matter's `zbus` backend, which is pure-Rust
+  # DBus — no system libs needed.
+  workspace:
+    name: Workspace
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Fmt check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -Dwarnings
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+  # The web UI is a separate wasm crate, excluded from the native workspace, and
+  # pinned to nightly + wasm32 via web/rust-toolchain.toml. Build it with trunk.
+  web:
+    name: Web (wasm)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (nightly + wasm32)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: web
+
+      - name: Install trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      - name: Fmt check
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy --target wasm32-unknown-unknown --all-targets -- -Dwarnings
+
+      - name: Build
+        run: trunk build

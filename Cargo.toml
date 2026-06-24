@@ -21,7 +21,9 @@ edition = "2021"
 authors = ["Ivan Markov <ivan.markov@gmail.com>"]
 publish = false
 repository = "https://github.com/sysgrok/matter-peek"
-rust-version = "1.84"
+# A recent MSRV (latest stable is 1.96). Comfortably above rs-matter's own 1.87
+# and the 1.85 floor that edition-2024 transitive deps (e.g. zeroize) require.
+rust-version = "1.92"
 
 [workspace.dependencies]
 rs-matter = { version = "0.2", default-features = false, features = ["os", "rustcrypto", "log"] }

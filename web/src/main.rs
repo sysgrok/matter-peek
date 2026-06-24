@@ -269,7 +269,10 @@ impl Component for App {
                 self.busy_stored = true;
                 self.stored_status = Some(format!("Saving tags for node 0x{node_id:016x}…"));
                 self.error = None;
-                send_request(ctx.link().clone(), proto::Request::SetTags { node_id, tags });
+                send_request(
+                    ctx.link().clone(),
+                    proto::Request::SetTags { node_id, tags },
+                );
                 true
             }
             Msg::Step(line) => {
@@ -300,7 +303,8 @@ impl Component for App {
                         self.stored_status = Some(format_peek(&handle, &health, crash_log_bytes));
                     }
                     proto::Response::Ok => {
-                        self.stored_status = Some("Identify acknowledged — device should blink.".into());
+                        self.stored_status =
+                            Some("Identify acknowledged — device should blink.".into());
                     }
                     proto::Response::Cancelled { decommissioned } => {
                         self.notice = Some(if decommissioned {
@@ -607,7 +611,11 @@ impl App {
 
         // Total phases: ephemeral runs 4 (incl. Decommission), persistent 3.
         let total: u32 = if self.persistent { 3 } else { 4 };
-        let done = self.steps.iter().filter(|s| s.status == proto::StepStatus::Done).count() as u32;
+        let done = self
+            .steps
+            .iter()
+            .filter(|s| s.status == proto::StepStatus::Done)
+            .count() as u32;
         let failed = self
             .steps
             .iter()
@@ -679,7 +687,9 @@ impl App {
         let visible: Vec<&proto::StoredDeviceInfo> = self
             .stored
             .iter()
-            .filter(|d| filter.is_empty() || d.tags.iter().any(|t| t.to_lowercase().contains(&filter)))
+            .filter(|d| {
+                filter.is_empty() || d.tags.iter().any(|t| t.to_lowercase().contains(&filter))
+            })
             .collect();
 
         html! {
@@ -951,7 +961,9 @@ fn send_request(link: html::Scope<App>, request: proto::Request) {
 /// the server's cancel flag at a safepoint.
 fn send_cancel() {
     spawn_local(async move {
-        let Ok(ws) = WebSocket::open(WS_URL) else { return };
+        let Ok(ws) = WebSocket::open(WS_URL) else {
+            return;
+        };
         let (mut write, _read) = ws.split();
         let client_msg = proto::ClientMsg {
             req_id: 1,
