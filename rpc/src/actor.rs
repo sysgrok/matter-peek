@@ -36,7 +36,7 @@ use static_cell::StaticCell;
 
 use matter_peek_core::ca::{CaTier, ControllerCa};
 use matter_peek_core::controller::FabricIdentity;
-use matter_peek_core::persist::ControllerStore;
+use matter_peek_core::persist::{kv_buf, ControllerStore};
 use matter_peek_core::{Controller, DeviceHandle, DiagSet, LogIntent};
 
 use matter_peek_proto as proto;
@@ -83,15 +83,16 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
         0,
     ));
 
-    // Directory-backed KV (desktop). `load_persist` consumes a `KvBlobStore` by
-    // value, so hand it a clone (cheap — just a path) and keep one for the store.
-    let dir_kv = DirKvBlobStore::new_default();
-    if let Err(e) = matter.load_persist(dir_kv.clone(), &mut [0u8; 4096]).await {
+    // Directory-backed KV (desktop). rs-matter's `SharedKvBlobStore` now borrows
+    // its scratch buffer, so the actor owns one (`kv_buf`) for the whole run and
+    // lends it to the `ControllerStore`. `load_persist` takes that store's KV
+    // access (which carries the buffer) — a single argument now.
+    let kv_buf = kv_buf();
+    let store = ControllerStore::new(DirKvBlobStore::new_default(), &kv_buf);
+    if let Err(e) = matter.load_persist(store.kv()).await {
         error!("actor: load_persist failed: {e:?} (continuing with fresh state)");
     }
     let matter: &'static Matter<'static> = matter;
-
-    let store = ControllerStore::new(dir_kv);
     let (ca, fab_idx) = match ControllerCa::ensure(
         &crypto,
         matter,
@@ -152,7 +153,7 @@ struct ActorCtx<'a, C: Crypto> {
     controller: Controller<'a, C>,
     ca: ControllerCa,
     fab_idx: NonZeroU8,
-    store: ControllerStore<DirKvBlobStore>,
+    store: ControllerStore<'a, DirKvBlobStore>,
     /// Cooperative cancel flag for the in-flight vertical (set by the server's
     /// dispatch, polled by [`vertical_flow`] at phase boundaries).
     cancel: CancelFlag,

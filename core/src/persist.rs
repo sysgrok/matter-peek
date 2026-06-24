@@ -27,11 +27,25 @@ use rs_matter::persist::{
     KvBlobStore, KvBlobStoreAccess, Persist, SharedKvBlobStore, VENDOR_KEYS_START,
 };
 use rs_matter::tlv::{FromTLV, OctetsVec, TLVElement, ToTLV};
+use rs_matter::utils::cell::RefCell;
+use rs_matter::utils::sync::blocking::Mutex;
 
 use crate::model::{DeviceHandle, StoredDevice};
 
 /// Scratch buffer size for the KV store (fits a fabric blob or our device list).
 const KV_BUF_LEN: usize = 4096;
+
+/// The scratch buffer a [`ControllerStore`] lends to its [`SharedKvBlobStore`].
+///
+/// rs-matter's `SharedKvBlobStore` borrows its buffer (`&'a Mutex<RefCell<…>>`)
+/// rather than owning it, so the buffer must outlive the store. Callers own one
+/// of these (e.g. as a `static`/stack value) and hand it to [`ControllerStore`].
+pub type KvBuf = Mutex<RefCell<[u8; KV_BUF_LEN]>>;
+
+/// Allocate a fresh, zeroed [`KvBuf`] for a [`ControllerStore`].
+pub const fn kv_buf() -> KvBuf {
+    Mutex::new(RefCell::new([0u8; KV_BUF_LEN]))
+}
 
 /// Our blobs live in the vendor-reserved key range so they never collide with
 /// rs-matter's own keys (fabrics, basic-info, …).
@@ -43,21 +57,26 @@ const CA_KEY: u16 = VENDOR_KEYS_START + 1;
 /// Owns a shared KV store and exposes the controller's persistence operations:
 /// load/save our fabric (via rs-matter) and our device records. Generic over the
 /// `KvBlobStore` backend `S` (injected by the binary).
-pub struct ControllerStore<S> {
-    kv: SharedKvBlobStore<S, [u8; KV_BUF_LEN]>,
+///
+/// rs-matter's [`SharedKvBlobStore`] borrows its scratch buffer, so a
+/// `ControllerStore` is parameterized by the buffer's lifetime `'a` and holds a
+/// borrow of a caller-owned [`KvBuf`] (see [`kv_buf`]).
+pub struct ControllerStore<'a, S> {
+    kv: SharedKvBlobStore<'a, S, KV_BUF_LEN>,
 }
 
-impl<S: KvBlobStore> ControllerStore<S> {
-    /// Wrap a concrete `KvBlobStore` backend (e.g. `DirKvBlobStore` on desktop).
-    pub const fn new(store: S) -> Self {
+impl<'a, S: KvBlobStore> ControllerStore<'a, S> {
+    /// Wrap a concrete `KvBlobStore` backend (e.g. `DirKvBlobStore` on desktop),
+    /// borrowing a caller-owned scratch buffer (`buf`, from [`kv_buf`]).
+    pub const fn new(store: S, buf: &'a KvBuf) -> Self {
         Self {
-            kv: SharedKvBlobStore::new(store, [0u8; KV_BUF_LEN]),
+            kv: SharedKvBlobStore::new(store, buf),
         }
     }
 
     /// The shared KV, for `Matter::load_persist` (load our persisted fabric on
     /// startup) and any other rs-matter persistence.
-    pub fn kv(&self) -> &SharedKvBlobStore<S, [u8; KV_BUF_LEN]> {
+    pub fn kv(&self) -> &SharedKvBlobStore<'a, S, KV_BUF_LEN> {
         &self.kv
     }
 
@@ -275,8 +294,12 @@ mod tests {
         }
     }
 
-    fn store() -> ControllerStore<MemKv> {
-        ControllerStore::new(MemKv::default())
+    /// A `ControllerStore` over an in-memory KV. The scratch buffer is leaked so
+    /// the returned store can own a `'static` borrow of it without the test
+    /// having to juggle a separate binding (cheap, test-only).
+    fn store() -> ControllerStore<'static, MemKv> {
+        let buf: &'static KvBuf = alloc::boxed::Box::leak(alloc::boxed::Box::new(kv_buf()));
+        ControllerStore::new(MemKv::default(), buf)
     }
 
     fn fp(vid: u16, pid: u16) -> DeviceFingerprint {

@@ -11,6 +11,10 @@ members = [
 ]
 exclude = ["web"]
 
+[patch.crates-io]
+rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "main" }
+#rs-matter = { path = "../rs-matter/rs-matter" }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
@@ -20,13 +24,7 @@ repository = "https://github.com/sysgrok/matter-peek"
 rust-version = "1.84"
 
 [workspace.dependencies]
-# rs-matter is the Matter stack we wrap. Pinned to the `im-client-gen` branch, a
-# superset of `alloc-tlv`: it carries the peer-address canonicalization /
-# IPv6-preferring discovery fixes (#486) and the alloc TLV impls (String / Vec<T> /
-# OctetsVec, #487) our persistence uses, PLUS the IM-client codegen that serves
-# non-scalar attribute reads (strings/structs/lists) — which lets basic_info /
-# diagnostics read in a single round-trip. Move back to `next`/`main` once merged.
-rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "im-client-gen", default-features = false, features = ["os", "rustcrypto", "log"] }
+rs-matter = { version = "0.2", default-features = false, features = ["os", "rustcrypto", "log"] }
 
 log = "0.4"
 env_logger = "0.11"
@@ -50,8 +48,3 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 # mDNS discovery (builtin backend only).
 socket2 = { version = "0.5", features = ["all"] }
 nix = { version = "0.30", features = ["net"] }
-
-# For local co-development against the working clone, override the git dep with
-# a path patch (a git-source patch can't target the same source as the base dep):
-# [patch."https://github.com/sysgrok/rs-matter"]
-# rs-matter = { path = "../rs-matter/rs-matter" }

@@ -115,7 +115,7 @@ impl ControllerCa {
     pub fn ensure<C: Crypto, S: rs_matter::persist::KvBlobStore>(
         crypto: &C,
         matter: &rs_matter::Matter<'_>,
-        store: &crate::persist::ControllerStore<S>,
+        store: &crate::persist::ControllerStore<'_, S>,
         identity: FabricIdentity,
         tier: CaTier,
     ) -> Result<(Self, core::num::NonZeroU8), Error> {
