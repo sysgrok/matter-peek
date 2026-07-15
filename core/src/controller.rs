@@ -375,6 +375,31 @@ impl<'a, C: Crypto> Controller<'a, C> {
         .await
     }
 
+    /// Subscribe to a device's diagnostic attributes and stream live
+    /// [`DeviceHealth`](crate::model::DeviceHealth) updates to `on_update` — the
+    /// health-board primitive (vs. the one-shot [`Self::read_health`]).
+    ///
+    /// The first `on_update` carries the priming snapshot; subsequent calls carry
+    /// deltas as the device pushes reports. Runs until the returned future is
+    /// dropped (which cancels the subscription). The transport pump must be
+    /// running in a sibling task.
+    pub async fn subscribe_health(
+        &self,
+        dev: DeviceHandle,
+        which: DiagSet,
+        on_update: impl FnMut(DeviceHealth),
+    ) -> Result<(), Error> {
+        crate::subscribe::subscribe_health(
+            self.matter,
+            self.crypto,
+            dev.fabric_index,
+            dev.node_id,
+            which,
+            on_update,
+        )
+        .await
+    }
+
     /// Read a device's stable identity (`UniqueID` / `SerialNumber` /
     /// `NodeLabel`) from BasicInformation over a fresh CASE session. Used at
     /// commission time to populate the persistent store.

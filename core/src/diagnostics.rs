@@ -27,13 +27,80 @@ use rs_matter::dm::clusters::decl::software_diagnostics::{
 use rs_matter::dm::EndptId;
 use rs_matter::error::Error;
 use rs_matter::im::client::ImClient as _;
+use rs_matter::im::encoding::ReportDataResp;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::Matter;
 
 use crate::model::{DeviceHealth, DiagSet, GeneralDiag, SoftwareDiag};
 
+extern crate alloc;
+
 /// The root node endpoint, where the diagnostic clusters live.
-const ROOT_ENDPOINT: EndptId = 0;
+pub(crate) const ROOT_ENDPOINT: EndptId = 0;
+
+/// The diagnostic **cluster IDs** a health snapshot covers, selected by `which`
+/// (endpoint is always [`ROOT_ENDPOINT`]).
+///
+/// The live subscription subscribes at **cluster granularity** (a wildcard path
+/// per cluster, `attr = None`) rather than per attribute. This is deliberate and
+/// necessary for a vendor-agnostic tool: unlike a *read* (which returns a
+/// per-attribute `UnsupportedAttribute` status and carries on), a *subscribe*
+/// with a concrete path to an attribute the device doesn't implement is rejected
+/// **wholesale** with `InvalidAction` (rs-matter's `validate_subscribe`, per
+/// spec). A cluster wildcard instead validates as "does the cluster expose *any*
+/// accessible attribute", so a device that implements only a subset still
+/// accepts the subscription; [`parse_health`] then picks out the attributes we
+/// care about and ignores the rest.
+pub(crate) fn health_cluster_ids(which: DiagSet) -> alloc::vec::Vec<u32> {
+    use rs_matter::dm::clusters::decl::general_diagnostics as gen_diag;
+    use rs_matter::dm::clusters::decl::software_diagnostics as sw_diag;
+
+    let mut clusters = alloc::vec::Vec::new();
+    if which.general {
+        clusters.push(gen_diag::FULL_CLUSTER.id);
+    }
+    if which.software {
+        clusters.push(sw_diag::FULL_CLUSTER.id);
+    }
+    clusters
+}
+
+/// Demux a `ReportData` response into a [`DeviceHealth`] snapshot, filling only
+/// the clusters selected by `which`. Works on any [`ReportDataResp`] — the
+/// initial priming report of a subscription, a server-initiated update report,
+/// or a one-shot read response — because the generated `*_read_resp()` views
+/// are implemented on `ReportDataResp` itself.
+///
+/// Only fields actually present in this report are set; absent attributes stay
+/// `None`. (A subscription update may carry a *subset* of the subscribed
+/// attributes — only the ones that changed — so callers merge successive
+/// snapshots rather than replacing.)
+pub(crate) fn parse_health(resp: &ReportDataResp<'_>, which: DiagSet) -> DeviceHealth {
+    let mut health = DeviceHealth::default();
+    if which.general {
+        let reads = resp.general_diagnostics_read_resp();
+        let g = GeneralDiag {
+            up_time_secs: first(reads.up_time()),
+            reboot_count: first(reads.reboot_count()),
+            total_operational_hours: first(reads.total_operational_hours()),
+        };
+        if g != GeneralDiag::default() {
+            health.general = Some(g);
+        }
+    }
+    if which.software {
+        let reads = resp.software_diagnostics_read_resp();
+        let s = SoftwareDiag {
+            current_heap_free: first(reads.current_heap_free()),
+            current_heap_used: first(reads.current_heap_used()),
+            current_heap_high_watermark: first(reads.current_heap_high_watermark()),
+        };
+        if s != SoftwareDiag::default() {
+            health.software = Some(s);
+        }
+    }
+    health
+}
 
 /// Read the requested diagnostic clusters from the device identified by
 /// `(fab_idx, node_id)` and assemble a [`DeviceHealth`] snapshot.

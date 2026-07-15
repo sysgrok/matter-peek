@@ -35,6 +35,7 @@ pub mod discovery;
 pub mod logs;
 pub mod model;
 pub mod persist;
+pub mod subscribe;
 
 pub use controller::Controller;
 pub use discovery::DiscoveredDevice;

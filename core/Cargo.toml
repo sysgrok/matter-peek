@@ -33,7 +33,10 @@ mdns-builtin = ["std", "dep:socket2", "dep:nix", "dep:async-io"]     # fallback 
 # with NO default features (rs-matter's `os` ⇒ `std`); the hosted `os` path is
 # re-enabled only via this crate's `std` feature. mDNS backends and raw sockets
 # are likewise feature-gated.
-rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "main", default-features = false, features = ["alloc", "rustcrypto", "log"] }
+# Depend on the crates.io version (default-features off), so the workspace
+# `[patch.crates-io]` redirects it uniformly (to the git fork, or a local clone
+# during co-development). A direct git dep here would bypass that patch.
+rs-matter = { version = "0.2", default-features = false, features = ["alloc", "rustcrypto", "log"] }
 log = { workspace = true }
 embassy-futures = { workspace = true }
 embassy-time = { version = "0.5", default-features = false }

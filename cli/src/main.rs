@@ -82,10 +82,33 @@ struct Args {
     passcode: u32,
     /// `None` → discover the device via mDNS; `Some` → use this explicit address.
     peer_addr: Option<SocketAddr>,
+    /// `--subscribe`: after the one-shot read, establish a live health
+    /// subscription and stream updates for [`SUBSCRIBE_SECS`] instead of
+    /// decommissioning immediately.
+    subscribe: bool,
 }
 
+/// How long the `--subscribe` mode streams live health updates before tearing
+/// the subscription down and decommissioning.
+const SUBSCRIBE_SECS: u64 = 30;
+
 fn parse_args() -> Result<Args, String> {
-    let mut iter = std::env::args().skip(1);
+    // Positional args (passcode, peer) with a `--subscribe` flag that may appear
+    // anywhere. Filter the flag out first, then parse positionals.
+    let mut subscribe = false;
+    let positionals: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| {
+            if a == "--subscribe" {
+                subscribe = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    let mut iter = positionals.into_iter();
+
     let passcode = match iter.next() {
         Some(s) => s
             .parse::<u32>()
@@ -104,6 +127,7 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         passcode,
         peer_addr,
+        subscribe,
     })
 }
 
@@ -192,6 +216,39 @@ async fn flow<'a, C: rs_matter::crypto::Crypto>(
     info!("=== Reading diagnostic health snapshot ===");
     let health = controller.read_health(outcome.handle, DiagSet::ALL).await;
     print_health(&health);
+
+    if args.subscribe {
+        info!("=== Subscribing to live health for {SUBSCRIBE_SECS}s ===");
+        // `Rc<Cell>` so the closure owns a clone (its borrow isn't tied to a
+        // local that the pinned subscription future would outlive on drop).
+        let update_count = std::rc::Rc::new(core::cell::Cell::new(0usize));
+        let counter = update_count.clone();
+        let sub = controller.subscribe_health(outcome.handle, DiagSet::ALL, move |health| {
+            counter.set(counter.get() + 1);
+            println!("--- health update #{} ---", counter.get());
+            print_health(&health);
+        });
+        let timer = embassy_time::Timer::after(embassy_time::Duration::from_secs(SUBSCRIBE_SECS));
+        match select(pin!(sub), pin!(timer)).await {
+            Either::First(r) => {
+                if let Err(e) = r {
+                    error!("subscription ended early: {e:?}");
+                }
+            }
+            Either::Second(()) => info!(
+                "subscription window elapsed ({} update(s))",
+                update_count.get()
+            ),
+        }
+
+        // In subscribe mode, go straight to teardown — the subscription owns the
+        // session for its lifetime; we don't reuse it for further one-shot ops.
+        info!("=== Decommissioning (RemoveFabric) ===");
+        if let Err(e) = controller.decommission(outcome.handle).await {
+            error!("decommission failed: {e:?}");
+        }
+        return Ok(outcome);
+    }
 
     info!("=== Retrieving CrashLogs over BDX ===");
     match controller

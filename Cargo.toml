@@ -12,8 +12,15 @@ members = [
 exclude = ["web"]
 
 [patch.crates-io]
-rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "main" }
-#rs-matter = { path = "../rs-matter/rs-matter" }
+#rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "main" }
+# Local clone on the `data-reports` branch — provides the controller-side
+# `ReportDataHandler` facility that the health-board subscriptions consume.
+# All three crates must be patched together (the macros/codegen crates emit the
+# types `rs-matter` re-exports; a split source = "two rs-matter versions").
+# Flip back to the git dep once `data-reports` lands upstream.
+rs-matter = { path = "../rs-matter/rs-matter" }
+rs-matter-macros = { path = "../rs-matter/rs-matter-macros" }
+rs-matter-codegen = { path = "../rs-matter/rs-matter-codegen" }
 
 [workspace.package]
 version = "0.1.0"
