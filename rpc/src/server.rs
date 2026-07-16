@@ -137,6 +137,10 @@ async fn dispatch(
         request: msg.request,
         events: ev_tx,
         reply: rep_tx,
+        // The connection's outbound sink, cloned for the actor: a detached health
+        // subscription streams `HealthReport` / `SubscriptionState` frames here,
+        // independent of this command's per-command event/reply lifecycle.
+        out: Some(out_tx.clone()),
     };
 
     if tx.send(cmd).await.is_err() {

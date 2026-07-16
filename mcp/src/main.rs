@@ -40,6 +40,10 @@ impl Dispatch for ActorDispatch {
             request,
             events: ev_tx,
             reply: rep_tx,
+            // The MCP adapter is one-shot request/response; it doesn't host a
+            // streaming connection, so long-lived subscriptions aren't available
+            // here (and aren't in its tool set).
+            out: None,
         };
         self.tx
             .send(cmd)

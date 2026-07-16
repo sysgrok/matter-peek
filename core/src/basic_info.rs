@@ -73,7 +73,9 @@ async fn try_read_basic_info<C: Crypto>(
                 .unique_id(ROOT_ENDPOINT)?
                 .serial_number(ROOT_ENDPOINT)?
                 .node_label(ROOT_ENDPOINT)?
+                .vendor_name(ROOT_ENDPOINT)?
                 .vendor_id(ROOT_ENDPOINT)?
+                .product_name(ROOT_ENDPOINT)?
                 .product_id(ROOT_ENDPOINT)?
                 .hardware_version(ROOT_ENDPOINT)?
                 .software_version(ROOT_ENDPOINT)?
@@ -94,6 +96,12 @@ async fn try_read_basic_info<C: Crypto>(
             unique_id: first_string(reads.unique_id()),
             serial_number: first_string(reads.serial_number()),
             node_label: first_string(reads.node_label()),
+            // The device's *own* human-readable names (BasicInformation), the
+            // authoritative source — far more reliable than decoding the numeric
+            // IDs. Empty when the device leaves the (mandatory) attribute blank,
+            // in which case the UI falls back to a VID lookup / the raw hex.
+            vendor_name: first_string(reads.vendor_name()),
+            product_name: first_string(reads.product_name()),
             fingerprint: DeviceFingerprint {
                 vendor_id: first_scalar(reads.vendor_id()),
                 product_id: first_scalar(reads.product_id()),

@@ -80,6 +80,30 @@ pub enum Request {
     /// Ask a persisted device to physically identify itself (blink/beep) for
     /// `secs` seconds via the Identify cluster — the "which unit is this?" UX.
     Identify { node_id: u64, secs: u16 },
+    /// Start a **live health subscription** to a persisted device. Answered
+    /// **immediately** with [`Response::Subscribed`]; the health data then streams
+    /// independently as [`Event::HealthReport`] frames (keyed by `node_id`), and
+    /// connection health as [`Event::SubscriptionState`], until a matching
+    /// [`Request::Unsubscribe`] (or the connection drops).
+    ///
+    /// The subscription is a detached background task on the server — it does
+    /// **not** block other commands, so multiple devices can be watched at once.
+    /// It self-heals: if the device goes silent past its reporting deadline the
+    /// server re-establishes it (a fresh subscription), surfaced via
+    /// [`SubscriptionState::Reconnecting`] → [`SubscriptionState::Live`].
+    /// Subscribing a device that is already subscribed is a no-op success.
+    Subscribe { node_id: u64 },
+    /// Stop a live health subscription started by [`Request::Subscribe`].
+    /// Idempotent — unsubscribing a device that isn't subscribed still succeeds.
+    /// Answered with [`Response::Ok`].
+    Unsubscribe { node_id: u64 },
+    /// **Decommission** a persisted device: `RemoveFabric` our fabric on the
+    /// device (over CASE) and drop it from the local store. This is the clean
+    /// teardown — it frees the fabric slot on the device rather than leaking it.
+    /// Answered with the refreshed [`Response::Devices`] list. If the device is
+    /// unreachable, the fabric can't be removed device-side; pass `force` to drop
+    /// the local record anyway (accepting the leaked device-side fabric).
+    Decommission { node_id: u64, force: bool },
     /// Replace the local tag set of a stored device (controller-local metadata
     /// for filtering/grouping; never touches the device). The server normalizes
     /// (trim / drop empties / de-dup) and answers with the refreshed
@@ -120,6 +144,11 @@ pub enum Response {
     /// cleaned up (RemoveFabric) on the way out; `false` if cancellation landed
     /// before any device state was created.
     Cancelled { decommissioned: bool },
+    /// A [`Request::Subscribe`] was accepted: the live subscription is now
+    /// running as a background task and its data will arrive as
+    /// [`Event::HealthReport`] / [`Event::SubscriptionState`] frames. `already`
+    /// is `true` if the device was already subscribed (the request was a no-op).
+    Subscribed { node_id: u64, already: bool },
     /// The request failed before producing a result.
     Error { message: String },
 }
@@ -138,6 +167,40 @@ pub enum Event {
         step: VerticalStep,
         status: StepStatus,
     },
+    /// A live health snapshot from an active subscription, keyed by `node_id`
+    /// (subscriptions are detached from the request that started them, so events
+    /// carry the device id, not a `req_id`). The first frame after each
+    /// (re-)establishment is a priming snapshot; later frames are deltas (only the
+    /// attributes that changed) — the UI merges them into a running per-device
+    /// view.
+    HealthReport {
+        node_id: u64,
+        /// Monotonic update counter within the subscription's lifetime.
+        seq: u64,
+        health: DeviceHealth,
+    },
+    /// A live subscription's connection state changed (established / lost /
+    /// recovering). The UI shows this per device so a silent-but-dead
+    /// subscription is distinguishable from a healthy-but-quiet one.
+    SubscriptionState {
+        node_id: u64,
+        state: SubscriptionState,
+    },
+}
+
+/// The connection state of a live health subscription (mirrors core's `SubState`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SubscriptionState {
+    /// Established and reporting; the device will report at least every
+    /// `max_int_secs` seconds.
+    Live { max_int_secs: u16 },
+    /// The subscription went silent past its deadline (or failed to establish)
+    /// and is being rebuilt; the next `Live` marks recovery.
+    Reconnecting,
+    /// The subscription was stopped (by [`Request::Unsubscribe`] or the
+    /// connection dropping). No further reports will arrive.
+    Stopped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +258,19 @@ pub struct StoredDeviceInfo {
     pub serial_number: String,
     /// User-set name (from the primary ecosystem, if it wrote `NodeLabel`).
     pub node_label: String,
+    /// BasicInformation `VendorName` — the vendor's own human-readable name
+    /// (empty if the device didn't serve it).
+    pub vendor_name: String,
+    /// BasicInformation `ProductName` — the product's own human-readable name
+    /// (empty if the device didn't serve it).
+    pub product_name: String,
+    /// A ready-to-show vendor label resolved server-side: the device's
+    /// `VendorName` when present, else an offline VID→name lookup, else the raw
+    /// hex `vid:0x…`. The UI shows this verbatim (it needs no vendor table).
+    pub vendor_display: String,
+    /// `true` when the vendor id is in the reserved **test** range
+    /// (`0xFFF1`–`0xFFF4`) — a development / uncertified device, worth flagging.
+    pub is_test_vendor: bool,
     /// Per-model numeric fingerprint (vendor/product/hw/sw), for display + the
     /// re-match link suggestion.
     pub fingerprint: Fingerprint,

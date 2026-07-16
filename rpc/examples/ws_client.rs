@@ -20,6 +20,7 @@ fn main() {
     //   ws_client [URL] list
     //   ws_client [URL] peek <node_id_hex_or_dec>
     //   ws_client [URL] identify <node_id> [secs]
+    //   ws_client [URL] subscribe <node_id> [secs]      (live health stream)
     //   ws_client [URL] settags <node_id> <comma,separated,tags>
     //   ws_client [URL] persistent <addr> [passcode]   (persistent commission)
     //   ws_client [URL] <addr> [passcode]               (ephemeral vertical)
@@ -50,6 +51,16 @@ fn main() {
             node_id: parse_node(arg3.as_deref().unwrap_or("0")),
             secs: 3,
         },
+        "subscribe" => proto::Request::Subscribe {
+            node_id: parse_node(arg3.as_deref().unwrap_or("0")),
+        },
+        "unsubscribe" => proto::Request::Unsubscribe {
+            node_id: parse_node(arg3.as_deref().unwrap_or("0")),
+        },
+        "decommission" => proto::Request::Decommission {
+            node_id: parse_node(arg3.as_deref().unwrap_or("0")),
+            force: args.next().as_deref() == Some("force"),
+        },
         "settags" => proto::Request::SetTags {
             node_id: parse_node(arg3.as_deref().unwrap_or("0")),
             tags: args
@@ -71,6 +82,11 @@ fn main() {
             policy: proto::FabricPolicy::Ephemeral,
         },
     };
+
+    // For `subscribe`, keep the connection open after the `Subscribed` reply and
+    // keep printing the streamed events (Ctrl-C to stop). Everything else is a
+    // one-shot request → response.
+    let is_subscribe = matches!(request, proto::Request::Subscribe { .. });
 
     futures_lite::future::block_on(async move {
         let stream = async_net::TcpStream::connect(url.trim_start_matches("ws://"))
@@ -100,12 +116,29 @@ fn main() {
             };
             let msg: proto::ServerMsg = serde_json::from_str(&text).expect("parse ServerMsg");
             match msg {
-                proto::ServerMsg::Event { event } => {
-                    let proto::Event::Step { step, status, .. } = event;
-                    println!("   event: {step:?} -> {status:?}");
-                }
+                proto::ServerMsg::Event { event } => match event {
+                    proto::Event::Step { step, status, .. } => {
+                        println!("   event: {step:?} -> {status:?}");
+                    }
+                    proto::Event::HealthReport {
+                        node_id,
+                        seq,
+                        health,
+                    } => {
+                        println!("   health 0x{node_id:016x} #{seq}: {health:?}");
+                    }
+                    proto::Event::SubscriptionState { node_id, state } => {
+                        println!("   sub 0x{node_id:016x}: {state:?}");
+                    }
+                },
                 proto::ServerMsg::Response { response, .. } => {
                     println!("<< response: {response:#?}");
+                    // For a subscription, the data streams *after* this reply — keep
+                    // reading events. For one-shot requests, we're done.
+                    if is_subscribe {
+                        println!("   (streaming live health — Ctrl-C to stop)");
+                        continue;
+                    }
                     break;
                 }
             }

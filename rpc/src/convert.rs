@@ -9,6 +9,16 @@
 use matter_peek_core as core;
 use matter_peek_proto as proto;
 
+/// Core subscription lifecycle → wire.
+pub fn sub_state(s: core::subscribe::SubState) -> proto::SubscriptionState {
+    match s {
+        core::subscribe::SubState::Live { max_int_secs } => {
+            proto::SubscriptionState::Live { max_int_secs }
+        }
+        core::subscribe::SubState::Reconnecting => proto::SubscriptionState::Reconnecting,
+    }
+}
+
 fn general(g: core::GeneralDiag) -> proto::GeneralDiag {
     proto::GeneralDiag {
         up_time_secs: g.up_time_secs,
@@ -40,11 +50,31 @@ pub fn handle(h: core::DeviceHandle) -> proto::DeviceHandle {
 }
 
 pub fn stored_device(d: core::StoredDevice) -> proto::StoredDeviceInfo {
+    let vid = d.fingerprint.vendor_id;
+
+    // Resolve a ready-to-show vendor label once, server-side, so the UI needs no
+    // vendor table: the device's own VendorName wins; else the offline VID→name
+    // lookup; else the raw hex.
+    let vendor_display = if !d.vendor_name.is_empty() {
+        d.vendor_name.clone()
+    } else if let Some(name) = vid.and_then(core::vendors::vendor_name) {
+        name.to_string()
+    } else if let Some(v) = vid {
+        format!("vid:0x{v:04X}")
+    } else {
+        "vid:—".to_string()
+    };
+    let is_test_vendor = vid.map(core::vendors::is_test_vendor).unwrap_or(false);
+
     proto::StoredDeviceInfo {
         handle: handle(d.handle),
         unique_id: d.unique_id,
         serial_number: d.serial_number,
         node_label: d.node_label,
+        vendor_name: d.vendor_name,
+        product_name: d.product_name,
+        vendor_display,
+        is_test_vendor,
         fingerprint: proto::Fingerprint {
             vendor_id: d.fingerprint.vendor_id,
             product_id: d.fingerprint.product_id,

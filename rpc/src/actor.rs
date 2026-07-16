@@ -11,17 +11,19 @@
 //! this sidesteps the self-referential `Matter<'a>` lifetime entirely: a
 //! `&'static Matter` is freely shared between the pump and the command loop.
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::net::SocketAddr;
 use core::num::NonZeroU8;
 use core::pin::pin;
 
+use std::collections::HashMap;
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use directories::ProjectDirs;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select4, Either, Either4};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use log::{error, info, warn};
 
@@ -64,10 +66,17 @@ pub type CancelFlag = Rc<Cell<bool>>;
 pub struct Command {
     pub req_id: proto::ReqId,
     pub request: proto::Request,
-    /// Progress events for this command.
+    /// Progress events for this command (per-command; the relay closes it when
+    /// the command's reply lands — used by the vertical's `Step` events).
     pub events: async_channel::Sender<proto::Event>,
     /// The single final reply.
     pub reply: async_channel::Sender<proto::Response>,
+    /// The **connection's** outbound sink — lives for the whole connection, not
+    /// just this command. A detached health subscription streams its
+    /// `HealthReport` / `SubscriptionState` frames here so they keep flowing long
+    /// after the `Subscribe` command has replied. `None` for callers (e.g. the
+    /// `ws_client` example paths) that don't host long-lived subscriptions.
+    pub out: Option<async_channel::Sender<proto::ServerMsg>>,
 }
 
 /// Run the persistent actor: stand up one Matter stack for the process, restore
@@ -131,6 +140,12 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
     };
 
     let controller = Controller::new(matter, &crypto);
+
+    // Channel over which the command handler hands new subscription *jobs* to the
+    // concurrent driver. Jobs carry only owned data, so this is `'static` and can
+    // be declared before `ctx`. Unbounded so `Subscribe` never blocks the loop.
+    let (sub_submit, sub_recv) = async_channel::unbounded::<SubJob>();
+
     let ctx = ActorCtx {
         matter,
         controller,
@@ -138,19 +153,128 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
         fab_idx,
         store,
         cancel,
+        subs: RefCell::new(HashMap::new()),
     };
 
-    // Transport pump + command loop, concurrently, for the actor's lifetime.
-    // Named `pin!` bindings + `&mut` in `select` (rather than `select(pin!(a),
-    // pin!(b))`) so the borrows of `crypto`/`socket`/`ctx` outlive the pinned
-    // futures' drops.
+    // Four concurrent arms, for the actor's lifetime:
+    //   1. the transport pump (`matter.run`),
+    //   2. the command loop (services requests one at a time),
+    //   3. the subscription driver (polls all live subscriptions concurrently), and
+    //   4. the mDNS backend, which services **operational resolves** — CASE
+    //      re-addressing of a persisted device (subscribe / peek / decommission
+    //      after its secure session lapses) needs a running resolver; without it
+    //      every such resolve times out with `NotFound`. (It also services
+    //      discovery browses, so those must NOT start a second backend — the
+    //      `discover` handler uses the `_bg` variant.)
+    // Because subscriptions run in their own arm — not inside a command — the
+    // command loop stays free while any number of subscriptions stream, so a
+    // `Subscribe` returns immediately and multiple devices can be watched at once.
     let mut pump = pin!(matter.run(&crypto, &socket, &socket, NoNetwork));
-    let mut loop_ = pin!(command_loop(rx, &ctx));
+    let mut loop_ = pin!(command_loop(rx, &ctx, &sub_submit));
+    let mut subs = pin!(run_subscriptions(sub_recv, &ctx));
+    let mut mdns = pin!(ctx.controller.run_mdns_backend());
 
-    match select(&mut pump, &mut loop_).await {
-        Either::First(r) => error!("actor: transport pump exited: {r:?}"),
-        Either::Second(()) => info!("actor: command channel closed, exiting"),
+    match select4(&mut pump, &mut loop_, &mut subs, &mut mdns).await {
+        Either4::First(r) => error!("actor: transport pump exited: {r:?}"),
+        Either4::Second(()) => info!("actor: command channel closed, exiting"),
+        Either4::Third(()) => info!("actor: subscription driver exited"),
+        Either4::Fourth(r) => error!("actor: mDNS backend exited: {r:?}"),
     }
+}
+
+/// Drive every live subscription concurrently. New subscription *jobs* arrive on
+/// `recv` (submitted by the [`subscribe`] handler); the driver builds each one's
+/// future against the shared stack (`ctx`) and adds it to the running set. A job's
+/// future ends when its subscription is stopped (its `stop_rx` fires or its `out`
+/// sink closes), then it's dropped from the set. Runs for the actor's lifetime.
+async fn run_subscriptions<C: Crypto>(
+    recv: async_channel::Receiver<SubJob>,
+    ctx: &ActorCtx<'_, C>,
+) {
+    let mut running = FuturesUnordered::new();
+
+    loop {
+        if running.is_empty() {
+            // Nothing running — just wait for the next job (polling an empty
+            // `FuturesUnordered` returns `None` immediately, which would busy-loop).
+            match recv.recv().await {
+                Ok(job) => running.push(run_subscription(job, ctx)),
+                Err(_) => return, // actor shutting down
+            }
+        } else {
+            match select(recv.recv(), running.next()).await {
+                Either::First(Ok(job)) => running.push(run_subscription(job, ctx)),
+                Either::First(Err(_)) => return,
+                // A subscription finished (stopped); already removed by `next()`.
+                Either::Second(_) => {}
+            }
+        }
+    }
+}
+
+/// The future for a single live subscription: stream `subscribe_health` output to
+/// the connection sink until stopped, then emit a terminal `Stopped` and drop the
+/// registry entry (if it's still ours). Built here (not in [`subscribe`]) so it
+/// can borrow the shared stack without entangling the submission channel's type.
+async fn run_subscription<C: Crypto>(job: SubJob, ctx: &ActorCtx<'_, C>) {
+    let SubJob {
+        node_id,
+        handle,
+        out,
+        stop_rx,
+        my_stop,
+    } = job;
+
+    let seq = Cell::new(0u64);
+    let out_reports = out.clone();
+    let out_state = out.clone();
+
+    let subscription = ctx.controller.subscribe_health(
+        handle,
+        DiagSet::ALL,
+        move |health| {
+            seq.set(seq.get() + 1);
+            let _ = out_reports.try_send(proto::ServerMsg::Event {
+                event: proto::Event::HealthReport {
+                    node_id,
+                    seq: seq.get(),
+                    health: convert::health(health),
+                },
+            });
+        },
+        move |state| {
+            let _ = out_state.try_send(proto::ServerMsg::Event {
+                event: proto::Event::SubscriptionState {
+                    node_id,
+                    state: convert::sub_state(state),
+                },
+            });
+        },
+    );
+
+    // Stop when EITHER the explicit stop signal fires OR the connection's sink
+    // closes (client disconnected — don't leak the device-side subscription).
+    let stop = async {
+        let _ = select(stop_rx.recv(), out.closed()).await;
+    };
+    let _ = select(subscription, stop).await;
+
+    // Drop our registry entry, but only if it's still *ours* (a quick
+    // unsubscribe+resubscribe of the same device could have replaced it).
+    {
+        let mut map = ctx.subs.borrow_mut();
+        if map.get(&node_id).is_some_and(|s| s.same_channel(&my_stop)) {
+            map.remove(&node_id);
+        }
+    }
+
+    // Terminal state (delivered only if the connection is still up).
+    let _ = out.try_send(proto::ServerMsg::Event {
+        event: proto::Event::SubscriptionState {
+            node_id,
+            state: proto::SubscriptionState::Stopped,
+        },
+    });
 }
 
 /// Shared state every command handler operates on.
@@ -163,19 +287,50 @@ struct ActorCtx<'a, C: Crypto> {
     /// Cooperative cancel flag for the in-flight vertical (set by the server's
     /// dispatch, polled by [`vertical_flow`] at phase boundaries).
     cancel: CancelFlag,
+    /// Live health subscriptions, keyed by device `node_id`. The value is the
+    /// **stop** sender: send `()` (or drop it) to make the subscription task's
+    /// `select` complete, dropping the `subscribe_health` future and tearing the
+    /// subscription down. Present ⇒ that device is being watched.
+    subs: RefCell<HashMap<u64, async_channel::Sender<()>>>,
+}
+
+/// A subscription request submitted to the concurrent driver. Carries only owned
+/// data (no borrow of the shared stack), so the submission channel is `'static`;
+/// the driver itself borrows the stack (`&ActorCtx`) to build+run the future.
+struct SubJob {
+    node_id: u64,
+    handle: DeviceHandle,
+    /// The connection's outbound sink — where this subscription streams frames.
+    out: async_channel::Sender<proto::ServerMsg>,
+    /// Fires (or its sender drops) to stop the subscription.
+    stop_rx: async_channel::Receiver<()>,
+    /// A clone of the registry stop-sender, so the driver can verify at cleanup
+    /// that the registry entry is still this subscription before removing it.
+    my_stop: async_channel::Sender<()>,
 }
 
 /// Pull commands and service them one at a time against the shared stack.
-async fn command_loop<C: Crypto>(rx: async_channel::Receiver<Command>, ctx: &ActorCtx<'_, C>) {
+///
+/// `ctx` is borrowed for the actor's whole lifetime (`'a`) because a `Subscribe`
+/// submits a subscription future that borrows `ctx.controller` for that long.
+async fn command_loop<C: Crypto>(
+    rx: async_channel::Receiver<Command>,
+    ctx: &ActorCtx<'_, C>,
+    sub_submit: &async_channel::Sender<SubJob>,
+) {
     while let Ok(cmd) = rx.recv().await {
-        let response = service(&cmd, ctx).await;
+        let response = service(&cmd, ctx, sub_submit).await;
         // Best-effort: if the client vanished, dropping the reply is fine.
         let _ = cmd.reply.send(response).await;
     }
 }
 
 /// Service one command against the shared stack, emitting step events as it goes.
-async fn service<C: Crypto>(cmd: &Command, ctx: &ActorCtx<'_, C>) -> proto::Response {
+async fn service<C: Crypto>(
+    cmd: &Command,
+    ctx: &ActorCtx<'_, C>,
+    sub_submit: &async_channel::Sender<SubJob>,
+) -> proto::Response {
     match &cmd.request {
         proto::Request::RunVertical {
             peer_addr,
@@ -190,6 +345,11 @@ async fn service<C: Crypto>(cmd: &Command, ctx: &ActorCtx<'_, C>) -> proto::Resp
             peek_device(ctx, *node_id, *with_logs).await
         }
         proto::Request::Identify { node_id, secs } => identify(ctx, *node_id, *secs).await,
+        proto::Request::Subscribe { node_id } => subscribe(cmd, ctx, sub_submit, *node_id).await,
+        proto::Request::Unsubscribe { node_id } => unsubscribe(ctx, *node_id),
+        proto::Request::Decommission { node_id, force } => {
+            decommission(ctx, *node_id, *force).await
+        }
         proto::Request::SetTags { node_id, tags } => set_tags(ctx, *node_id, tags),
         // `Cancel` is normally intercepted by the server (it sets the shared flag
         // out-of-band rather than enqueuing). If one reaches here, no vertical is
@@ -213,9 +373,11 @@ async fn run_discover<C: Crypto>(
         ..Default::default()
     };
 
+    // The actor already runs the mDNS backend (a permanent arm); use the `_bg`
+    // variant so discovery doesn't start a competing second backend.
     let devices = ctx
         .controller
-        .discover_all(&filter, max.max(1), None)
+        .discover_all_bg(&filter, max.max(1), None)
         .await
         .into_iter()
         .map(|d| proto::DiscoveredDevice {
@@ -286,6 +448,145 @@ async fn identify<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64, secs: u16) -> 
             message: format!("identify failed: {e:?}"),
         },
     }
+}
+
+/// Start a live health subscription to a persisted device and reply
+/// **immediately** — the subscription then runs as its own arm of the actor (see
+/// [`run_subscriptions`]), streaming `HealthReport` / `SubscriptionState` frames
+/// to the connection sink until [`unsubscribe`]d or the connection drops. Because
+/// it does not run *inside* this command, the command loop stays free and many
+/// devices can be watched at once.
+async fn subscribe<C: Crypto>(
+    cmd: &Command,
+    ctx: &ActorCtx<'_, C>,
+    sub_submit: &async_channel::Sender<SubJob>,
+    node_id: u64,
+) -> proto::Response {
+    let Some(dev) = lookup_stored(ctx, node_id) else {
+        return proto::Response::Error {
+            message: format!("no stored device with node_id 0x{node_id:016x}"),
+        };
+    };
+
+    // Already watching this device? No-op success (the existing subscription
+    // keeps streaming).
+    if ctx.subs.borrow().contains_key(&node_id) {
+        return proto::Response::Subscribed {
+            node_id,
+            already: true,
+        };
+    }
+
+    // Events stream to the connection's outbound sink, which outlives this
+    // command. Without one (non-WS caller) there's nowhere to stream, so decline.
+    let Some(out) = cmd.out.clone() else {
+        return proto::Response::Error {
+            message: "subscriptions require a streaming connection".into(),
+        };
+    };
+
+    // Stop signal: `Unsubscribe` (or connection teardown) fires it. Register the
+    // sender under `node_id`; `my_stop` (a clone) lets the driver verify ownership
+    // at cleanup.
+    let (stop_tx, stop_rx) = async_channel::bounded::<()>(1);
+    let my_stop = stop_tx.clone();
+    ctx.subs.borrow_mut().insert(node_id, stop_tx);
+
+    // Hand a job (owned data only) to the driver, which builds+runs the actual
+    // subscription against the shared stack. Reply immediately.
+    let job = SubJob {
+        node_id,
+        handle: dev.handle,
+        out,
+        stop_rx,
+        my_stop,
+    };
+    if sub_submit.send(job).await.is_err() {
+        ctx.subs.borrow_mut().remove(&node_id);
+        return proto::Response::Error {
+            message: "subscription driver unavailable".into(),
+        };
+    }
+
+    proto::Response::Subscribed {
+        node_id,
+        already: false,
+    }
+}
+
+/// Stop a live subscription: fire its stop signal (which ends the subscription
+/// task) and forget it. Idempotent — unsubscribing an unknown device is `Ok`.
+fn unsubscribe<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64) -> proto::Response {
+    if let Some(stop) = ctx.subs.borrow_mut().remove(&node_id) {
+        // Best-effort: send the stop; if the receiver is already gone the task is
+        // ending anyway. Dropping `stop` here also closes the channel, which the
+        // task's `recv()` sees as `Err` — either way it wakes and completes.
+        let _ = stop.try_send(());
+        info!("unsubscribed node 0x{node_id:016x}");
+    }
+    proto::Response::Ok
+}
+
+/// Decommission a persisted device: stop any live subscription, `RemoveFabric`
+/// our fabric on the device (freeing its fabric slot), then drop the local
+/// record. Returns the refreshed device list.
+///
+/// If the device is unreachable the `RemoveFabric` can't happen; with `force` we
+/// still drop the local record (leaving a device-side orphan fabric — the honest
+/// trade-off, surfaced to the user), otherwise we report the error and keep the
+/// record so it can be retried.
+async fn decommission<C: Crypto>(
+    ctx: &ActorCtx<'_, C>,
+    node_id: u64,
+    force: bool,
+) -> proto::Response {
+    let Some(dev) = lookup_stored(ctx, node_id) else {
+        return proto::Response::Error {
+            message: format!("no stored device with node_id 0x{node_id:016x}"),
+        };
+    };
+
+    // Stop any live subscription first (its CASE session is about to be torn down).
+    if let Some(stop) = ctx.subs.borrow_mut().remove(&node_id) {
+        let _ = stop.try_send(());
+    }
+
+    // Remove our fabric on the device (over CASE). On failure, only proceed to
+    // drop the local record if the caller forced it.
+    match ctx.controller.decommission(dev.handle).await {
+        Ok(()) => info!("decommissioned node 0x{node_id:016x} (RemoveFabric ok)"),
+        Err(e) if force => {
+            warn!(
+                "decommission node 0x{node_id:016x}: RemoveFabric failed ({e:?}); forcing local removal (device-side fabric leaked)"
+            );
+        }
+        Err(e) => {
+            return proto::Response::Error {
+                message: format!(
+                    "device unreachable — RemoveFabric failed: {e:?}. Retry, or force-remove to drop the local record anyway."
+                ),
+            };
+        }
+    }
+
+    // Drop the local record (load-all / filter / save-all).
+    match ctx.store.load_devices() {
+        Ok(mut devices) => {
+            devices.retain(|d| d.handle.node_id != node_id);
+            if let Err(e) = ctx.store.save_devices(&devices) {
+                return proto::Response::Error {
+                    message: format!("failed to update store: {e:?}"),
+                };
+            }
+        }
+        Err(e) => {
+            return proto::Response::Error {
+                message: format!("failed to load store: {e:?}"),
+            };
+        }
+    }
+
+    list_devices(ctx)
 }
 
 /// Replace a stored device's local tags, then return the refreshed device list
@@ -536,6 +837,8 @@ async fn persist_commissioned<C: Crypto>(
                 unique_id: ident.unique_id,
                 serial_number: ident.serial_number,
                 node_label,
+                vendor_name: ident.vendor_name,
+                product_name: ident.product_name,
                 fingerprint: ident.fingerprint,
                 tags,
             });
@@ -568,6 +871,8 @@ fn new_record(
         unique_id: ident.unique_id.clone(),
         serial_number: ident.serial_number.clone(),
         node_label: ident.node_label.clone(),
+        vendor_name: ident.vendor_name.clone(),
+        product_name: ident.product_name.clone(),
         fingerprint: ident.fingerprint,
         tags: alloc::vec::Vec::new(),
     }

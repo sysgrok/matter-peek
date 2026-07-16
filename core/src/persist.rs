@@ -18,7 +18,7 @@
 //! portable to esp32 etc., and is a candidate to graduate into rs-matter later.
 
 extern crate alloc;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use rs_matter::error::Error;
@@ -170,6 +170,12 @@ fn normalize_tags(tags: &[String]) -> Vec<String> {
     out
 }
 
+/// `None` for an empty string, `Some(clone)` otherwise — so blank device names
+/// don't bloat the persisted blob and round-trip cleanly to/from empty.
+fn opt_str(s: &str) -> Option<String> {
+    (!s.is_empty()).then(|| s.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Wire (TLV) representations.
 //
@@ -205,6 +211,11 @@ struct StoredDeviceWire {
     fp_hardware_version: Option<u16>,
     fp_software_version: Option<u32>,
     tags: Vec<String>,
+    // Device-declared human-readable names (BasicInformation). Appended LAST and
+    // `Option` so blobs written before this field existed still deserialize
+    // (a missing trailing optional decodes to `None`). `None` ⇒ empty string.
+    vendor_name: Option<String>,
+    product_name: Option<String>,
 }
 
 impl StoredDeviceList {
@@ -223,6 +234,10 @@ impl StoredDeviceList {
                     fp_hardware_version: d.fingerprint.hardware_version,
                     fp_software_version: d.fingerprint.software_version,
                     tags: d.tags.clone(),
+                    // Persist the name only when non-empty (keeps blobs compact
+                    // and round-trips `None` ⇄ empty string).
+                    vendor_name: opt_str(&d.vendor_name),
+                    product_name: opt_str(&d.product_name),
                 })
                 .collect(),
         }
@@ -242,6 +257,8 @@ impl StoredDeviceList {
                     unique_id: w.unique_id,
                     serial_number: w.serial_number,
                     node_label: w.node_label,
+                    vendor_name: w.vendor_name.unwrap_or_default(),
+                    product_name: w.product_name.unwrap_or_default(),
                     fingerprint: crate::model::DeviceFingerprint {
                         vendor_id: w.fp_vendor_id,
                         product_id: w.fp_product_id,
@@ -320,6 +337,8 @@ mod tests {
             unique_id: "uid-".to_string() + serial,
             serial_number: serial.to_string(),
             node_label: "label".to_string(),
+            vendor_name: "Acme".to_string(),
+            product_name: "Widget".to_string(),
             fingerprint: fp(0x1234, 0x5678),
             tags: tags.iter().map(|t| t.to_string()).collect(),
         }

@@ -358,6 +358,30 @@ impl<'a, C: Crypto> Controller<'a, C> {
         crate::discovery::discover_all(self.matter, self.crypto, filter, max, timeout_ms).await
     }
 
+    /// Like [`Self::discover_all`], but assumes the caller already runs the mDNS
+    /// backend continuously (via [`Self::run_mdns_backend`]) — so it only places
+    /// browse requests without starting a competing backend. Use this from a
+    /// long-lived host that keeps the backend up for operational resolves.
+    pub async fn discover_all_bg(
+        &self,
+        filter: &CommissionableFilter,
+        max: u8,
+        timeout_ms: Option<u32>,
+    ) -> Vec<crate::discovery::DiscoveredDevice> {
+        crate::discovery::discover_all_with_running_backend(self.matter, filter, max, timeout_ms)
+            .await
+    }
+
+    /// Run the mDNS backend **forever** (returns only on error). A long-lived host
+    /// must run this as a permanent concurrent task so that **operational
+    /// resolves** — needed by `Exchange::initiate` to re-address a persisted
+    /// device over CASE (subscribe / peek / decommission after the secure session
+    /// has lapsed) — are serviced. Without it, those resolves time out with
+    /// `NotFound`. See [`run_mdns_backend`](crate::discovery::run_mdns_backend).
+    pub async fn run_mdns_backend(&self) -> Result<(), Error> {
+        crate::discovery::run_mdns_backend(self.matter, self.crypto).await
+    }
+
     /// Read a diagnostic health snapshot from a previously-commissioned device
     /// over a fresh CASE session. `dev` carries the `(fabric_index, node_id)`
     /// returned by [`Self::commission`] — that's all that's needed to re-address
@@ -379,15 +403,21 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// [`DeviceHealth`](crate::model::DeviceHealth) updates to `on_update` — the
     /// health-board primitive (vs. the one-shot [`Self::read_health`]).
     ///
-    /// The first `on_update` carries the priming snapshot; subsequent calls carry
-    /// deltas as the device pushes reports. Runs until the returned future is
-    /// dropped (which cancels the subscription). The transport pump must be
-    /// running in a sibling task.
+    /// - `on_update` receives the priming snapshot first, then deltas.
+    /// - `on_state` receives [`SubState`](crate::subscribe::SubState) lifecycle
+    ///   transitions (`Live { max_int }` / `Reconnecting`), so the caller can show
+    ///   connection health.
+    ///
+    /// Runs **indefinitely**, self-healing across session drops (a stale
+    /// subscription is re-established with a fresh device-side id), until the
+    /// returned future is dropped (the cancel). The transport pump must be running
+    /// in a sibling task.
     pub async fn subscribe_health(
         &self,
         dev: DeviceHandle,
         which: DiagSet,
         on_update: impl FnMut(DeviceHealth),
+        on_state: impl FnMut(crate::subscribe::SubState),
     ) -> Result<(), Error> {
         crate::subscribe::subscribe_health(
             self.matter,
@@ -396,6 +426,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
             dev.node_id,
             which,
             on_update,
+            on_state,
         )
         .await
     }

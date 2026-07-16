@@ -23,6 +23,35 @@ struct StepLine {
     status: proto::StepStatus,
 }
 
+/// UI state for one live health subscription (per device).
+#[derive(Clone, PartialEq)]
+struct LiveSub {
+    /// The running, merged health view (successive report deltas merged in).
+    health: proto::DeviceHealth,
+    /// Connection state of this subscription (live / reconnecting).
+    conn: SubConn,
+    /// How many health updates have arrived over this subscription's lifetime.
+    updates: u64,
+}
+
+impl Default for LiveSub {
+    fn default() -> Self {
+        Self {
+            health: proto::DeviceHealth::default(),
+            // Optimistic until the server confirms `Live`; shows "connecting…".
+            conn: SubConn::Reconnecting,
+            updates: 0,
+        }
+    }
+}
+
+/// Connection state of a live subscription, mirrored from the wire.
+#[derive(Clone, Copy, PartialEq)]
+enum SubConn {
+    Live { max_int_secs: u16 },
+    Reconnecting,
+}
+
 /// Which top-level tab is showing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -53,6 +82,19 @@ enum Msg {
     ListDevices,
     Peek(u64),
     Identify(u64),
+    /// Decommission a stored device (RemoveFabric + drop the local record).
+    Decommission(u64),
+    /// A live health update arrived for a subscribed device (node_id, health).
+    /// Deltas are merged into that device's running view.
+    HealthReport(u64, proto::DeviceHealth),
+    /// A subscription's connection state changed (node_id, state).
+    SubState(u64, proto::SubscriptionState),
+    /// The persistent subscription WS is open and ready; its writer sink is
+    /// attached. Any subscriptions queued before it opened are (re)sent.
+    SubWsReady(futures::channel::mpsc::UnboundedSender<String>),
+    /// The persistent subscription WS closed (server gone / network) — all live
+    /// subscriptions are dropped; the UI shows them as ended.
+    SubWsClosed,
     /// Edit the tag-input text for a given device (node_id).
     TagsInput(u64, String),
     /// Persist the edited tags for a given device.
@@ -89,6 +131,15 @@ struct App {
     result: Option<proto::Response>,
     /// Transient status line for stored-device ops (peek result / identify ack).
     stored_status: Option<String>,
+    /// Live health subscriptions, keyed by device `node_id`. Multiple devices can
+    /// be watched at once, each with its own running panel. An entry exists for as
+    /// long as the device is being watched (removed on stop).
+    subs: HashMap<u64, LiveSub>,
+    /// The persistent WS to the server over which all subscriptions are driven
+    /// (Subscribe/Unsubscribe out, HealthReport/SubscriptionState in). Opened
+    /// lazily on the first subscribe; a `None` here means no live WS yet. The
+    /// value is the sink to its writer task.
+    sub_ws: Option<futures::channel::mpsc::UnboundedSender<String>>,
     /// A neutral info notice (e.g. cancellation outcome).
     notice: Option<String>,
     /// The address we most recently commissioned successfully (and kept). Used to
@@ -122,6 +173,8 @@ impl Component for App {
             steps: Vec::new(),
             result: None,
             stored_status: None,
+            subs: HashMap::new(),
+            sub_ws: None,
             notice: None,
             last_commissioned_addr: None,
             confirm_recommission: false,
@@ -247,6 +300,86 @@ impl Component for App {
                 );
                 true
             }
+            Msg::Decommission(node_id) => {
+                self.busy_stored = true;
+                self.stored_status = Some(format!(
+                    "Decommissioning node 0x{node_id:016x} (RemoveFabric)…"
+                ));
+                self.error = None;
+                // Stop watching it locally (the server tears the subscription down too).
+                self.subs.remove(&node_id);
+                send_request(
+                    ctx.link().clone(),
+                    proto::Request::Decommission {
+                        node_id,
+                        force: false,
+                    },
+                );
+                true
+            }
+            Msg::HealthReport(node_id, health) => {
+                // Merge into that device's running view (ignore if not watching).
+                if let Some(sub) = self.subs.get_mut(&node_id) {
+                    sub.updates += 1;
+                    let prev = core::mem::take(&mut sub.health);
+                    sub.health = merge_health(prev, health);
+                    true
+                } else {
+                    false
+                }
+            }
+            Msg::SubState(node_id, state) => {
+                match state {
+                    proto::SubscriptionState::Live { max_int_secs } => {
+                        if let Some(sub) = self.subs.get_mut(&node_id) {
+                            sub.conn = SubConn::Live { max_int_secs };
+                        }
+                    }
+                    proto::SubscriptionState::Reconnecting => {
+                        if let Some(sub) = self.subs.get_mut(&node_id) {
+                            sub.conn = SubConn::Reconnecting;
+                        }
+                    }
+                    // Terminal. If the device is still stored we want it watched,
+                    // so mark it reconnecting and re-subscribe; only drop the panel
+                    // if the device is gone from the store.
+                    proto::SubscriptionState::Stopped => {
+                        let still_stored = self.stored.iter().any(|d| d.handle.node_id == node_id);
+                        if still_stored {
+                            if let Some(sub) = self.subs.get_mut(&node_id) {
+                                sub.conn = SubConn::Reconnecting;
+                            }
+                            self.sub_send(&proto::Request::Subscribe { node_id });
+                        } else {
+                            self.subs.remove(&node_id);
+                        }
+                    }
+                }
+                true
+            }
+            Msg::SubWsReady(tx) => {
+                self.sub_ws = Some(tx);
+                // (Re)send Subscribe for every device we intend to watch — covers
+                // the initial open and any reconnect.
+                let nodes: Vec<u64> = self.subs.keys().copied().collect();
+                for node_id in nodes {
+                    self.sub_send(&proto::Request::Subscribe { node_id });
+                }
+                true
+            }
+            Msg::SubWsClosed => {
+                self.sub_ws = None;
+                // The connection dropped → every subscription is dead. Mark them
+                // reconnecting and reopen the WS (which re-subscribes on ready), so
+                // the dashboard self-heals without user action.
+                for sub in self.subs.values_mut() {
+                    sub.conn = SubConn::Reconnecting;
+                }
+                if !self.subs.is_empty() {
+                    self.ensure_sub_ws(ctx);
+                }
+                true
+            }
             Msg::TagsInput(node_id, text) => {
                 self.tag_inputs.insert(node_id, text);
                 false
@@ -294,6 +427,9 @@ impl Component for App {
                             .map(|d| (d.handle.node_id, d.tags.join(", ")))
                             .collect();
                         self.stored = devices;
+                        // A dashboard watches everything: auto-subscribe every
+                        // stored device (and drop panels for any that vanished).
+                        self.sync_subscriptions(ctx);
                     }
                     proto::Response::Peek {
                         handle,
@@ -306,6 +442,9 @@ impl Component for App {
                         self.stored_status =
                             Some("Identify acknowledged — device should blink.".into());
                     }
+                    // `Subscribed` / streamed subscription frames arrive on the
+                    // dedicated persistent subscription WS, not this one-shot path.
+                    proto::Response::Subscribed { .. } => {}
                     proto::Response::Cancelled { decommissioned } => {
                         self.notice = Some(if decommissioned {
                             "Commission cancelled — the device had been added to our fabric and was cleaned up (decommissioned).".into()
@@ -384,6 +523,119 @@ impl Component for App {
 }
 
 impl App {
+    /// Send a request over the **persistent subscription WS** (Subscribe /
+    /// Unsubscribe). No-op if the WS isn't open yet — `SubWsReady` re-sends the
+    /// active subscriptions once it opens.
+    fn sub_send(&self, request: &proto::Request) {
+        if let Some(tx) = &self.sub_ws {
+            let msg = proto::ClientMsg {
+                req_id: 0,
+                request: request.clone(),
+            };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = tx.unbounded_send(json);
+            }
+        }
+    }
+
+    /// Open the persistent subscription WS if it isn't already, spawning its
+    /// reader (server frames → `Msg`) and writer (outbound requests) tasks. All
+    /// live subscriptions share this one connection; it stays open while any
+    /// device is being watched. The server ties each subscription to this
+    /// connection, so closing it stops them all server-side too.
+    fn ensure_sub_ws(&mut self, ctx: &Context<Self>) {
+        if self.sub_ws.is_some() {
+            return;
+        }
+        let link = ctx.link().clone();
+        spawn_local(async move {
+            let ws = match WebSocket::open(WS_URL) {
+                Ok(ws) => ws,
+                Err(e) => {
+                    link.send_message(Msg::Error(format!("subscription connect failed: {e}")));
+                    return;
+                }
+            };
+            let (mut write, mut read) = ws.split();
+
+            // Outbound: a channel the UI writes request-JSON into; drain to the WS.
+            let (out_tx, mut out_rx) = futures::channel::mpsc::unbounded::<String>();
+            link.send_message(Msg::SubWsReady(out_tx));
+
+            let writer = async {
+                while let Some(json) = out_rx.next().await {
+                    if write.send(Message::Text(json)).await.is_err() {
+                        break;
+                    }
+                }
+            };
+
+            // Inbound: parse server frames, route the subscription events to `Msg`.
+            let reader = async {
+                while let Some(frame) = read.next().await {
+                    let text = match frame {
+                        Ok(Message::Text(t)) => t,
+                        Ok(Message::Bytes(_)) => continue,
+                        Err(_) => break,
+                    };
+                    let Ok(msg) = serde_json::from_str::<proto::ServerMsg>(&text) else {
+                        continue;
+                    };
+                    match msg {
+                        proto::ServerMsg::Event { event } => match event {
+                            proto::Event::HealthReport {
+                                node_id, health, ..
+                            } => link.send_message(Msg::HealthReport(node_id, health)),
+                            proto::Event::SubscriptionState { node_id, state } => {
+                                link.send_message(Msg::SubState(node_id, state))
+                            }
+                            proto::Event::Step { .. } => {}
+                        },
+                        // `Subscribed` acks arrive here; the panel already exists,
+                        // so nothing to do — the streamed events drive the UI.
+                        proto::ServerMsg::Response { .. } => {}
+                    }
+                }
+            };
+
+            // Run until either half ends (connection closed), then tell the UI.
+            futures::pin_mut!(reader, writer);
+            futures::future::select(reader, writer).await;
+            link.send_message(Msg::SubWsClosed);
+        });
+    }
+
+    /// Reconcile live subscriptions with the current stored-device list: watch
+    /// every stored device (a dashboard is live by default), and drop any panel
+    /// for a device that's no longer stored. Opens the persistent WS if needed.
+    fn sync_subscriptions(&mut self, ctx: &Context<Self>) {
+        let stored_ids: Vec<u64> = self.stored.iter().map(|d| d.handle.node_id).collect();
+        if stored_ids.is_empty() {
+            return;
+        }
+
+        self.ensure_sub_ws(ctx);
+
+        // Subscribe to any stored device we're not already watching.
+        for node_id in &stored_ids {
+            if !self.subs.contains_key(node_id) {
+                self.subs.insert(*node_id, LiveSub::default());
+                self.sub_send(&proto::Request::Subscribe { node_id: *node_id });
+            }
+        }
+        // Drop subscriptions for devices no longer in the store.
+        let gone: Vec<u64> = self
+            .subs
+            .keys()
+            .copied()
+            .filter(|id| !stored_ids.contains(id))
+            .collect();
+        for node_id in gone {
+            self.sub_send(&proto::Request::Unsubscribe { node_id });
+            self.subs.remove(&node_id);
+        }
+    }
+
     /// Kick off the commission vertical (shared by `Run` and `RunAnyway`).
     fn start_commission(&mut self, ctx: &Context<Self>) -> bool {
         let passcode: u32 = match self.passcode.trim().parse() {
@@ -753,12 +1005,19 @@ impl App {
         let node_id = d.handle.node_id;
         let peek = link.callback(move |_| Msg::Peek(node_id));
         let identify = link.callback(move |_| Msg::Identify(node_id));
+        let decommission = link.callback(move |_| Msg::Decommission(node_id));
         let save_tags = link.callback(move |_| Msg::SaveTags(node_id));
         let on_tags = link.callback(move |e: InputEvent| Msg::TagsInput(node_id, input_value(e)));
 
-        // Prefer a human label, falling back to the stable identifiers.
+        // This device's live subscription (auto-created; `None` only very briefly).
+        let live = self.subs.get(&node_id);
+
+        // Prefer a human label: the user-set NodeLabel, else the device's own
+        // ProductName, else the stable identifiers, else the raw node id.
         let title = if !d.node_label.is_empty() {
             d.node_label.clone()
+        } else if !d.product_name.is_empty() {
+            d.product_name.clone()
         } else if !d.unique_id.is_empty() {
             format!("uid {}", d.unique_id)
         } else if !d.serial_number.is_empty() {
@@ -787,7 +1046,18 @@ impl App {
                         </div>
                     </div>
 
-                    <p class="is-size-7 has-text-grey mono mb-3">{ fingerprint_line(&d.fingerprint) }</p>
+                    <div class="mb-3">
+                        <p class="is-size-7 mb-0">
+                            <span class="has-text-weight-semibold">{ d.vendor_display.clone() }</span>
+                            { if d.is_test_vendor {
+                                html!{ <span class="tag is-warning is-light is-rounded ml-2">{ "TEST" }</span> }
+                              } else { html!{} } }
+                            { if !d.product_name.is_empty() {
+                                html!{ <span class="has-text-grey">{ format!(" · {}", d.product_name) }</span> }
+                              } else { html!{} } }
+                        </p>
+                        <p class="is-size-7 has-text-grey mono">{ fingerprint_line(&d.fingerprint) }</p>
+                    </div>
 
                     {
                         if d.tags.is_empty() {
@@ -822,11 +1092,77 @@ impl App {
                         <button class="button is-warning is-light" disabled={self.busy_stored} onclick={identify}>
                             { "Identify" }
                         </button>
+                        <button class="button is-danger is-light" disabled={self.busy_stored} onclick={decommission}>
+                            { "Decommission" }
+                        </button>
                     </div>
+
+                    // Every stored device is watched automatically — the panel is
+                    // always shown (it renders "connecting…" until the first report).
+                    { self.view_live_health(live) }
                 </div>
             </div>
         }
     }
+
+    /// The live-health panel shown under every device card: a small grid of the
+    /// diagnostic metrics from the merged running view, plus a live/reconnecting
+    /// status and the update count. `None` while the subscription is still being
+    /// set up (shown as connecting).
+    fn view_live_health(&self, sub: Option<&LiveSub>) -> Html {
+        let default = LiveSub::default();
+        let sub = sub.unwrap_or(&default);
+        // Each metric as a labelled cell; `—` when the device doesn't report it.
+        let metric = |label: &str, value: String| -> Html {
+            html! {
+                <div class="level-item has-text-centered">
+                    <div>
+                        <p class="heading">{ label.to_string() }</p>
+                        <p class="title is-6 mono">{ value }</p>
+                    </div>
+                </div>
+            }
+        };
+        let g = sub.health.general.unwrap_or_default();
+        let sw = sub.health.software.unwrap_or_default();
+
+        let (status, status_class) = match sub.conn {
+            SubConn::Live { max_int_secs } => (
+                format!("● live · {} update(s) · ≤{max_int_secs}s", sub.updates),
+                "tag is-success is-light",
+            ),
+            SubConn::Reconnecting => (
+                format!("◌ reconnecting… · {} update(s)", sub.updates),
+                "tag is-warning is-light",
+            ),
+        };
+
+        html! {
+            <div class="box mt-2 p-3">
+                <div class="level is-mobile mb-2">
+                    <div class="level-left">
+                        <p class="heading mb-0">{ "Live health" }</p>
+                    </div>
+                    <div class="level-right">
+                        <span class={status_class}>{ status }</span>
+                    </div>
+                </div>
+                <nav class="level is-mobile">
+                    { metric("Uptime (s)", opt_str(g.up_time_secs)) }
+                    { metric("Reboots", opt_str(g.reboot_count)) }
+                    { metric("Op. hours", opt_str(g.total_operational_hours)) }
+                    { metric("Heap free", opt_str(sw.current_heap_free)) }
+                    { metric("Heap used", opt_str(sw.current_heap_used)) }
+                    { metric("Heap peak", opt_str(sw.current_heap_high_watermark)) }
+                </nav>
+            </div>
+        }
+    }
+}
+
+/// A metric value or an em-dash placeholder when the device doesn't report it.
+fn opt_str<T: std::fmt::Display>(v: Option<T>) -> String {
+    v.map(|x| x.to_string()).unwrap_or_else(|| "—".into())
 }
 
 /// One-line-per-field summary of a `PeekDevice` result, for the status pre.
@@ -857,17 +1193,54 @@ fn format_peek(
     s
 }
 
+/// Merge a live health delta into the running view: a subscription report may
+/// carry only the attributes that changed, so we overlay the new report's
+/// present fields onto the previous snapshot rather than replacing it wholesale.
+fn merge_health(mut prev: proto::DeviceHealth, delta: proto::DeviceHealth) -> proto::DeviceHealth {
+    if let Some(g) = delta.general {
+        let base = prev.general.get_or_insert_with(Default::default);
+        if g.up_time_secs.is_some() {
+            base.up_time_secs = g.up_time_secs;
+        }
+        if g.reboot_count.is_some() {
+            base.reboot_count = g.reboot_count;
+        }
+        if g.total_operational_hours.is_some() {
+            base.total_operational_hours = g.total_operational_hours;
+        }
+    }
+    if let Some(s) = delta.software {
+        let base = prev.software.get_or_insert_with(Default::default);
+        if s.current_heap_free.is_some() {
+            base.current_heap_free = s.current_heap_free;
+        }
+        if s.current_heap_used.is_some() {
+            base.current_heap_used = s.current_heap_used;
+        }
+        if s.current_heap_high_watermark.is_some() {
+            base.current_heap_high_watermark = s.current_heap_high_watermark;
+        }
+    }
+    prev
+}
+
 /// Compact one-line fingerprint summary for a stored-device card.
 fn fingerprint_line(fp: &proto::Fingerprint) -> String {
-    fn show<T: core::fmt::Display>(v: Option<T>) -> String {
+    fn dec<T: core::fmt::Display>(v: Option<T>) -> String {
         v.map(|x| x.to_string()).unwrap_or_else(|| "—".to_string())
     }
+    // vid/pid in hex (how they're written in the CSA registry / on data sheets);
+    // hw/sw versions in decimal.
+    let hex16 = |v: Option<u16>| {
+        v.map(|x| format!("0x{x:04X}"))
+            .unwrap_or_else(|| "—".into())
+    };
     format!(
         "vid:{} pid:{} hw:{} sw:{}",
-        show(fp.vendor_id),
-        show(fp.product_id),
-        show(fp.hardware_version),
-        show(fp.software_version),
+        hex16(fp.vendor_id),
+        hex16(fp.product_id),
+        dec(fp.hardware_version),
+        dec(fp.software_version),
     )
 }
 
@@ -943,10 +1316,14 @@ fn send_request(link: html::Scope<App>, request: proto::Request) {
                 }
             };
             match server_msg {
-                proto::ServerMsg::Event { event } => {
-                    let proto::Event::Step { step, status, .. } = event;
-                    link.send_message(Msg::Step(StepLine { step, status }));
-                }
+                proto::ServerMsg::Event { event } => match event {
+                    proto::Event::Step { step, status, .. } => {
+                        link.send_message(Msg::Step(StepLine { step, status }));
+                    }
+                    // Subscription events flow on the dedicated persistent WS, not
+                    // this one-shot connection — ignore any that land here.
+                    proto::Event::HealthReport { .. } | proto::Event::SubscriptionState { .. } => {}
+                },
                 proto::ServerMsg::Response { response, .. } => {
                     link.send_message(Msg::Done(response));
                     return;

@@ -80,6 +80,54 @@ pub async fn discover_all<C: Crypto + Copy>(
     max: u8,
     timeout_ms: Option<u32>,
 ) -> Vec<DiscoveredDevice> {
+    discover_all_impl(matter, crypto, filter, max, timeout_ms).await
+}
+
+/// Like [`discover_all`], but for a host that **already runs the mDNS backend**
+/// (via [`run_mdns_backend`]) as a permanent task — this places the browse
+/// requests without starting a second backend (which would contend on the shared
+/// resolve/browse rendezvous).
+pub async fn discover_all_with_running_backend(
+    matter: &Matter<'_>,
+    filter: &CommissionableFilter,
+    max: u8,
+    timeout_ms: Option<u32>,
+) -> Vec<DiscoveredDevice> {
+    let timeout_ms = timeout_ms.unwrap_or(DEFAULT_BROWSE_TIMEOUT_MS);
+    let mut found = Vec::new();
+    let mut exclude: Vec<u64> = Vec::new();
+
+    // No crypto and no own backend: the caller's permanent backend services these
+    // browse requests. Just place them and collect matches.
+    while found.len() < max as usize {
+        let res = matter
+            .transport()
+            .browse_commissionable(filter, &exclude, timeout_ms)
+            .await;
+        match res {
+            Ok((address, commissionable_id)) => {
+                info!("discovery: found {address} (id={commissionable_id:#x})");
+                exclude.push(commissionable_id);
+                found.push(DiscoveredDevice {
+                    address,
+                    commissionable_id,
+                });
+            }
+            Err(_) => break,
+        }
+    }
+
+    info!("discovery: found {} device(s)", found.len());
+    found
+}
+
+async fn discover_all_impl<C: Crypto + Copy>(
+    matter: &Matter<'_>,
+    crypto: C,
+    filter: &CommissionableFilter,
+    max: u8,
+    timeout_ms: Option<u32>,
+) -> Vec<DiscoveredDevice> {
     let timeout_ms = timeout_ms.unwrap_or(DEFAULT_BROWSE_TIMEOUT_MS);
     let mut found = Vec::new();
     let mut exclude: Vec<u64> = Vec::new();
@@ -140,6 +188,25 @@ async fn browse_once<C: Crypto>(
 // ---------------------------------------------------------------------------
 // Backend wiring (one of these compiles, per feature)
 // ---------------------------------------------------------------------------
+
+/// Run the compiled-in mDNS backend **forever** (it only ever returns on error).
+///
+/// This services *both* browse requests (commissionable discovery) and
+/// **operational resolve** requests — the latter is what `Exchange::initiate`
+/// needs to re-address a persisted device over CASE (subscribe / peek /
+/// decommission on a device whose secure session has lapsed). A long-lived host
+/// (the RPC actor) must run this as a permanent concurrent arm; without it, every
+/// operational resolve times out with `NotFound`. Short-lived hosts (the CLI's
+/// one-shot discover) can instead rely on [`discover_commissionable`], which runs
+/// the backend for the duration of the browse.
+///
+/// Do **not** run two of these against the same `Matter` stack — they'd both poll
+/// the single resolve/browse rendezvous. When this is running, use
+/// [`browse_commissionable`](rs_matter::transport::Transport::browse_commissionable)
+/// directly for discovery rather than [`discover_commissionable`].
+pub async fn run_mdns_backend<C: Crypto>(matter: &Matter<'_>, crypto: C) -> Result<(), Error> {
+    run_backend(matter, crypto).await
+}
 
 #[cfg(feature = "mdns-avahi")]
 async fn run_backend<C: Crypto>(matter: &Matter<'_>, _crypto: C) -> Result<(), Error> {

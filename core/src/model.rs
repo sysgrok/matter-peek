@@ -82,6 +82,10 @@ pub struct StoredDevice {
     pub serial_number: alloc::string::String,
     /// BasicInformation `NodeLabel` (user-set name from the primary ecosystem).
     pub node_label: alloc::string::String,
+    /// BasicInformation `VendorName` — the vendor's own human-readable name.
+    pub vendor_name: alloc::string::String,
+    /// BasicInformation `ProductName` — the product's own human-readable name.
+    pub product_name: alloc::string::String,
     /// Per-model numeric fingerprint (vendor/product/hw/sw) captured at commission
     /// — the fallback identity when no `unique_id`/`serial_number` is served, and
     /// what surfaces a "same model, maybe same unit?" re-match candidate.
@@ -104,6 +108,13 @@ pub struct DeviceIdentity {
     pub unique_id: alloc::string::String,
     pub serial_number: alloc::string::String,
     pub node_label: alloc::string::String,
+    /// BasicInformation `VendorName` — the vendor's own human-readable name (the
+    /// authoritative source, preferred over decoding `vendor_id`). Empty if the
+    /// device leaves it blank.
+    pub vendor_name: alloc::string::String,
+    /// BasicInformation `ProductName` — the product's own human-readable name.
+    /// Empty if the device leaves it blank.
+    pub product_name: alloc::string::String,
     /// Composite of the mandatory numeric BasicInformation attributes — not
     /// globally unique, but a stable per-model fingerprint and the fallback when
     /// the string identifiers are absent.
@@ -257,6 +268,8 @@ mod tests {
             unique_id: uid.to_string(),
             serial_number: serial.to_string(),
             node_label: "".to_string(),
+            vendor_name: "".to_string(),
+            product_name: "".to_string(),
             fingerprint,
             tags: vec!["keep-me".to_string()],
         }
@@ -267,6 +280,8 @@ mod tests {
             unique_id: uid.to_string(),
             serial_number: serial.to_string(),
             node_label: "".to_string(),
+            vendor_name: "".to_string(),
+            product_name: "".to_string(),
             fingerprint,
         }
     }

@@ -223,11 +223,16 @@ async fn flow<'a, C: rs_matter::crypto::Crypto>(
         // local that the pinned subscription future would outlive on drop).
         let update_count = std::rc::Rc::new(core::cell::Cell::new(0usize));
         let counter = update_count.clone();
-        let sub = controller.subscribe_health(outcome.handle, DiagSet::ALL, move |health| {
-            counter.set(counter.get() + 1);
-            println!("--- health update #{} ---", counter.get());
-            print_health(&health);
-        });
+        let sub = controller.subscribe_health(
+            outcome.handle,
+            DiagSet::ALL,
+            move |health| {
+                counter.set(counter.get() + 1);
+                println!("--- health update #{} ---", counter.get());
+                print_health(&health);
+            },
+            |state| info!("subscription state: {state:?}"),
+        );
         let timer = embassy_time::Timer::after(embassy_time::Duration::from_secs(SUBSCRIBE_SECS));
         match select(pin!(sub), pin!(timer)).await {
             Either::First(r) => {
