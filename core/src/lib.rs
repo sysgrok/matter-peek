@@ -1,4 +1,4 @@
-//! matter-peek-core — a vendor-agnostic Matter diagnostic controller.
+//! matter-peek-core — a Matter diagnostic controller.
 //!
 //! **`no_std` + `alloc`.** The core carries no `std` dependency so it can run on
 //! embedded targets (e.g. esp32 with PSRAM) as well as desktop/mobile; only the

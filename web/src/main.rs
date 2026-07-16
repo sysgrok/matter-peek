@@ -493,7 +493,7 @@ impl Component for App {
                     <div class="hero-body">
                         <p class="title">{ "matter-peek" }</p>
                         <p class="subtitle">
-                            { "A vendor-agnostic Matter diagnostic controller" }
+                            { "The Matter diagnostics tool" }
                         </p>
                     </div>
                 </section>
