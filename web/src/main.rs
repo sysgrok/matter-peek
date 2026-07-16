@@ -80,7 +80,8 @@ enum Msg {
     Discover,
     PickDevice(String),
     ListDevices,
-    Peek(u64),
+    /// Re-read a stored device's health now (one-shot) and update its card panel.
+    Refresh(u64),
     Identify(u64),
     /// Decommission a stored device (RemoveFabric + drop the local record).
     Decommission(u64),
@@ -277,9 +278,11 @@ impl Component for App {
                 send_request(ctx.link().clone(), proto::Request::ListDevices);
                 true
             }
-            Msg::Peek(node_id) => {
+            Msg::Refresh(node_id) => {
+                // One-shot re-read — the result updates this device's card panel
+                // (not a status line). Useful for the values the subscription
+                // doesn't push on every change (e.g. the live-computed uptime).
                 self.busy_stored = true;
-                self.stored_status = Some(format!("Peeking node 0x{node_id:016x}…"));
                 self.error = None;
                 send_request(
                     ctx.link().clone(),
@@ -431,12 +434,13 @@ impl Component for App {
                         // stored device (and drop panels for any that vanished).
                         self.sync_subscriptions(ctx);
                     }
-                    proto::Response::Peek {
-                        handle,
-                        health,
-                        crash_log_bytes,
-                    } => {
-                        self.stored_status = Some(format_peek(&handle, &health, crash_log_bytes));
+                    proto::Response::Peek { handle, health, .. } => {
+                        // A Refresh result: merge the fresh read into the device's
+                        // card panel so its values (uptime, heap, …) update in place.
+                        let sub = self.subs.entry(handle.node_id).or_default();
+                        let prev = core::mem::take(&mut sub.health);
+                        sub.health = merge_health(prev, health);
+                        sub.updates += 1;
                     }
                     proto::Response::Ok => {
                         self.stored_status =
@@ -1003,7 +1007,7 @@ impl App {
 
     fn view_device_card(&self, d: &proto::StoredDeviceInfo, link: &html::Scope<Self>) -> Html {
         let node_id = d.handle.node_id;
-        let peek = link.callback(move |_| Msg::Peek(node_id));
+        let refresh = link.callback(move |_| Msg::Refresh(node_id));
         let identify = link.callback(move |_| Msg::Identify(node_id));
         let decommission = link.callback(move |_| Msg::Decommission(node_id));
         let save_tags = link.callback(move |_| Msg::SaveTags(node_id));
@@ -1086,8 +1090,10 @@ impl App {
                     </div>
 
                     <div class="buttons are-small">
-                        <button class="button is-link is-light" disabled={self.busy_stored} onclick={peek}>
-                            { "Peek" }
+                        <button
+                            class={classes!("button", "is-link", "is-light", self.busy_stored.then_some("is-loading"))}
+                            disabled={self.busy_stored} onclick={refresh}>
+                            { "Refresh" }
                         </button>
                         <button class="button is-warning is-light" disabled={self.busy_stored} onclick={identify}>
                             { "Identify" }
@@ -1163,34 +1169,6 @@ impl App {
 /// A metric value or an em-dash placeholder when the device doesn't report it.
 fn opt_str<T: std::fmt::Display>(v: Option<T>) -> String {
     v.map(|x| x.to_string()).unwrap_or_else(|| "—".into())
-}
-
-/// One-line-per-field summary of a `PeekDevice` result, for the status pre.
-fn format_peek(
-    handle: &proto::DeviceHandle,
-    health: &proto::DeviceHealth,
-    crash_log_bytes: Option<usize>,
-) -> String {
-    let mut s = format!(
-        "peek node 0x{:016x} (fab {})\n",
-        handle.node_id, handle.fabric_index
-    );
-    if let Some(g) = &health.general {
-        s.push_str(&format!(
-            "general: up_time_secs={:?} reboot_count={:?} total_operational_hours={:?}\n",
-            g.up_time_secs, g.reboot_count, g.total_operational_hours
-        ));
-    }
-    if let Some(sw) = &health.software {
-        s.push_str(&format!(
-            "software: heap_free={:?} heap_used={:?} heap_high_watermark={:?}\n",
-            sw.current_heap_free, sw.current_heap_used, sw.current_heap_high_watermark
-        ));
-    }
-    if let Some(n) = crash_log_bytes {
-        s.push_str(&format!("crash_log_bytes: {n}\n"));
-    }
-    s
 }
 
 /// Merge a live health delta into the running view: a subscription report may

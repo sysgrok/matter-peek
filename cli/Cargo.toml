@@ -12,8 +12,14 @@ rust-version.workspace = true
 name = "matter-peek"
 path = "src/main.rs"
 
+[features]
+default = []
+# BLE commissioning (`--ble`): commission a device over Bluetooth and provision
+# it with a Thread dataset. Linux + BlueZ. Forwards to `matter-peek-core/ble`.
+ble = ["matter-peek-core/ble"]
+
 [dependencies]
-matter-peek-core = { path = "../core" }
+matter-peek-core = { path = "../core", default-features = false, features = ["mdns-avahi"] }
 rs-matter = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }

@@ -28,6 +28,8 @@
 extern crate alloc;
 
 pub mod basic_info;
+#[cfg(feature = "ble")]
+pub mod ble;
 pub mod ca;
 pub mod controller;
 pub mod diagnostics;

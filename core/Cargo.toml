@@ -28,6 +28,11 @@ mdns-resolve = ["std", "rs-matter/zbus"]                              # Linux + 
 mdns-astro = ["std", "rs-matter/astro-dnssd"]                         # macOS / iOS (Bonjour)
 mdns-builtin = ["std", "dep:socket2", "dep:nix", "dep:async-io"]     # fallback / Windows / same-host tests
 
+# BLE commissioning (Commissioner over BTP/GATT Central). Linux + BlueZ over
+# D-Bus, via rs-matter's `zbus` feature (the same one Avahi uses, so no new
+# heavy dependency). Enables the `commission_ble` flow.
+ble = ["std", "rs-matter/zbus"]
+
 [dependencies]
 # `core` is `no_std` + `alloc` (portable to esp32 etc.). It depends on rs-matter
 # with NO default features (rs-matter's `os` ⇒ `std`); the hosted `os` path is

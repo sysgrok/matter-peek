@@ -51,7 +51,10 @@ fn main() -> ExitCode {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("matter-peek: {msg}");
-            eprintln!("usage: matter-peek [PASSCODE] [PEER_ADDR]");
+            eprintln!("usage: matter-peek [PASSCODE] [PEER_ADDR] [--subscribe]");
+            eprintln!(
+                "       matter-peek --ble [--discriminator N] [PASSCODE]   (with $THREAD_DATASET or $THREAD_DATASET_FILE)"
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -86,6 +89,16 @@ struct Args {
     /// subscription and stream updates for [`SUBSCRIBE_SECS`] instead of
     /// decommissioning immediately.
     subscribe: bool,
+    /// `--ble`: commission the device over Bluetooth (BTP) instead of IP,
+    /// provisioning it with the Thread dataset from `$THREAD_DATASET`. The device
+    /// is matched by `--discriminator` (or the first commissionable one seen).
+    #[cfg_attr(not(feature = "ble"), allow(dead_code))]
+    ble: bool,
+    /// `--discriminator <N>`: the 12-bit discriminator to match the device's BLE
+    /// advertisement against (from the scanned QR / manual pairing code). Only
+    /// used with `--ble`; `None` matches the first commissionable device seen.
+    #[cfg_attr(not(feature = "ble"), allow(dead_code))]
+    discriminator: Option<u16>,
 }
 
 /// How long the `--subscribe` mode streams live health updates before tearing
@@ -93,30 +106,44 @@ struct Args {
 const SUBSCRIBE_SECS: u64 = 30;
 
 fn parse_args() -> Result<Args, String> {
-    // Positional args (passcode, peer) with a `--subscribe` flag that may appear
-    // anywhere. Filter the flag out first, then parse positionals.
+    // Positional args (passcode, peer) plus flags that may appear anywhere:
+    // `--subscribe`, `--ble`, and `--discriminator <N>`. Consume the flags first,
+    // then parse positionals from what's left.
     let mut subscribe = false;
-    let positionals: Vec<String> = std::env::args()
-        .skip(1)
-        .filter(|a| {
-            if a == "--subscribe" {
-                subscribe = true;
-                false
-            } else {
-                true
+    let mut ble = false;
+    let mut discriminator = None;
+
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let mut positionals: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i].as_str() {
+            "--subscribe" => subscribe = true,
+            "--ble" => ble = true,
+            "--discriminator" => {
+                i += 1;
+                let val = raw
+                    .get(i)
+                    .ok_or_else(|| "--discriminator needs a value".to_string())?;
+                discriminator = Some(
+                    parse_int_u16(val)
+                        .map_err(|e| format!("--discriminator must be a 12-bit integer: {e}"))?,
+                );
             }
-        })
-        .collect();
+            other => positionals.push(other.to_string()),
+        }
+        i += 1;
+    }
+
     let mut iter = positionals.into_iter();
 
     let passcode = match iter.next() {
-        Some(s) => s
-            .parse::<u32>()
-            .map_err(|e| format!("passcode must be u32: {e}"))?,
+        Some(s) => parse_int_u32(&s).map_err(|e| format!("passcode must be u32: {e}"))?,
         None => DEFAULT_PASSCODE,
     };
     // Second arg: an explicit `[::1]:5540` address, or the literal `discover`
-    // (also the default when omitted) to find the device via mDNS.
+    // (also the default when omitted) to find the device via mDNS. Ignored with
+    // `--ble` (BLE finds the device by discriminator over the air).
     let peer_addr = match iter.next().as_deref() {
         None | Some("discover") => None,
         Some(s) => Some(
@@ -128,7 +155,25 @@ fn parse_args() -> Result<Args, String> {
         passcode,
         peer_addr,
         subscribe,
+        ble,
+        discriminator,
     })
+}
+
+/// Parse a `u16` in decimal or `0x`-prefixed hex.
+fn parse_int_u16(s: &str) -> Result<u16, core::num::ParseIntError> {
+    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => u16::from_str_radix(hex, 16),
+        None => s.parse::<u16>(),
+    }
+}
+
+/// Parse a `u32` in decimal or `0x`-prefixed hex.
+fn parse_int_u32(s: &str) -> Result<u32, core::num::ParseIntError> {
+    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => s.parse::<u32>(),
+    }
 }
 
 async fn run(args: Args) -> Result<matter_peek_core::CommissionOutcome, Error> {
@@ -151,6 +196,15 @@ async fn run(args: Args) -> Result<matter_peek_core::CommissionOutcome, Error> {
         FabricIdentity::default(),
         matter_peek_core::ca::CaTier::RcacDirect,
     )?;
+
+    // BLE commissioning path — commissions over Bluetooth and provisions Thread,
+    // managing its own two-phase (BLE then IP) transport. Returns as soon as the
+    // device is fully commissioned (health reads / decommission are the IP path's
+    // job and can be layered on later).
+    #[cfg(feature = "ble")]
+    if args.ble {
+        return commission_over_ble(matter, &crypto, &ca, fab_idx, &args).await;
+    }
 
     // Resolve the target address *before* binding the transport socket: discovery
     // uses its own mDNS path (separate socket / DBus) and doesn't need the Matter
@@ -191,6 +245,72 @@ async fn run(args: Args) -> Result<matter_peek_core::CommissionOutcome, Error> {
         }
         Either::Second(result) => result,
     }
+}
+
+/// Commission a device over BLE, provisioning it with the Thread dataset from
+/// `$THREAD_DATASET` (hex) or the file at `$THREAD_DATASET_FILE`.
+#[cfg(feature = "ble")]
+async fn commission_over_ble<C: rs_matter::crypto::Crypto>(
+    matter: &Matter<'_>,
+    crypto: &C,
+    ca: &matter_peek_core::ca::ControllerCa,
+    fab_idx: core::num::NonZeroU8,
+    args: &Args,
+) -> Result<matter_peek_core::CommissionOutcome, Error> {
+    use matter_peek_core::ble::{commission_ble, decode_hex, ThreadCreds};
+
+    // Thread dataset: prefer the file (avoids the secret in the environment /
+    // process listing), else the hex env var.
+    let dataset = match std::env::var("THREAD_DATASET_FILE") {
+        Ok(path) => {
+            let hex = std::fs::read_to_string(&path).map_err(|e| {
+                error!("could not read THREAD_DATASET_FILE ({path}): {e}");
+                Error::from(ErrorCode::InvalidData)
+            })?;
+            decode_hex(hex.trim())?
+        }
+        Err(_) => {
+            let hex = std::env::var("THREAD_DATASET").map_err(|_| {
+                error!(
+                    "--ble needs a Thread dataset: set $THREAD_DATASET (hex) or $THREAD_DATASET_FILE"
+                );
+                Error::from(ErrorCode::InvalidData)
+            })?;
+            decode_hex(hex.trim())?
+        }
+    };
+
+    // Match the advertisement by discriminator (from the QR / pairing code), if
+    // given; otherwise take the first commissionable device seen.
+    let filter = CommissionableFilter {
+        discriminator: args.discriminator,
+        ..Default::default()
+    };
+
+    info!(
+        "=== BLE commissioning (discriminator={:?}, {} dataset bytes) ===",
+        args.discriminator,
+        dataset.len()
+    );
+
+    // A UDP socket for phase B (the operational / CASE transport).
+    let socket = bind_controller_socket()?;
+
+    commission_ble(
+        matter,
+        crypto,
+        ca,
+        fab_idx,
+        &filter,
+        args.passcode,
+        DEVICE_NODE_ID,
+        &ThreadCreds {
+            dataset_tlv: &dataset,
+        },
+        &socket,
+        FabricPolicy::Ephemeral,
+    )
+    .await
 }
 
 /// The spike flow: commission (ephemeral), then read a diagnostic health
