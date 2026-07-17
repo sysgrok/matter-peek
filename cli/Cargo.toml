@@ -17,10 +17,17 @@ default = []
 # BLE commissioning (`--ble`): commission a device over Bluetooth and provision
 # it with a Thread dataset. Linux + BlueZ. Forwards to `matter-peek-core/ble`.
 ble = ["matter-peek-core/ble"]
+# Read the onboarding payload out of a QR-code *image* (`--qr-image <path>`),
+# rather than being given the discriminator and passcode by hand.
+# `rs-matter` does the QR recognition (from greyscale pixels) and the payload
+# parsing; the `image` crate is only here to turn a PNG/JPEG file into pixels.
+qr-image = ["dep:image", "rs-matter/qr-scan"]
 
 [dependencies]
 matter-peek-core = { path = "../core", default-features = false, features = ["mdns-avahi"] }
 rs-matter = { workspace = true }
+# File -> pixels, for `--qr-image`. Only the codecs we actually need.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 embassy-futures = { workspace = true }

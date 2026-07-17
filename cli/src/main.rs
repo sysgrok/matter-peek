@@ -55,6 +55,9 @@ fn main() -> ExitCode {
             eprintln!(
                 "       matter-peek --ble [--discriminator N] [PASSCODE]   (with $THREAD_DATASET or $THREAD_DATASET_FILE)"
             );
+            eprintln!(
+                "       ... --qr-image <PNG|JPEG>                          (supplies discriminator + passcode)"
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -99,6 +102,11 @@ struct Args {
     /// used with `--ble`; `None` matches the first commissionable device seen.
     #[cfg_attr(not(feature = "ble"), allow(dead_code))]
     discriminator: Option<u16>,
+    /// `--qr-image <path>`: read the device's onboarding payload out of a QR-code
+    /// image (PNG/JPEG), instead of passing the discriminator and passcode by
+    /// hand. Supplies both.
+    #[cfg_attr(not(feature = "qr-image"), allow(dead_code))]
+    qr_image: Option<String>,
 }
 
 /// How long the `--subscribe` mode streams live health updates before tearing
@@ -112,6 +120,7 @@ fn parse_args() -> Result<Args, String> {
     let mut subscribe = false;
     let mut ble = false;
     let mut discriminator = None;
+    let mut qr_image = None;
 
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut positionals: Vec<String> = Vec::new();
@@ -128,6 +137,14 @@ fn parse_args() -> Result<Args, String> {
                 discriminator = Some(
                     parse_int_u16(val)
                         .map_err(|e| format!("--discriminator must be a 12-bit integer: {e}"))?,
+                );
+            }
+            "--qr-image" => {
+                i += 1;
+                qr_image = Some(
+                    raw.get(i)
+                        .ok_or_else(|| "--qr-image needs a path".to_string())?
+                        .clone(),
                 );
             }
             other => positionals.push(other.to_string()),
@@ -157,7 +174,43 @@ fn parse_args() -> Result<Args, String> {
         subscribe,
         ble,
         discriminator,
+        qr_image,
     })
+}
+
+/// Read a device's onboarding payload out of a QR-code image, returning its
+/// `(discriminator, passcode)`.
+///
+/// The `image` crate turns the file into pixels; `rs-matter` does the actual QR
+/// recognition (from 8-bit greyscale) and the payload parsing.
+#[cfg(feature = "qr-image")]
+fn read_qr_image(path: &str) -> Result<(u16, u32), Error> {
+    use rs_matter::pairing::qr::{scan, QrPayload};
+
+    let luma = image::open(path)
+        .map_err(|e| {
+            error!("could not read QR image {path}: {e}");
+            Error::from(ErrorCode::InvalidData)
+        })?
+        .to_luma8();
+
+    let text = scan::scan_luma(luma.width() as _, luma.height() as _, luma.as_raw())?;
+    info!("qr-image: recognized {text}");
+
+    // The payload borrows from `buf`, so both must outlive the reads below.
+    let mut buf = [0; 128];
+    let payload = QrPayload::parse(&text, &mut buf)?;
+
+    info!(
+        "qr-image: discriminator={} passcode={} vid=0x{:04x} pid=0x{:04x} caps={:?}",
+        payload.discriminator(),
+        payload.passcode(),
+        payload.vid(),
+        payload.pid(),
+        payload.discovery_capabilities(),
+    );
+
+    Ok((payload.discriminator(), payload.passcode()))
 }
 
 /// Parse a `u16` in decimal or `0x`-prefixed hex.
@@ -176,7 +229,20 @@ fn parse_int_u32(s: &str) -> Result<u32, core::num::ParseIntError> {
     }
 }
 
-async fn run(args: Args) -> Result<matter_peek_core::CommissionOutcome, Error> {
+// `args` is only mutated to fold in a `--qr-image` payload, which is feature-gated.
+#[cfg_attr(not(feature = "qr-image"), allow(unused_mut))]
+async fn run(mut args: Args) -> Result<matter_peek_core::CommissionOutcome, Error> {
+    // A QR-code image, if given, supplies both the discriminator and the passcode -
+    // it is exactly the two values one would otherwise pass by hand. Do this first,
+    // so both the BLE and the IP path below just see them as normal arguments.
+    #[cfg(feature = "qr-image")]
+    if let Some(path) = args.qr_image.take() {
+        let (discriminator, passcode) = read_qr_image(&path)?;
+
+        args.discriminator = Some(discriminator);
+        args.passcode = passcode;
+    }
+
     let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
     let matter = CTRL_MATTER.uninit().init_with(Matter::init(
         &TEST_DEV_DET,
@@ -257,26 +323,46 @@ async fn commission_over_ble<C: rs_matter::crypto::Crypto>(
     fab_idx: core::num::NonZeroU8,
     args: &Args,
 ) -> Result<matter_peek_core::CommissionOutcome, Error> {
-    use matter_peek_core::ble::{commission_ble, decode_hex, ThreadCreds};
+    use matter_peek_core::ble::{commission_ble, decode_hex, WirelessCreds};
 
-    // Thread dataset: prefer the file (avoids the secret in the environment /
-    // process listing), else the hex env var.
+    // Credentials for whatever network the device turns out to want. We don't know
+    // which kind that is yet - the device itself is asked, after PASE - so just
+    // supply whatever the environment offers and let the core match them up (or
+    // report a clear mismatch).
+    //
+    // Thread dataset: prefer the file (keeps the secret out of the environment and
+    // the process listing), else the hex env var.
     let dataset = match std::env::var("THREAD_DATASET_FILE") {
         Ok(path) => {
             let hex = std::fs::read_to_string(&path).map_err(|e| {
                 error!("could not read THREAD_DATASET_FILE ({path}): {e}");
                 Error::from(ErrorCode::InvalidData)
             })?;
-            decode_hex(hex.trim())?
+
+            Some(decode_hex(hex.trim())?)
         }
-        Err(_) => {
-            let hex = std::env::var("THREAD_DATASET").map_err(|_| {
-                error!(
-                    "--ble needs a Thread dataset: set $THREAD_DATASET (hex) or $THREAD_DATASET_FILE"
-                );
-                Error::from(ErrorCode::InvalidData)
-            })?;
-            decode_hex(hex.trim())?
+        Err(_) => match std::env::var("THREAD_DATASET") {
+            Ok(hex) => Some(decode_hex(hex.trim())?),
+            Err(_) => None,
+        },
+    };
+
+    let wifi = match (std::env::var("WIFI_SSID"), std::env::var("WIFI_PASS")) {
+        (Ok(ssid), Ok(pass)) => Some((ssid, pass)),
+        _ => None,
+    };
+
+    // An Ethernet device needs none of this, so no credentials at all is valid; the
+    // core errors out if the device does turn out to want some.
+    let creds = match (&dataset, &wifi) {
+        (Some(dataset_tlv), _) => Some(WirelessCreds::Thread { dataset_tlv }),
+        (None, Some((ssid, pass))) => Some(WirelessCreds::Wifi {
+            ssid: ssid.as_bytes(),
+            pass: pass.as_bytes(),
+        }),
+        (None, None) => {
+            info!("no $THREAD_DATASET / $WIFI_SSID+$WIFI_PASS given - assuming an Ethernet device");
+            None
         }
     };
 
@@ -288,9 +374,12 @@ async fn commission_over_ble<C: rs_matter::crypto::Crypto>(
     };
 
     info!(
-        "=== BLE commissioning (discriminator={:?}, {} dataset bytes) ===",
+        "=== BLE commissioning (discriminator={:?}, creds={}) ===",
         args.discriminator,
-        dataset.len()
+        creds
+            .as_ref()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "none (Ethernet)".into()),
     );
 
     // A UDP socket for phase B (the operational / CASE transport).
@@ -304,9 +393,7 @@ async fn commission_over_ble<C: rs_matter::crypto::Crypto>(
         &filter,
         args.passcode,
         DEVICE_NODE_ID,
-        &ThreadCreds {
-            dataset_tlv: &dataset,
-        },
+        creds.as_ref(),
         &socket,
         FabricPolicy::Ephemeral,
     )

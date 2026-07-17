@@ -11,19 +11,19 @@
 //!
 //! - **Phase A — over BLE/BTP.** Scan for the device's commissionable
 //!   advertisement, connect to it as a GATT Central, and run PASE → ArmFailSafe →
-//!   … → AddNOC, then provision the operational network
-//!   (`AddOrUpdateThreadNetwork` + `ConnectNetwork`). At the end of phase A the
-//!   device has our fabric installed and has been told to join Thread; its
-//!   fail-safe is still armed.
+//!   … → AddNOC, then provision the operational network (`AddOrUpdate{Thread,
+//!   WiFi}Network` + `ConnectNetwork`). At the end of phase A the device has our
+//!   fabric installed and has been told to join its network; its fail-safe is
+//!   still armed.
 //!
-//! - **Phase B — over IP.** Once the device joins Thread it announces itself
+//! - **Phase B — over IP.** Once the device joins, it announces itself
 //!   operationally over `_matter._tcp` mDNS. We tear down the BLE transport,
 //!   bring up the UDP transport + mDNS backend, resolve the device's operational
 //!   address, establish CASE, and invoke `CommissioningComplete`.
 //!
-//! Only Thread provisioning is implemented here for now (the immediate use case);
-//! Wi-Fi would add a sibling `add_or_update_wi_fi_network` step and is a small
-//! extension.
+//! Which network a device wants is *not* in its onboarding payload - a QR code's
+//! discovery capabilities say how to *reach* it for commissioning, not what it will
+//! join. So the device is asked directly: see [`read_network_type`].
 
 extern crate alloc;
 
@@ -35,16 +35,19 @@ use alloc::vec::Vec;
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Timer};
 
-use log::{info, warn};
+use log::{error, info, warn};
 
 use rs_matter::cert::gen::VALID_FOREVER;
 use rs_matter::cert::{MAX_CERT_TLV_AND_ASN1_LEN, MAX_CERT_TLV_LEN};
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::decl::network_commissioning::{
+    Feature, NetworkCommissioningAttrReads as _, NetworkCommissioningAttrResponses as _,
     NetworkCommissioningClient as _, NetworkCommissioningStatusEnum,
 };
+use rs_matter::dm::clusters::net_comm::NetworkType;
 use rs_matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter::error::{Error, ErrorCode};
+use rs_matter::im::client::ImClient as _;
 use rs_matter::onboard::{CommissionOptions, CommissionResult, Commissioner};
 use rs_matter::tlv::OctetStr;
 use rs_matter::transport::exchange::Exchange;
@@ -83,16 +86,13 @@ const SCAN_TIMEOUT_SECS: u16 = 60;
 /// the fail-safe expires first).
 const OPERATIONAL_JOIN_TIMEOUT_SECS: u64 = 180;
 
-/// The Thread operational credentials to provision onto the device.
-pub struct ThreadCreds<'a> {
-    /// The active operational dataset, as a raw TLV blob (e.g. the bytes behind
-    /// `ot-ctl dataset active -x`).
-    pub dataset_tlv: &'a [u8],
-}
+/// Re-exported so callers can build the credentials [`commission_ble`] wants
+/// without depending on `rs-matter`'s cluster module directly.
+pub use rs_matter::dm::clusters::net_comm::WirelessCreds;
 
 /// Commission a device that is currently only reachable over BLE, provisioning it
-/// with the given Thread credentials so it joins the mesh and finishes
-/// commissioning over IP.
+/// with the given operational-network credentials so it joins its network and
+/// finishes commissioning over IP.
 ///
 /// See the module docs for the two-phase flow. Returns the installed device
 /// handle on success.
@@ -106,7 +106,11 @@ pub struct ThreadCreds<'a> {
 ///   from the scanned QR / manual pairing code).
 /// - `passcode`: the device's PASE passcode (from the same QR / pairing code).
 /// - `device_node_id`: the operational Node ID to assign the device.
-/// - `thread`: the Thread credentials to provision.
+/// - `creds`: the credentials for the network the device should join. Which kind is
+///   needed is *not* something the onboarding payload can tell us - it is read off
+///   the device itself (see [`read_network_type`]) - so this must match the
+///   device's actual network type. Pass `None` for an Ethernet device, which is
+///   already on its network and needs no network commissioning at all.
 /// - `udp`: a bound UDP socket for phase B (the IP transport). `[::]:0` works.
 /// - `policy`: recorded on the outcome (ephemeral self-destruct is the caller's).
 #[allow(clippy::too_many_arguments)]
@@ -118,7 +122,7 @@ pub async fn commission_ble<C, S>(
     filter: &CommissionableFilter,
     passcode: u32,
     device_node_id: u64,
-    thread: &ThreadCreds<'_>,
+    creds: Option<&WirelessCreds<'_>>,
     udp: &S,
     policy: FabricPolicy,
 ) -> Result<CommissionOutcome, Error>
@@ -177,7 +181,7 @@ where
             addr,
             passcode,
             device_node_id,
-            thread,
+            creds,
         ));
 
         // Race the two transport drivers against the flow. The flow completing (or
@@ -253,7 +257,7 @@ async fn phase_a_flow<C: Crypto>(
     addr: rs_matter::transport::network::BtAddr,
     passcode: u32,
     device_node_id: u64,
-    thread: &ThreadCreds<'_>,
+    creds: Option<&WirelessCreds<'_>>,
 ) -> Result<CommissionResult, Error> {
     let peer = Address::Btp(addr);
 
@@ -272,7 +276,7 @@ async fn phase_a_flow<C: Crypto>(
 
     let opts = CommissionOptions {
         allow_test_attestation: true,
-        // One fail-safe covers phase A *and* phase B (the Thread join happens
+        // One fail-safe covers phase A *and* phase B (the network join happens
         // inside this window — see `BLE_FAIL_SAFE_SECS`).
         fail_safe_secs: BLE_FAIL_SAFE_SECS,
     };
@@ -282,54 +286,107 @@ async fn phase_a_flow<C: Crypto>(
         .commission(peer, passcode, &opts, device_node_id, VALID_FOREVER)
         .await?;
 
-    // Network commissioning: hand the device its Thread credentials and tell it to
-    // connect. Both run over PASE on the still-live BTP session.
-    provision_thread(matter, crypto, peer, passcode, thread).await?;
+    // Network commissioning: hand the device its credentials and tell it to connect.
+    // Runs over PASE on the still-live BTP session.
+    provision_network(matter, crypto, peer, passcode, creds).await?;
 
     Ok(phase1)
 }
 
-/// Provision the device with Thread credentials over PASE: `AddOrUpdateThreadNetwork`
-/// followed by `ConnectNetwork`.
-async fn provision_thread<C: Crypto>(
+/// Provision the device's operational network, if it needs one.
+///
+/// Neither the QR code nor the manual pairing code says whether a device is Thread,
+/// Wi-Fi or Ethernet - the onboarding payload's discovery capabilities describe how
+/// to *reach* the device for commissioning, not the network it will live on. The
+/// device itself is the authority, so we ask it: the `NetworkCommissioning`
+/// cluster's `FeatureMap` names its interface type, and we provision accordingly.
+async fn provision_network<C: Crypto>(
     matter: &Matter<'_>,
     crypto: &C,
     peer: Address,
     passcode: u32,
-    thread: &ThreadCreds<'_>,
+    creds: Option<&WirelessCreds<'_>>,
 ) -> Result<(), Error> {
-    let ext_pan_id = thread_ext_pan_id(thread.dataset_tlv).ok_or_else(|| {
-        warn!("BLE commission: could not find the Extended PAN ID in the Thread dataset");
-        Error::from(ErrorCode::InvalidData)
+    let net_type = read_network_type(matter, crypto, peer, passcode).await?;
+
+    info!("BLE commission: device network type is {net_type:?}");
+
+    if matches!(net_type, NetworkType::Ethernet) {
+        // An Ethernet device is already on its operational network; there is nothing
+        // to provision, and the cluster exposes no network commands to do it with.
+        info!("BLE commission: Ethernet device - skipping network commissioning");
+        return Ok(());
+    }
+
+    let creds = creds.ok_or_else(|| {
+        error!("BLE commission: device needs {net_type:?} credentials, but none were given");
+        Error::from(ErrorCode::InvalidAction)
     })?;
 
-    info!(
-        "BLE commission: AddOrUpdateThreadNetwork ({} dataset bytes)",
-        thread.dataset_tlv.len()
-    );
+    // Refuse to hand a Thread device Wi-Fi credentials, or vice versa.
+    creds.check_match(net_type).inspect_err(|_| {
+        error!(
+            "BLE commission: {creds} credentials do not match the device's {net_type:?} network"
+        );
+    })?;
 
-    let exchange = Exchange::initiate_pase(matter, crypto, peer, passcode).await?;
-    let handle = exchange
-        .network_commissioning()
-        .add_or_update_thread_network(ROOT_ENDPOINT_ID, |req| {
-            req.operational_dataset(OctetStr::new(thread.dataset_tlv))?
-                .breadcrumb(None)?
-                .end()
-        })
-        .await?;
-    check_net_status(
-        handle.response()?.networking_status()?,
-        "AddOrUpdateThreadNetwork",
-    )?;
-    handle.complete().await?;
+    // For Thread this is the Extended PAN ID, for Wi-Fi the SSID - `WirelessCreds`
+    // knows which, so `ConnectNetwork` below just uses it.
+    let network_id = creds.id()?;
 
-    info!("BLE commission: ConnectNetwork (ext PAN id {ext_pan_id:02x?})");
+    match creds {
+        WirelessCreds::Thread { dataset_tlv } => {
+            info!(
+                "BLE commission: AddOrUpdateThreadNetwork ({} dataset bytes)",
+                dataset_tlv.len()
+            );
+
+            let exchange = Exchange::initiate_pase(matter, crypto, peer, passcode).await?;
+            let handle = exchange
+                .network_commissioning()
+                .add_or_update_thread_network(ROOT_ENDPOINT_ID, |req| {
+                    req.operational_dataset(OctetStr::new(dataset_tlv))?
+                        .breadcrumb(None)?
+                        .end()
+                })
+                .await?;
+            check_net_status(
+                handle.response()?.networking_status()?,
+                "AddOrUpdateThreadNetwork",
+            )?;
+            handle.complete().await?;
+        }
+        WirelessCreds::Wifi { ssid, pass } => {
+            info!("BLE commission: AddOrUpdateWiFiNetwork ({creds})");
+
+            let exchange = Exchange::initiate_pase(matter, crypto, peer, passcode).await?;
+            let handle = exchange
+                .network_commissioning()
+                .add_or_update_wi_fi_network(ROOT_ENDPOINT_ID, |req| {
+                    req.ssid(OctetStr::new(ssid))?
+                        .credentials(OctetStr::new(pass))?
+                        .breadcrumb(None)?
+                        .network_identity(None)?
+                        .client_identifier(None)?
+                        .possession_nonce(None)?
+                        .end()
+                })
+                .await?;
+            check_net_status(
+                handle.response()?.networking_status()?,
+                "AddOrUpdateWiFiNetwork",
+            )?;
+            handle.complete().await?;
+        }
+    }
+
+    info!("BLE commission: ConnectNetwork (network id {network_id:02x?})");
 
     let exchange = Exchange::initiate_pase(matter, crypto, peer, passcode).await?;
     let handle = exchange
         .network_commissioning()
         .connect_network(ROOT_ENDPOINT_ID, |req| {
-            req.network_id(OctetStr::new(&ext_pan_id))?
+            req.network_id(OctetStr::new(network_id))?
                 .breadcrumb(None)?
                 .end()
         })
@@ -340,12 +397,65 @@ async fn provision_thread<C: Crypto>(
     Ok(())
 }
 
+/// Ask the device what kind of operational network it has, by reading the
+/// `NetworkCommissioning` cluster's `FeatureMap` over PASE.
+///
+/// Exactly one of the three interface bits is expected; a device that reports none
+/// of them has no network interface we know how to commission.
+async fn read_network_type<C: Crypto>(
+    matter: &Matter<'_>,
+    crypto: &C,
+    peer: Address,
+    passcode: u32,
+) -> Result<NetworkType, Error> {
+    let exchange = Exchange::initiate_pase(matter, crypto, peer, passcode).await?;
+
+    let mut chunk = exchange
+        .read_with(|msg| {
+            msg.attr_requests()?
+                .network_commissioning_read()
+                .feature_map(ROOT_ENDPOINT_ID)?
+                .end()?
+                .fabric_filtered(false)?
+                .end()
+        })
+        .await?;
+
+    // Copy the bits out before the borrowed response drops.
+    let mut features = None;
+    {
+        let resp = chunk.response()?;
+        for (_endpoint, result) in resp.network_commissioning_read_resp().feature_map() {
+            features = Some(Feature::from_bits_truncate(result?));
+        }
+    }
+    while let Some(next) = chunk.complete().await? {
+        chunk = next;
+    }
+
+    let features = features.ok_or_else(|| {
+        error!("BLE commission: device did not report a NetworkCommissioning FeatureMap");
+        Error::from(ErrorCode::InvalidData)
+    })?;
+
+    if features.contains(Feature::THREAD_NETWORK_INTERFACE) {
+        Ok(NetworkType::Thread)
+    } else if features.contains(Feature::WI_FI_NETWORK_INTERFACE) {
+        Ok(NetworkType::Wifi)
+    } else if features.contains(Feature::ETHERNET_NETWORK_INTERFACE) {
+        Ok(NetworkType::Ethernet)
+    } else {
+        error!("BLE commission: device reports no known network interface ({features:?})");
+        Err(ErrorCode::InvalidData.into())
+    }
+}
+
 /// Phase B: retry the operational CASE handshake (which resolves the device's
 /// operational address over mDNS) until it succeeds or we give up.
 ///
-/// The device may not have finished joining Thread / started announcing itself
-/// when we first try, so `complete_via_case_operational` is retried on failure
-/// (a failed resolve returns promptly) within a bounded window.
+/// The device may not have finished joining its network / started announcing itself
+/// when we first try, so `complete_via_case_operational` is retried on failure (a
+/// failed resolve returns promptly) within a bounded window.
 async fn phase_b_complete<C: Crypto>(
     matter: &Matter<'_>,
     crypto: &C,
@@ -355,6 +465,7 @@ async fn phase_b_complete<C: Crypto>(
 ) -> Result<(), Error> {
     let mut noc_buf = [0u8; MAX_CERT_TLV_AND_ASN1_LEN];
     let mut noc_generator = ca.noc_generator(&mut noc_buf)?;
+
     let mut commissioner_buf = [0u8; MAX_CERT_TLV_LEN];
     let mut commissioner = Commissioner::new(
         matter,
@@ -375,6 +486,7 @@ async fn phase_b_complete<C: Crypto>(
                 info!(
                     "BLE commission: device not operational yet ({e:?}); retrying (waited {waited}s / {deadline}s)"
                 );
+
                 Timer::after(Duration::from_secs(3)).await;
                 waited += 3;
             }
@@ -390,38 +502,6 @@ fn check_net_status(status: NetworkCommissioningStatusEnum, step: &str) -> Resul
         warn!("BLE commission: {step} returned {status:?}");
         Err(ErrorCode::Failure.into())
     }
-}
-
-/// Extract the 8-byte Thread Extended PAN ID from an operational dataset TLV.
-///
-/// A Thread operational dataset is a flat sequence of `[type, length, ..value..]`
-/// TLV entries; the Extended PAN ID is entry type `2` with an 8-byte value. The
-/// `ConnectNetwork.NetworkID` for a Thread network is this Extended PAN ID.
-fn thread_ext_pan_id(dataset: &[u8]) -> Option<[u8; 8]> {
-    /// Thread Meshcop TLV type for the Extended PAN ID.
-    const EXT_PAN_ID_TLV: u8 = 2;
-
-    let mut i = 0;
-    while i + 2 <= dataset.len() {
-        let ty = dataset[i];
-        let len = dataset[i + 1] as usize;
-        let value_start = i + 2;
-        let value_end = value_start + len;
-
-        if value_end > dataset.len() {
-            break;
-        }
-
-        if ty == EXT_PAN_ID_TLV && len == 8 {
-            let mut out = [0u8; 8];
-            out.copy_from_slice(&dataset[value_start..value_end]);
-            return Some(out);
-        }
-
-        i = value_end;
-    }
-
-    None
 }
 
 /// Decode a hex string (with optional whitespace) into bytes. Convenience for
@@ -457,7 +537,7 @@ mod test {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use super::{decode_hex, thread_ext_pan_id};
+    use super::decode_hex;
 
     #[test]
     fn decode_hex_round_trips() {
@@ -468,31 +548,5 @@ mod test {
         );
         assert!(decode_hex("abc").is_err()); // odd length
         assert!(decode_hex("zz").is_err()); // non-hex
-    }
-
-    #[test]
-    fn finds_ext_pan_id_in_dataset() {
-        // A minimal dataset: Channel(0) len1, ExtPanId(2) len8, NetworkName(3) len3.
-        let mut ds = Vec::new();
-        ds.extend([0x00, 0x01, 0x0f]); // Channel
-        ds.extend([0x02, 0x08, 1, 2, 3, 4, 5, 6, 7, 8]); // Ext PAN ID
-        ds.extend([0x03, 0x03, b'a', b'b', b'c']); // Network Name
-
-        assert_eq!(thread_ext_pan_id(&ds), Some([1, 2, 3, 4, 5, 6, 7, 8]));
-    }
-
-    #[test]
-    fn ext_pan_id_absent_returns_none() {
-        let ds = [0x00, 0x01, 0x0f, 0x03, 0x03, b'a', b'b', b'c'];
-        assert_eq!(thread_ext_pan_id(&ds), None);
-    }
-
-    #[test]
-    fn ext_pan_id_tolerates_truncated_trailing_tlv() {
-        // Ext PAN ID present, then a truncated trailing TLV claiming 8 bytes.
-        let mut ds = Vec::new();
-        ds.extend([0x02, 0x08, 9, 9, 9, 9, 9, 9, 9, 9]);
-        ds.extend([0x0e, 0x08, 0x01]); // truncated
-        assert_eq!(thread_ext_pan_id(&ds), Some([9, 9, 9, 9, 9, 9, 9, 9]));
     }
 }
