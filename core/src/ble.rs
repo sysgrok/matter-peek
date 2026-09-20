@@ -363,12 +363,16 @@ async fn provision_network<C: Crypto>(
             let handle = exchange
                 .network_commissioning()
                 .add_or_update_wi_fi_network(ROOT_ENDPOINT_ID, |req| {
+                    // No per-device-credentials fields here: `NetworkIdentity`,
+                    // `ClientIdentifier` and `PossessionNonce` left this command
+                    // in the Matter 1.6.0 data model, moving to the provisional
+                    // `NetworkIdentityManagement` cluster. We only ever passed
+                    // `None` for them, so dropping them changes nothing on the
+                    // wire. (The 1.6.1 IDL has them back; rs-matter keeps that
+                    // restoration commented out until it adopts 1.6.1.)
                     req.ssid(OctetStr::new(ssid))?
                         .credentials(OctetStr::new(pass))?
                         .breadcrumb(None)?
-                        .network_identity(None)?
-                        .client_identifier(None)?
-                        .possession_nonce(None)?
                         .end()
                 })
                 .await?;
@@ -454,8 +458,8 @@ async fn read_network_type<C: Crypto>(
 /// operational address over mDNS) until it succeeds or we give up.
 ///
 /// The device may not have finished joining its network / started announcing itself
-/// when we first try, so `complete_via_case_operational` is retried on failure (a
-/// failed resolve returns promptly) within a bounded window.
+/// when we first try, so `complete_via_case` is retried on failure (a failed
+/// resolve returns promptly) within a bounded window.
 async fn phase_b_complete<C: Crypto>(
     matter: &Matter<'_>,
     crypto: &C,
@@ -467,19 +471,25 @@ async fn phase_b_complete<C: Crypto>(
     let mut noc_generator = ca.noc_generator(&mut noc_buf)?;
 
     let mut commissioner_buf = [0u8; MAX_CERT_TLV_LEN];
+    // One CASE attempt per call: the wall-clock loop below is what bounds the
+    // wait for the device to finish joining its network, and it needs the
+    // per-call failure to come back promptly to keep its own cadence. (The
+    // built-in retry count exists for the IP path, where there is no such outer
+    // loop — see `controller::commission`.)
     let mut commissioner = Commissioner::new(
         matter,
         crypto,
         controller_fab_idx,
         &mut noc_generator,
         &mut commissioner_buf,
-    );
+    )
+    .with_case_attempts(1);
 
     let deadline = OPERATIONAL_JOIN_TIMEOUT_SECS;
     let mut waited = 0u64;
 
     loop {
-        match commissioner.complete_via_case_operational(phase1).await {
+        match commissioner.complete_via_case(phase1).await {
             Ok(()) => return Ok(()),
             Err(e) if waited >= deadline => return Err(e),
             Err(e) => {
@@ -535,7 +545,6 @@ fn hex_val(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod test {
     use alloc::vec;
-    use alloc::vec::Vec;
 
     use super::decode_hex;
 

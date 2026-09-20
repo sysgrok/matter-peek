@@ -2,7 +2,7 @@
 //!
 //! One **persistent** task owns a single Matter stack for the whole process
 //! lifetime: on startup it loads any persisted controller fabric
-//! (`Matter::load_persist`) and ensures a CA ([`ControllerCa::ensure`]), then
+//! (`Matter::startup`) and ensures a CA ([`ControllerCa::ensure`]), then
 //! runs the transport pump concurrently with a command loop. Each command is
 //! serviced against the *shared* stack / CA / fabric, so persistently-
 //! commissioned devices can be re-addressed over CASE without re-commissioning.
@@ -83,10 +83,10 @@ pub struct Command {
 /// persisted state, ensure the controller CA + fabric, then service commands
 /// against that shared stack until the channel closes.
 pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
-    let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
+    let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
 
     // One `&'static` stack for the whole process (see module docs). Kept `&mut`
-    // just long enough to `load_persist`, then reborrowed immutably for sharing.
+    // just long enough to `startup`, then reborrowed immutably for sharing.
     let matter: &'static mut Matter<'static> = PERSIST_MATTER.uninit().init_with(Matter::init(
         &TEST_DEV_DET,
         TEST_DEV_COMM,
@@ -98,14 +98,14 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
     // controller fabric + device records survive a reboot (unlike `/tmp`).
     // rs-matter's `SharedKvBlobStore` now borrows its scratch buffer, so the
     // actor owns one (`kv_buf`) for the whole run and lends it to the
-    // `ControllerStore`. `load_persist` takes that store's KV access (which
-    // carries the buffer) — a single argument now.
+    // `ControllerStore`. `startup` takes that store's KV access (which carries
+    // the buffer) — a single argument now.
     let dir = store_dir();
     info!("actor: persistence store at {}", dir.display());
     let kv_buf = kv_buf();
     let store = ControllerStore::new(DirKvBlobStore::new(dir), &kv_buf);
-    if let Err(e) = matter.load_persist(store.kv()).await {
-        error!("actor: load_persist failed: {e:?} (continuing with fresh state)");
+    if let Err(e) = matter.startup(store.kv()) {
+        error!("actor: startup failed: {e:?} (continuing with fresh state)");
     }
     let matter: &'static Matter<'static> = matter;
     let (ca, fab_idx) = match ControllerCa::ensure(

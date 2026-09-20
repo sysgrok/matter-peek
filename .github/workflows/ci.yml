@@ -6,7 +6,8 @@ on:
       - main
   pull_request:
   schedule:
-    # Nightly run (UTC) to catch breakage from the floating rs-matter git dep.
+    # Nightly run (UTC) to catch breakage from the dependency graph (a new
+    # rs-matter point release, or a transitive crate, resolving differently).
     - cron: '50 3 * * *'
   workflow_dispatch:
 

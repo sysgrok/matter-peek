@@ -38,10 +38,11 @@ ble = ["std", "rs-matter/zbus"]
 # with NO default features (rs-matter's `os` ⇒ `std`); the hosted `os` path is
 # re-enabled only via this crate's `std` feature. mDNS backends and raw sockets
 # are likewise feature-gated.
-# Depend on the crates.io version (default-features off), so the workspace
-# `[patch.crates-io]` redirects it uniformly (to the git fork, or a local clone
-# during co-development). A direct git dep here would bypass that patch.
-rs-matter = { version = "0.2", default-features = false, features = ["alloc", "rustcrypto", "log"] }
+# Depend on the released crates.io version (default-features off). Keeping it a
+# plain registry dep — rather than a git/path dep here — is what lets a
+# `[patch.crates-io]` in the workspace root redirect every crate uniformly to a
+# local clone during co-development with rs-matter.
+rs-matter = { version = "0.4", default-features = false, features = ["alloc", "rustcrypto", "log"] }
 log = { workspace = true }
 embassy-futures = { workspace = true }
 embassy-time = { version = "0.5", default-features = false }

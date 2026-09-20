@@ -22,7 +22,7 @@ use core::pin::pin;
 use std::net::{SocketAddr, UdpSocket};
 use std::process::ExitCode;
 
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select3, Either, Either3};
 
 use log::{error, info};
 
@@ -243,7 +243,7 @@ async fn run(mut args: Args) -> Result<matter_peek_core::CommissionOutcome, Erro
         args.passcode = passcode;
     }
 
-    let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
+    let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let matter = CTRL_MATTER.uninit().init_with(Matter::init(
         &TEST_DEV_DET,
         TEST_DEV_COMM,
@@ -297,19 +297,32 @@ async fn run(mut args: Args) -> Result<matter_peek_core::CommissionOutcome, Erro
     // Bind the dual-stack transport socket, then run the pump for the rest of
     // the flow. (rs-matter canonicalizes peer addresses, so one `[::]:0` socket
     // serves IPv4 and IPv6 peers alike.)
+    //
+    // The mDNS backend runs alongside it because every step after PASE addresses
+    // the device by `(fabric, node-id)` rather than by IP, and rs-matter answers
+    // that from an **operational resolve** — phase 2 of the commission included.
+    // Without a backend servicing the resolve rendezvous each of those times out.
+    // (The discovery browse above has already finished by now; it runs its own
+    // short-lived backend, and two backends must not poll the rendezvous at once.)
     let socket = bind_controller_socket()?;
     let transport_fut = matter.run(&crypto, &socket, &socket, NoNetwork);
+    let mdns_fut = controller.run_mdns_backend();
     let flow_fut = flow(&controller, &ca, fab_idx, &args, peer_addr);
 
     let mut transport_fut = pin!(transport_fut);
+    let mut mdns_fut = pin!(mdns_fut);
     let mut flow_fut = pin!(flow_fut);
 
-    match select(&mut transport_fut, &mut flow_fut).await {
-        Either::First(r) => {
+    match select3(&mut transport_fut, &mut mdns_fut, &mut flow_fut).await {
+        Either3::First(r) => {
             error!("transport exited prematurely: {r:?}");
             Err(ErrorCode::NoExchange.into())
         }
-        Either::Second(result) => result,
+        Either3::Second(r) => {
+            error!("mDNS backend exited prematurely: {r:?}");
+            Err(ErrorCode::NoNetworkInterface.into())
+        }
+        Either3::Third(result) => result,
     }
 }
 

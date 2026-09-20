@@ -27,6 +27,13 @@
 
 extern crate alloc;
 
+// The `std` feature (which every hosted mDNS backend turns on) is what lets the
+// backends that need real sockets — `mdns-builtin` — name `std::` paths. The
+// crate body stays `no_std`; this only makes the facade reachable when a hosted
+// build has already opted in.
+#[cfg(feature = "std")]
+extern crate std;
+
 pub mod basic_info;
 #[cfg(feature = "ble")]
 pub mod ble;
