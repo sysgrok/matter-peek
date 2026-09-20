@@ -100,9 +100,14 @@ pub enum Request {
     /// **Decommission** a persisted device: `RemoveFabric` our fabric on the
     /// device (over CASE) and drop it from the local store. This is the clean
     /// teardown — it frees the fabric slot on the device rather than leaking it.
-    /// Answered with the refreshed [`Response::Devices`] list. If the device is
-    /// unreachable, the fabric can't be removed device-side; pass `force` to drop
-    /// the local record anyway (accepting the leaked device-side fabric).
+    /// Answered with the refreshed [`Response::Devices`] list.
+    ///
+    /// The device is contacted over CASE, retried a few times (a persisted
+    /// device is reached via an operational mDNS resolve, so one miss is not
+    /// proof it is gone). **The local record is dropped either way** — if the
+    /// device stays unreachable it is still removed from this controller's list,
+    /// and the answer carries a `notice` saying the device-side fabric slot was
+    /// leaked. `force` skips contacting the device at all.
     Decommission { node_id: u64, force: bool },
     /// Replace the local tag set of a stored device (controller-local metadata
     /// for filtering/grouping; never touches the device). The server normalizes
@@ -130,7 +135,15 @@ pub enum Response {
     /// Devices found by a [`Request::Discover`] (possibly empty).
     Discovered { devices: Vec<DiscoveredDevice> },
     /// The controller's persistently-commissioned devices (from the store).
-    Devices { devices: Vec<StoredDeviceInfo> },
+    ///
+    /// `notice` carries a non-fatal remark about the operation that produced the
+    /// list — e.g. that a decommission dropped the record locally without being
+    /// able to reach the device. `None` for a plain listing.
+    Devices {
+        devices: Vec<StoredDeviceInfo>,
+        #[serde(default)]
+        notice: Option<String>,
+    },
     /// Result of a [`Request::PeekDevice`].
     Peek {
         handle: DeviceHandle,

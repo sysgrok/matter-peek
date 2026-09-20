@@ -430,6 +430,9 @@ async fn flow<'a, C: rs_matter::crypto::Crypto>(
             args.passcode,
             DEVICE_NODE_ID,
             FabricPolicy::Ephemeral,
+            // The CLI keeps no store, so it holds no live fabric of its own:
+            // every fabric of ours on the device really is a leak to reclaim.
+            &[],
         )
         .await?;
 

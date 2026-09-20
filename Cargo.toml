@@ -46,3 +46,16 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 # mDNS discovery (builtin backend only).
 socket2 = { version = "0.5", features = ["all"] }
 nix = { version = "0.30", features = ["net"] }
+
+# TEMPORARY - remove once these land in a released rs-matter.
+#
+# Needed for two fixes this crate depends on:
+#   * transport: never answer a message that expects no reply (a Status Report,
+#     or anything without the MRP R flag) with a `SessionNotFound` - two
+#     rs-matter peers otherwise bounce `SessionNotFound` at each other forever,
+#     and
+#   * `Matter::remove_sessions`, so decommissioning can drop the stale
+#     session for the device it just tore down.
+[patch.crates-io]
+#rs-matter = { path = "../rs-matter/rs-matter" }
+rs-matter = { git = "https://github.com/project-chip/rs-matter" }

@@ -23,6 +23,7 @@ use std::rc::Rc;
 
 use directories::ProjectDirs;
 use embassy_futures::select::{select, select4, Either, Either4};
+use embassy_time::{Duration, Timer};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use log::{error, info, warn};
@@ -394,9 +395,16 @@ async fn run_discover<C: Crypto>(
 
 /// List the persistently-commissioned devices from the store.
 fn list_devices<C: Crypto>(ctx: &ActorCtx<'_, C>) -> proto::Response {
+    list_devices_with(ctx, None)
+}
+
+/// As [`list_devices`], but attaches a non-fatal `notice` about the operation
+/// that produced the list (e.g. a decommission that could not reach the device).
+fn list_devices_with<C: Crypto>(ctx: &ActorCtx<'_, C>, notice: Option<String>) -> proto::Response {
     match ctx.store.load_devices() {
         Ok(devices) => proto::Response::Devices {
             devices: devices.into_iter().map(convert::stored_device).collect(),
+            notice,
         },
         Err(e) => proto::Response::Error {
             message: format!("load devices failed: {e:?}"),
@@ -527,14 +535,60 @@ fn unsubscribe<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64) -> proto::Respons
     proto::Response::Ok
 }
 
+/// How many times to try reaching the device for `RemoveFabric` before giving
+/// up. A persisted device is addressed over CASE, which first needs an
+/// *operational mDNS resolve* — a device that is asleep, slow to answer, or
+/// re-announcing itself can miss one attempt and answer the next, so a single
+/// failure is not proof that it is gone.
+const DECOMMISSION_ATTEMPTS: u32 = 3;
+
+/// Pause between those attempts, to give a slow resolve room to land.
+const DECOMMISSION_RETRY_DELAY_SECS: u64 = 2;
+
+/// `RemoveFabric` on the device, retried up to [`DECOMMISSION_ATTEMPTS`] times.
+/// `Err` carries the last failure, formatted, once every attempt is spent.
+async fn try_remove_fabric<C: Crypto>(
+    ctx: &ActorCtx<'_, C>,
+    handle: DeviceHandle,
+    node_id: u64,
+) -> Result<(), String> {
+    let mut last = String::new();
+
+    for attempt in 1..=DECOMMISSION_ATTEMPTS {
+        match ctx.controller.decommission(handle).await {
+            Ok(()) => {
+                info!("decommissioned node 0x{node_id:016x} (RemoveFabric ok, attempt {attempt})");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(
+                    "decommission node 0x{node_id:016x}: attempt {attempt}/{DECOMMISSION_ATTEMPTS} failed: {e:?}"
+                );
+                last = format!("{e:?}");
+                if attempt < DECOMMISSION_ATTEMPTS {
+                    Timer::after(Duration::from_secs(DECOMMISSION_RETRY_DELAY_SECS)).await;
+                }
+            }
+        }
+    }
+
+    Err(last)
+}
+
 /// Decommission a persisted device: stop any live subscription, `RemoveFabric`
 /// our fabric on the device (freeing its fabric slot), then drop the local
 /// record. Returns the refreshed device list.
 ///
-/// If the device is unreachable the `RemoveFabric` can't happen; with `force` we
-/// still drop the local record (leaving a device-side orphan fabric — the honest
-/// trade-off, surfaced to the user), otherwise we report the error and keep the
-/// record so it can be retried.
+/// **The local record goes either way.** Removing it is the part we can always
+/// do, and a device that has been unplugged, factory-reset or binned must not be
+/// able to wedge itself permanently in the list. So the device is tried
+/// [`DECOMMISSION_ATTEMPTS`] times and, if it stays unreachable, the record is
+/// dropped anyway and the caller is told the device-side fabric slot leaked (it
+/// is reclaimed by factory-resetting the device, or by our orphan sweep if the
+/// unit ever comes back for re-commissioning).
+///
+/// `force` skips contacting the device at all — for a unit already known to be
+/// gone, where waiting out the retries is pointless.
 async fn decommission<C: Crypto>(
     ctx: &ActorCtx<'_, C>,
     node_id: u64,
@@ -551,22 +605,28 @@ async fn decommission<C: Crypto>(
         let _ = stop.try_send(());
     }
 
-    // Remove our fabric on the device (over CASE). On failure, only proceed to
-    // drop the local record if the caller forced it.
-    match ctx.controller.decommission(dev.handle).await {
-        Ok(()) => info!("decommissioned node 0x{node_id:016x} (RemoveFabric ok)"),
-        Err(e) if force => {
-            warn!(
-                "decommission node 0x{node_id:016x}: RemoveFabric failed ({e:?}); forcing local removal (device-side fabric leaked)"
-            );
-        }
-        Err(e) => {
-            return proto::Response::Error {
-                message: format!(
-                    "device unreachable — RemoveFabric failed: {e:?}. Retry, or force-remove to drop the local record anyway."
-                ),
-            };
-        }
+    let device_side = if force {
+        info!("decommission node 0x{node_id:016x}: forced — not contacting the device");
+        Err("not attempted (forced removal)".to_string())
+    } else {
+        try_remove_fabric(ctx, dev.handle, node_id).await
+    };
+
+    // Drop any secure session we still hold - but only when the device was *not*
+    // torn down successfully.
+    //
+    // On the success path `RemoveFabric` has already invalidated both halves, and
+    // the exchange that carried it queues a trailing close on that session for the
+    // transport pump; evicting first only makes the pump log a TX failure for a
+    // session we removed out from under it. Nothing addresses that node again
+    // either - its record is about to go, and a re-commission assigns a fresh
+    // NodeID - so the dead session simply ages out.
+    //
+    // On the give-up path there is no such exchange, and nothing else would ever
+    // clear the session: that is the one that lingers pointing at a device we no
+    // longer track.
+    if device_side.is_err() {
+        ctx.controller.forget_sessions(dev.handle);
     }
 
     // Drop the local record (load-all / filter / save-all).
@@ -586,7 +646,22 @@ async fn decommission<C: Crypto>(
         }
     }
 
-    list_devices(ctx)
+    let notice = match device_side {
+        Ok(()) => None,
+        Err(why) => {
+            warn!(
+                "decommission node 0x{node_id:016x}: dropped the local record without removing the \
+                 device-side fabric ({why}) — that fabric slot is leaked on the device"
+            );
+            Some(format!(
+                "Device 0x{node_id:016x} could not be reached — it has been removed from this \
+                 controller, but our fabric slot is still allocated on the device. Factory-reset \
+                 it to reclaim the slot; re-commissioning it here will also clean it up."
+            ))
+        }
+    };
+
+    list_devices_with(ctx, notice)
 }
 
 /// Replace a stored device's local tags, then return the refreshed device list
@@ -670,6 +745,10 @@ async fn vertical_flow<C: Crypto>(
     // here means no device state was created.
     emit(cmd, Step::Commission, started()).await;
     let cancel = ctx.cancel.clone();
+    // Fabrics we still have a record for are live commissionings, not leaks —
+    // the sweep must not reclaim them (that would decommission the device we are
+    // about to re-commission). Everything else of ours on the device is fair game.
+    let live_node_ids = live_node_ids(ctx);
     let outcome = match ctx
         .controller
         .commission_cancellable(
@@ -679,6 +758,7 @@ async fn vertical_flow<C: Crypto>(
             passcode,
             device_node_id,
             convert::policy(policy),
+            &live_node_ids,
             move || cancel.get(),
         )
         .await
@@ -876,6 +956,18 @@ fn new_record(
         fingerprint: ident.fingerprint,
         tags: alloc::vec::Vec::new(),
     }
+}
+
+/// The NodeIDs the store currently vouches for — the devices we believe we are
+/// legitimately commissioned into. Handed to the orphan sweep so it can tell a
+/// leaked fabric from a live one (see `sweep_orphaned_fabrics`).
+fn live_node_ids<C: Crypto>(ctx: &ActorCtx<'_, C>) -> alloc::vec::Vec<u64> {
+    ctx.store
+        .load_devices()
+        .unwrap_or_default()
+        .iter()
+        .map(|d| d.handle.node_id)
+        .collect()
 }
 
 /// Next device NodeID: one past the current store max, so persistent re-runs

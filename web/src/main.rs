@@ -309,6 +309,14 @@ impl Component for App {
                     "Decommissioning node 0x{node_id:016x} (RemoveFabric)…"
                 ));
                 self.error = None;
+                // Clear any notice from a previous decommission, so what remains
+                // on screen describes *this* one.
+                self.notice = None;
+                // The "you just commissioned this" guard is now stale: we are
+                // giving the device up, so re-commissioning it is the expected
+                // next step, not a mistake to warn about. Left set, `Msg::Run`
+                // would keep swallowing the click and only show the warning.
+                self.last_commissioned_addr = None;
                 // Stop watching it locally (the server tears the subscription down too).
                 self.subs.remove(&node_id);
                 send_request(
@@ -421,8 +429,14 @@ impl Component for App {
                 self.busy_stored = false;
                 match resp {
                     proto::Response::Discovered { devices } => self.discovered = devices,
-                    proto::Response::Devices { devices } => {
+                    proto::Response::Devices { devices, notice } => {
                         self.stored_status = Some(format!("{} stored device(s)", devices.len()));
+                        // A non-fatal remark about whatever produced this list —
+                        // e.g. a decommission that dropped the record locally but
+                        // could not reach the device to free its fabric slot.
+                        if notice.is_some() {
+                            self.notice = notice;
+                        }
                         // Seed each device's tag-edit buffer from its (normalized)
                         // stored tags, so the input reflects server truth.
                         self.tag_inputs = devices

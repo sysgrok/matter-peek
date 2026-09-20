@@ -22,6 +22,7 @@ use rs_matter::crypto::Crypto;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::onboard::{CommissionOptions, Commissioner};
 use rs_matter::transport::network::Address;
+use rs_matter::transport::session::SessionMode;
 use rs_matter::Matter;
 
 use rs_matter::dm::clusters::decl::identify::IdentifyClient as _;
@@ -103,6 +104,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
     ///
     /// `policy` is recorded on the outcome; `Ephemeral` self-destruct
     /// (`RemoveFabric`) is performed by the caller after the work is done.
+    #[allow(clippy::too_many_arguments)]
     pub async fn commission(
         &self,
         ca: &crate::ca::ControllerCa,
@@ -111,6 +113,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
         passcode: u32,
         device_node_id: u64,
         policy: FabricPolicy,
+        live_node_ids: &[u64],
     ) -> Result<CommissionOutcome, Error> {
         match self
             .commission_cancellable(
@@ -120,6 +123,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
                 passcode,
                 device_node_id,
                 policy,
+                live_node_ids,
                 || false,
             )
             .await?
@@ -149,6 +153,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
         passcode: u32,
         device_node_id: u64,
         policy: FabricPolicy,
+        live_node_ids: &[u64],
         cancel: impl Fn() -> bool,
     ) -> Result<CommissionFlow, Error> {
         let crypto = self.crypto;
@@ -156,6 +161,42 @@ impl<'a, C: Crypto> Controller<'a, C> {
 
         if cancel() {
             return Ok(CommissionFlow::Cancelled);
+        }
+
+        // Start this attempt from a clean PASE.
+        //
+        // `Exchange::initiate_pase` reuses an existing PASE session to a peer
+        // *address* unconditionally - it checks neither the session's age nor
+        // whether the peer still has its half, and ignores the passcode entirely
+        // on the reuse path. That is what lets the steps below share one PASE
+        // session, but it means a second attempt silently encrypts to a session
+        // the device forgot when it rebooted, and every packet simply times out.
+        // Symptom: exactly one successful commission per process, then
+        // `TxTimeout` forever.
+        let peer = Address::Udp(peer_addr).canonical();
+        let dropped = matter.remove_sessions(|sess| {
+            matches!(sess.get_session_mode(), SessionMode::Pase { .. })
+                && sess.get_peer_addr().canonical() == peer
+        });
+        if dropped > 0 {
+            info!("dropped {dropped} stale PASE session(s) for {peer_addr}");
+        }
+
+        // Likewise any CASE session to the NodeID we are about to assign. NodeIDs
+        // are reused - after a decommission empties the store, the next device
+        // gets the same base ID - so a CASE session left over from the previous
+        // occupant matches `(fabric, node)` exactly, and phase 2 resumes it
+        // instead of running CASE. It then burns a full MRP timeout before
+        // `complete_via_case` retries (and fails outright where it is given a
+        // single attempt). Dropping it here is safe: `device_node_id` is freshly
+        // allocated, so no live device can hold it, and no exchange is in flight.
+        let dropped = matter.remove_sessions(|sess| {
+            sess.is_encrypted()
+                && sess.get_local_fabric_idx() == controller_fab_idx.get()
+                && sess.get_peer_node_id() == Some(device_node_id)
+        });
+        if dropped > 0 {
+            info!("dropped {dropped} stale CASE session(s) for node 0x{device_node_id:016x}");
         }
 
         // Reclaim any fabric slot we leaked on this device in a previous run
@@ -167,7 +208,8 @@ impl<'a, C: Crypto> Controller<'a, C> {
         // device whose commissioning window has since closed (its PASE never
         // completes). So it is both time-bounded *and* raced against `cancel` —
         // and it is entirely pre-AddNOC, so abandoning it is always safe.
-        let sweep = self.sweep_orphaned_fabrics(ca, controller_fab_idx, peer_addr, passcode);
+        let sweep =
+            self.sweep_orphaned_fabrics(ca, controller_fab_idx, peer_addr, passcode, live_node_ids);
         match race_cancel(with_timeout(sweep, "orphan-sweep"), &cancel).await {
             Raced::Cancelled => return Ok(CommissionFlow::Cancelled),
             Raced::Done(Ok(reclaimed)) if reclaimed > 0 => {
@@ -247,6 +289,15 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// non-fabric-filtered read returns every fabric on the device, so we can see
     /// them all over PASE.
     ///
+    /// **`live_node_ids` are not orphans.** A fabric of ours whose
+    /// `FabricDescriptor.node_id` (the NodeID *this device* uses on that fabric)
+    /// still has a record in our store is the device's *current* commissioning,
+    /// not a leak. Sweeping it would decommission the very device the caller is
+    /// re-commissioning — and since `RemoveFabric` of a device's last fabric
+    /// makes it drop its Matter state (typically closing the commissioning
+    /// window), the commission that follows would then fail, leaving the device
+    /// removed instead of re-commissioned. So those indices are skipped.
+    ///
     /// Best-effort and non-destructive to *other* admins: only our own fabrics
     /// match. Returns the count removed. Errors are surfaced to the caller, which
     /// treats the whole sweep as optional (a device with no orphans, or one that
@@ -257,6 +308,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
         controller_fab_idx: NonZeroU8,
         peer_addr: SocketAddr,
         passcode: u32,
+        live_node_ids: &[u64],
     ) -> Result<usize, Error> {
         const ROOT_ENDPOINT: rs_matter::dm::EndptId = 0;
 
@@ -290,11 +342,27 @@ impl<'a, C: Crypto> Controller<'a, C> {
                 for fabric in &list {
                     let fabric = fabric?;
                     // `root_public_key` is a TLV octet string (`Octets`, derefs to
-                    // `[u8]`); `fabric_index` is the optional ctx-254 field.
-                    let matches_us = *fabric.root_public_key()? == *our_rcac_pubkey.as_slice()
-                        && fabric.fabric_id()? == our_fabric_id;
-                    if let (true, Some(idx)) = (matches_us, fabric.fabric_index()?) {
-                        ours.push(idx);
+                    // `[u8]`); `node_id` is the NodeID the *device* holds on that
+                    // fabric; `fabric_index` is the optional ctx-254 field.
+                    let device_node_id = fabric.node_id()?;
+                    let verdict = classify_fabric(
+                        &fabric.root_public_key()?,
+                        fabric.fabric_id()?,
+                        device_node_id,
+                        our_rcac_pubkey.as_slice(),
+                        our_fabric_id,
+                        live_node_ids,
+                    );
+                    match verdict {
+                        FabricVerdict::NotOurs => {}
+                        FabricVerdict::Live => info!(
+                            "orphaned-fabric sweep: keeping our live fabric for node 0x{device_node_id:016x} (not an orphan)"
+                        ),
+                        FabricVerdict::Orphan => {
+                            if let Some(idx) = fabric.fabric_index()? {
+                                ours.push(idx);
+                            }
+                        }
                     }
                 }
             }
@@ -482,7 +550,39 @@ impl<'a, C: Crypto> Controller<'a, C> {
             .await?;
 
         info!("decommissioned: removed fabric index {}", dev.fabric_index);
+
+        // NOTE: the stale session is dropped by the *caller*, not here. This
+        // exchange queues a trailing close on that session for the transport
+        // pump to send; removing the session first makes the pump log a TX
+        // failure for it. See `forget_sessions`.
+
         Ok(())
+    }
+
+    /// Drop any secure session we still hold with `dev`, returning how many were
+    /// removed.
+    ///
+    /// Call this whenever we stop considering `dev` ours - after `RemoveFabric`,
+    /// and also when we give up on an unreachable device and drop it locally.
+    /// A session the peer no longer honours is not inert: the next thing that
+    /// addresses that node resumes it, the device answers with an unsecured
+    /// `SessionNotFound`, and the two nodes can end up trading Status Reports.
+    /// Dropping it forces a clean CASE handshake if the device ever returns.
+    pub fn forget_sessions(&self, dev: DeviceHandle) -> usize {
+        let dropped = self.matter.remove_sessions(|sess| {
+            sess.is_encrypted()
+                && sess.get_local_fabric_idx() == dev.fabric_index.get()
+                && sess.get_peer_node_id() == Some(dev.node_id)
+        });
+
+        if dropped > 0 {
+            info!(
+                "dropped {dropped} stale session(s) for node 0x{:016x}",
+                dev.node_id
+            );
+        }
+
+        dropped
     }
 
     /// Ask the device to physically identify itself (blink LED / beep) for
@@ -569,3 +669,96 @@ where
 pub use rs_matter::onboard::CommissionResult;
 #[allow(unused_imports)]
 use NonZeroU8 as _; // documented in model::DeviceHandle::fabric_index
+
+/// What a fabric found on a device means to the orphaned-fabric sweep.
+///
+/// See [`classify_fabric`]. The distinction that matters is `Live` vs `Orphan`:
+/// both are *our* fabrics, but only one of them is safe to reclaim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FabricVerdict {
+    /// Belongs to another administrator — never touch it.
+    NotOurs,
+    /// Ours, and a store record still points at it: this device's *current*
+    /// commissioning. Removing it would decommission the device.
+    Live,
+    /// Ours, with no record pointing at it: a slot we leaked on a previous run.
+    Orphan,
+}
+
+/// Classify one `FabricDescriptor` read off a device during the sweep.
+///
+/// "Ours" is `root_public_key` == our RCAC public key **and** `fabric_id` ==
+/// ours (belt-and-suspenders). Among ours, a `device_node_id` that appears in
+/// `live_node_ids` is the device's live commissioning, not a leak.
+///
+/// Pure (no I/O) so it is unit-testable in isolation.
+pub fn classify_fabric(
+    root_public_key: &[u8],
+    fabric_id: u64,
+    device_node_id: u64,
+    our_rcac_pubkey: &[u8],
+    our_fabric_id: u64,
+    live_node_ids: &[u64],
+) -> FabricVerdict {
+    if root_public_key != our_rcac_pubkey || fabric_id != our_fabric_id {
+        return FabricVerdict::NotOurs;
+    }
+    if live_node_ids.contains(&device_node_id) {
+        return FabricVerdict::Live;
+    }
+    FabricVerdict::Orphan
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_fabric, FabricVerdict};
+
+    const OURS: &[u8] = b"our-rcac-public-key";
+    const THEIRS: &[u8] = b"someone-elses-rcac-key";
+    const FABRIC: u64 = 1;
+    const NODE: u64 = 0x1122_3344_5566_7788;
+
+    #[test]
+    fn another_admins_fabric_is_never_touched() {
+        assert_eq!(
+            classify_fabric(THEIRS, FABRIC, NODE, OURS, FABRIC, &[]),
+            FabricVerdict::NotOurs
+        );
+    }
+
+    #[test]
+    fn our_key_on_a_different_fabric_id_is_not_ours() {
+        assert_eq!(
+            classify_fabric(OURS, FABRIC + 1, NODE, OURS, FABRIC, &[]),
+            FabricVerdict::NotOurs
+        );
+    }
+
+    #[test]
+    fn our_fabric_with_no_record_is_an_orphan() {
+        assert_eq!(
+            classify_fabric(OURS, FABRIC, NODE, OURS, FABRIC, &[]),
+            FabricVerdict::Orphan
+        );
+        // A record for a *different* device does not protect this one.
+        assert_eq!(
+            classify_fabric(OURS, FABRIC, NODE, OURS, FABRIC, &[NODE + 1]),
+            FabricVerdict::Orphan
+        );
+    }
+
+    /// The regression test: re-commissioning a device we already hold must not
+    /// sweep away the fabric it is currently commissioned into. Doing so
+    /// decommissioned the device instead of re-commissioning it.
+    #[test]
+    fn our_fabric_with_a_live_record_is_kept() {
+        assert_eq!(
+            classify_fabric(OURS, FABRIC, NODE, OURS, FABRIC, &[NODE]),
+            FabricVerdict::Live
+        );
+        assert_eq!(
+            classify_fabric(OURS, FABRIC, NODE, OURS, FABRIC, &[7, NODE, 9]),
+            FabricVerdict::Live
+        );
+    }
+}
