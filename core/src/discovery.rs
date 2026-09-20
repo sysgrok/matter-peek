@@ -269,7 +269,7 @@ mod builtin {
     pub async fn run<C: Crypto>(matter: &Matter<'_>, crypto: C) -> Result<(), Error> {
         let (ipv4_addr, ipv6_addr, interface) = initialize_network()?;
 
-        let mut socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+        let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
         #[cfg(unix)]
         socket.set_reuse_port(true)?;
@@ -293,7 +293,10 @@ mod builtin {
                 &Host {
                     hostname: "matter-peek",
                     ip: ipv4_addr,
-                    ipv6: ipv6_addr,
+                    // `Host::ipv6` is a slice of *every* address the host takes
+                    // Matter traffic on. `initialize_network` deliberately picks
+                    // a single interface, so that is a one-element slice.
+                    ipv6: &[ipv6_addr],
                 },
                 Some(ipv4_addr),
                 Some(interface),

@@ -11,17 +11,6 @@ members = [
 ]
 exclude = ["web"]
 
-[patch.crates-io]
-#rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "main" }
-# Local clone on the `data-reports` branch — provides the controller-side
-# `ReportDataHandler` facility that the health-board subscriptions consume.
-# All three crates must be patched together (the macros/codegen crates emit the
-# types `rs-matter` re-exports; a split source = "two rs-matter versions").
-# Flip back to the git dep once `data-reports` lands upstream.
-rs-matter = { path = "../rs-matter/rs-matter" }
-rs-matter-macros = { path = "../rs-matter/rs-matter-macros" }
-rs-matter-codegen = { path = "../rs-matter/rs-matter-codegen" }
-
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
@@ -33,7 +22,7 @@ repository = "https://github.com/sysgrok/matter-peek"
 rust-version = "1.92"
 
 [workspace.dependencies]
-rs-matter = { version = "0.2", default-features = false, features = ["os", "rustcrypto", "log"] }
+rs-matter = { version = "0.4", default-features = false, features = ["os", "rustcrypto", "log"] }
 
 log = "0.4"
 env_logger = "0.11"
@@ -42,7 +31,7 @@ embassy-time = { version = "0.5", features = ["std"] }
 embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
 async-io = "2"
 futures-lite = "2"
-rand = { version = "0.8", features = ["std", "std_rng"] }
+rand = { version = "0.10", features = ["std", "std_rng", "thread_rng"] }
 static_cell = "2"
 
 # Phase 1 — RPC server (smol/async-io family, to match the core's runtime).

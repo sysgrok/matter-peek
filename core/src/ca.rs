@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 use rs_matter::cert::gen::VALID_FOREVER;
 use rs_matter::cert::MAX_CERT_TLV_AND_ASN1_LEN;
 use rs_matter::crypto::{
-    CanonAeadKey, CanonPkcSecretKey, Crypto, RngCore as _, SecretKey as _, SigningSecretKey as _,
+    CanonAeadKey, CanonPkcSecretKey, Crypto, Rng as _, SecretKey as _, SigningSecretKey as _,
 };
 use rs_matter::error::Error;
 use rs_matter::onboard::cac::{IcacGenerator, RcacGenerator};

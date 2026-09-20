@@ -95,6 +95,12 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// [`Commissioner::commission`] (phase 1, over PASE) and
     /// [`Commissioner::complete_via_case`] (phase 2, over CASE).
     ///
+    /// `peer_addr` addresses phase 1 only. Phase 2 reaches the device through its
+    /// *operational* identity, which rs-matter resolves from `(fabric, node-id)`
+    /// over mDNS — so an mDNS backend must be running concurrently (see
+    /// [`run_mdns_backend`](crate::discovery::run_mdns_backend)), even when
+    /// `peer_addr` was supplied by hand and no discovery was needed.
+    ///
     /// `policy` is recorded on the outcome; `Ephemeral` self-destruct
     /// (`RemoveFabric`) is performed by the caller after the work is done.
     pub async fn commission(
@@ -216,7 +222,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
         // Phase 2 — CASE + CommissioningComplete.
         info!("=== complete_via_case (phase 2 — CASE) ===");
         with_timeout(
-            commissioner.complete_via_case(peer, &phase1),
+            commissioner.complete_via_case(&phase1),
             "complete_via_case()",
         )
         .await?;
