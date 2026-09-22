@@ -2238,7 +2238,6 @@ dependencies = [
 [[package]]
 name = "rs-matter"
 version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#7566dc366fb8b20e43b5e989b55e0cc1a61ef5ea"
 dependencies = [
  "aes",
  "astro-dnssd",
@@ -2301,7 +2300,6 @@ dependencies = [
 [[package]]
 name = "rs-matter-codegen"
 version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#7566dc366fb8b20e43b5e989b55e0cc1a61ef5ea"
 dependencies = [
  "convert_case",
  "miette",
@@ -2320,7 +2318,6 @@ dependencies = [
 [[package]]
 name = "rs-matter-macros"
 version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#7566dc366fb8b20e43b5e989b55e0cc1a61ef5ea"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

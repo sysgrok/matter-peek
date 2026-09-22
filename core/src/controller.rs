@@ -22,7 +22,7 @@ use rs_matter::crypto::Crypto;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::onboard::{CommissionOptions, Commissioner};
 use rs_matter::transport::network::Address;
-use rs_matter::transport::session::SessionMode;
+use rs_matter::transport::session::{Session, SessionMode};
 use rs_matter::Matter;
 
 use rs_matter::dm::clusters::decl::identify::IdentifyClient as _;
@@ -174,7 +174,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
         // Symptom: exactly one successful commission per process, then
         // `TxTimeout` forever.
         let peer = Address::Udp(peer_addr).canonical();
-        let dropped = matter.remove_sessions(|sess| {
+        let dropped = remove_sessions(matter, |sess| {
             matches!(sess.get_session_mode(), SessionMode::Pase { .. })
                 && sess.get_peer_addr().canonical() == peer
         });
@@ -190,7 +190,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
         // `complete_via_case` retries (and fails outright where it is given a
         // single attempt). Dropping it here is safe: `device_node_id` is freshly
         // allocated, so no live device can hold it, and no exchange is in flight.
-        let dropped = matter.remove_sessions(|sess| {
+        let dropped = remove_sessions(matter, |sess| {
             sess.is_encrypted()
                 && sess.get_local_fabric_idx() == controller_fab_idx.get()
                 && sess.get_peer_node_id() == Some(device_node_id)
@@ -569,7 +569,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// `SessionNotFound`, and the two nodes can end up trading Status Reports.
     /// Dropping it forces a clean CASE handshake if the device ever returns.
     pub fn forget_sessions(&self, dev: DeviceHandle) -> usize {
-        let dropped = self.matter.remove_sessions(|sess| {
+        let dropped = remove_sessions(self.matter, |sess| {
             sess.is_encrypted()
                 && sess.get_local_fabric_idx() == dev.fabric_index.get()
                 && sess.get_peer_node_id() == Some(dev.node_id)
@@ -635,6 +635,24 @@ pub enum CommissionFlow {
     /// Cancelled at a safe pre-AddNOC point — no device fabric was installed, so
     /// there is nothing to clean up.
     Cancelled,
+}
+
+/// Remove every (non-reserved) session matching `predicate`, returning how many
+/// were dropped.
+///
+/// Wakes the transport's session-removed waiters when anything was dropped, as
+/// rs-matter does itself when it removes sessions.
+fn remove_sessions<F>(matter: &Matter<'_>, predicate: F) -> usize
+where
+    F: FnMut(&Session) -> bool,
+{
+    let removed = matter.with_state(|state| state.sessions.remove_where(predicate));
+
+    if removed > 0 {
+        matter.transport().notify_session_removed();
+    }
+
+    removed
 }
 
 /// Internal result of racing a future against a cancel predicate.

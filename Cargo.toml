@@ -54,8 +54,9 @@ nix = { version = "0.30", features = ["net"] }
 #     or anything without the MRP R flag) with a `SessionNotFound` - two
 #     rs-matter peers otherwise bounce `SessionNotFound` at each other forever,
 #     and
-#   * `Matter::remove_sessions`, so decommissioning can drop the stale
-#     session for the device it just tore down.
+#   * a public `MatterState::sessions` (+ `Sessions::remove_where`), so
+#     decommissioning can drop the stale session for the device it just tore
+#     down.
 [patch.crates-io]
-#rs-matter = { path = "../rs-matter/rs-matter" }
-rs-matter = { git = "https://github.com/project-chip/rs-matter" }
+rs-matter = { path = "../rs-matter/rs-matter" }
+#rs-matter = { git = "https://github.com/project-chip/rs-matter" }
