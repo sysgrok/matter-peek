@@ -1,10 +1,10 @@
-//! Discovering commissionable Matter devices on the local network via mDNS.
+//! Discovering Matter devices on the local network via mDNS: the commissionable
+//! ones, and the ones on our fabric.
 //!
 //! rs-matter's controller-side discovery is a rendezvous:
-//! [`Transport::browse_commissionable`](rs_matter::transport::Transport::browse_commissionable)
-//! places a browse request and waits for a running **mDNS backend** to fire the
-//! query and deposit the first match. So discovery is "run a backend
-//! concurrently with a browse".
+//! [`Transport::browse`](rs_matter::transport::Transport::browse) places a browse
+//! request and a running **mDNS backend** fires the query and deposits what it
+//! finds. So discovery is "run a backend concurrently with a browse".
 //!
 //! ## Backend selection (cargo features)
 //!
@@ -27,30 +27,33 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use core::future::Future;
+use core::num::NonZeroU8;
+
 use embassy_futures::select::{select, Either};
 
-use log::info;
+use log::{info, warn};
 
 use rs_matter::crypto::Crypto;
+use rs_matter::dm::NodeId;
 use rs_matter::error::{Error, ErrorCode};
-use rs_matter::transport::network::mdns::CommissionableFilter;
+use rs_matter::transport::network::mdns::{CommissionableFilter, MdnsBrowseQuery};
 use rs_matter::transport::network::Address;
 use rs_matter::Matter;
 
-/// How long to wait for a matching commissionable device before giving up.
-const DEFAULT_BROWSE_TIMEOUT_MS: u32 = 5_000;
+/// How long each mDNS browse window lasts (see `Transport::browse`).
+const DEFAULT_BROWSE_WINDOW_MS: u32 = 2_000;
 
 /// A commissionable device found on the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiscoveredDevice {
-    /// Operational address — feed straight into commissioning / PASE.
+    /// Its address — feed straight into commissioning / PASE.
     pub address: Address,
-    /// The commissionable instance id from the advertisement (used to step to
-    /// the *next* candidate when several share a discriminator).
+    /// The commissionable instance id from the advertisement.
     pub commissionable_id: u64,
 }
 
-/// Discover the first commissionable device matching `filter` (use
+/// Discover a commissionable device matching `filter` (use
 /// [`CommissionableFilter::default`] — all `None` — to match any), running the
 /// compiled-in mDNS backend concurrently with the browse.
 ///
@@ -60,27 +63,35 @@ pub async fn discover_commissionable<C: Crypto>(
     matter: &Matter<'_>,
     crypto: C,
     filter: &CommissionableFilter,
-    timeout_ms: Option<u32>,
+    window_ms: Option<u32>,
 ) -> Result<DiscoveredDevice, Error> {
-    let timeout_ms = timeout_ms.unwrap_or(DEFAULT_BROWSE_TIMEOUT_MS);
-    info!("discovery: browsing for a commissionable device (timeout {timeout_ms}ms)");
-    browse_once(matter, crypto, filter, &[], timeout_ms).await
+    with_backend(
+        matter,
+        crypto,
+        discover_all_with_running_backend(matter, filter, 1, window_ms),
+    )
+    .await?
+    .into_iter()
+    .next()
+    .ok_or_else(|| ErrorCode::NotFound.into())
 }
 
 /// Discover *up to* `max` commissionable devices matching `filter`, for a UI
-/// pick-list. Steps to the next candidate via the browse `exclude` set (by
-/// commissionable id) until no more match or `max` is reached.
-///
-/// `crypto` must be `Copy` (each browse round needs its own; the rs-matter
-/// backends are `Copy`).
-pub async fn discover_all<C: Crypto + Copy>(
+/// pick-list, running the compiled-in mDNS backend concurrently.
+pub async fn discover_all<C: Crypto>(
     matter: &Matter<'_>,
     crypto: C,
     filter: &CommissionableFilter,
     max: u8,
-    timeout_ms: Option<u32>,
+    window_ms: Option<u32>,
 ) -> Vec<DiscoveredDevice> {
-    discover_all_impl(matter, crypto, filter, max, timeout_ms).await
+    with_backend(
+        matter,
+        crypto,
+        discover_all_with_running_backend(matter, filter, max, window_ms),
+    )
+    .await
+    .unwrap_or_default()
 }
 
 /// Like [`discover_all`], but for a host that **already runs the mDNS backend**
@@ -91,92 +102,97 @@ pub async fn discover_all_with_running_backend(
     matter: &Matter<'_>,
     filter: &CommissionableFilter,
     max: u8,
-    timeout_ms: Option<u32>,
+    window_ms: Option<u32>,
 ) -> Vec<DiscoveredDevice> {
-    let timeout_ms = timeout_ms.unwrap_or(DEFAULT_BROWSE_TIMEOUT_MS);
-    let mut found = Vec::new();
-    let mut exclude: Vec<u64> = Vec::new();
+    let query = MdnsBrowseQuery::Commissionable(filter.clone());
+    let window_ms = window_ms.unwrap_or(DEFAULT_BROWSE_WINDOW_MS);
 
-    // No crypto and no own backend: the caller's permanent backend services these
-    // browse requests. Just place them and collect matches.
-    while found.len() < max as usize {
-        let res = matter
-            .transport()
-            .browse_commissionable(filter, &exclude, timeout_ms)
-            .await;
-        match res {
-            Ok((address, commissionable_id)) => {
-                info!("discovery: found {address} (id={commissionable_id:#x})");
-                exclude.push(commissionable_id);
-                found.push(DiscoveredDevice {
-                    address,
-                    commissionable_id,
-                });
-            }
-            Err(_) => break,
-        }
-    }
-
-    info!("discovery: found {} device(s)", found.len());
-    found
-}
-
-async fn discover_all_impl<C: Crypto + Copy>(
-    matter: &Matter<'_>,
-    crypto: C,
-    filter: &CommissionableFilter,
-    max: u8,
-    timeout_ms: Option<u32>,
-) -> Vec<DiscoveredDevice> {
-    let timeout_ms = timeout_ms.unwrap_or(DEFAULT_BROWSE_TIMEOUT_MS);
-    let mut found = Vec::new();
-    let mut exclude: Vec<u64> = Vec::new();
-
-    while found.len() < max as usize {
-        match browse_once(matter, crypto, filter, &exclude, timeout_ms).await {
-            Ok(dev) => {
-                exclude.push(dev.commissionable_id);
-                found.push(dev);
-            }
-            // `NotFound` = browse exhausted / timed out: stop, return what we have.
-            Err(_) => break,
-        }
-    }
-
-    info!("discovery: found {} device(s)", found.len());
-    found
-}
-
-/// Run the mDNS backend concurrently with a single `browse_commissionable`
-/// round (honoring `exclude`), returning the first non-excluded match.
-async fn browse_once<C: Crypto>(
-    matter: &Matter<'_>,
-    crypto: C,
-    filter: &CommissionableFilter,
-    exclude: &[u64],
-    timeout_ms: u32,
-) -> Result<DiscoveredDevice, Error> {
-    let browse = matter
+    let mut ids = Vec::new();
+    if let Err(e) = matter
         .transport()
-        .browse_commissionable(filter, exclude, timeout_ms);
+        .browse(&query, window_ms, |id| ids.push(id))
+        .await
+    {
+        warn!("discovery: browse failed: {e:?}");
+    }
 
-    // The backend only ever ends on error; the browse ends with the result (or
-    // NotFound on timeout). rs-matter returns the address in canonical form and
-    // prefers IPv6 (link-local → ULA → global → IPv4).
-    let backend = run_backend(matter, crypto);
+    let mut found = Vec::new();
 
-    let mut browse = core::pin::pin!(browse);
-    let mut backend = core::pin::pin!(backend);
-
-    match select(&mut browse, &mut backend).await {
-        Either::First(found) => {
-            let (address, commissionable_id) = found?;
-            info!("discovery: found {address} (id={commissionable_id:#x})");
-            Ok(DiscoveredDevice {
-                address,
-                commissionable_id,
-            })
+    for commissionable_id in ids {
+        if found.len() >= max as usize {
+            break;
         }
+
+        match matter
+            .transport()
+            .resolve_commissionable_addrs(commissionable_id)
+            .await
+        {
+            Ok(addrs) => {
+                // rs-matter ranks the addresses, preferring IPv6 (link-local →
+                // ULA → global → IPv4).
+                if let Some(address) = addrs.first().copied() {
+                    info!("discovery: found {address} (id={commissionable_id:#x})");
+                    found.push(DiscoveredDevice {
+                        address,
+                        commissionable_id,
+                    });
+                }
+            }
+            Err(e) => info!("discovery: cannot resolve {commissionable_id:#x}: {e:?}"),
+        }
+    }
+
+    info!("discovery: found {} device(s)", found.len());
+    found
+}
+
+/// The nodes advertising on our fabric `fab_idx` - the devices holding it that
+/// are reachable - other than ourselves, for a host already running the mDNS
+/// backend.
+pub async fn browse_fabric_with_running_backend(
+    matter: &Matter<'_>,
+    fab_idx: NonZeroU8,
+    window_ms: Option<u32>,
+) -> Result<Vec<NodeId>, Error> {
+    let (compressed_fabric_id, own_node_id) = matter.with_state(|state| {
+        let fabric = state.fabrics.fabric(fab_idx)?;
+
+        Ok::<_, Error>((fabric.compressed_fabric_id(), fabric.node_id()))
+    })?;
+
+    let query = MdnsBrowseQuery::Operational {
+        compressed_fabric_id,
+    };
+
+    let mut nodes = Vec::new();
+    matter
+        .transport()
+        .browse(
+            &query,
+            window_ms.unwrap_or(DEFAULT_BROWSE_WINDOW_MS),
+            |node_id| {
+                if node_id != own_node_id {
+                    nodes.push(node_id);
+                }
+            },
+        )
+        .await?;
+
+    Ok(nodes)
+}
+
+/// Run `fut` with the mDNS backend alongside.
+async fn with_backend<C, F>(matter: &Matter<'_>, crypto: C, fut: F) -> Result<F::Output, Error>
+where
+    C: Crypto,
+    F: Future,
+{
+    let mut fut = core::pin::pin!(fut);
+    let mut backend = core::pin::pin!(run_backend(matter, crypto));
+
+    match select(&mut fut, &mut backend).await {
+        Either::First(output) => Ok(output),
         Either::Second(r) => {
             // Backend exited first — always an error (it otherwise runs forever).
             r?;
@@ -201,9 +217,8 @@ async fn browse_once<C: Crypto>(
 /// the backend for the duration of the browse.
 ///
 /// Do **not** run two of these against the same `Matter` stack — they'd both poll
-/// the single resolve/browse rendezvous. When this is running, use
-/// [`browse_commissionable`](rs_matter::transport::Transport::browse_commissionable)
-/// directly for discovery rather than [`discover_commissionable`].
+/// the single resolve/browse rendezvous. When this is running, use the
+/// `*_with_running_backend` functions rather than [`discover_commissionable`].
 pub async fn run_mdns_backend<C: Crypto>(matter: &Matter<'_>, crypto: C) -> Result<(), Error> {
     run_backend(matter, crypto).await
 }

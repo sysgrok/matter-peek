@@ -81,11 +81,15 @@ enum Msg {
     Discover,
     PickDevice(String),
     ListDevices,
+    /// Re-sync the device list with the devices on our fabric.
+    Sync,
     /// Re-read a stored device's health now (one-shot) and update its card panel.
     Refresh(u64),
     Identify(u64),
     /// Decommission a stored device (RemoveFabric + drop the local record).
     Decommission(u64),
+    /// Drop a device pending removal from the list, without contacting it.
+    Forget(u64),
     /// A live health update arrived for a subscribed device (node_id, health).
     /// Deltas are merged into that device's running view.
     HealthReport(u64, proto::DeviceHealth),
@@ -348,6 +352,28 @@ impl Component for App {
                 self.stored_status = None;
                 self.error = None;
                 send_request(ctx.link().clone(), proto::Request::ListDevices);
+                true
+            }
+            Msg::Sync => {
+                self.busy_stored = true;
+                self.stored_status = Some("Syncing with the devices on our fabric…".into());
+                self.error = None;
+                self.notice = None;
+                send_request(ctx.link().clone(), proto::Request::Sync);
+                true
+            }
+            Msg::Forget(node_id) => {
+                self.busy_stored = true;
+                self.error = None;
+                self.notice = None;
+                self.subs.remove(&node_id);
+                send_request(
+                    ctx.link().clone(),
+                    proto::Request::Decommission {
+                        node_id,
+                        force: true,
+                    },
+                );
                 true
             }
             Msg::Refresh(node_id) => {
@@ -715,7 +741,12 @@ impl App {
     /// every stored device (a dashboard is live by default), and drop any panel
     /// for a device that's no longer stored. Opens the persistent WS if needed.
     fn sync_subscriptions(&mut self, ctx: &Context<Self>) {
-        let stored_ids: Vec<u64> = self.stored.iter().map(|d| d.handle.node_id).collect();
+        let stored_ids: Vec<u64> = self
+            .stored
+            .iter()
+            .filter(|d| !d.pending_removal)
+            .map(|d| d.handle.node_id)
+            .collect();
         if stored_ids.is_empty() {
             return;
         }
@@ -1056,11 +1087,17 @@ impl App {
                     <div class="level-left">
                         <h2 class="title is-5">{ "Stored devices" }</h2>
                     </div>
-                    <div class="level-right">
+                    <div class="level-right buttons">
                         <button class={classes!("button", "is-small", self.busy_stored.then_some("is-loading"))}
                             disabled={self.busy_stored}
                             onclick={link.callback(|_| Msg::ListDevices)}>
                             { "Refresh" }
+                        </button>
+                        <button class="button is-small is-link is-light"
+                            disabled={self.busy_stored}
+                            title="Add the devices on our fabric missing from the list, refresh the others, and finish pending removals"
+                            onclick={link.callback(|_| Msg::Sync)}>
+                            { "Sync" }
                         </button>
                     </div>
                 </div>
@@ -1112,6 +1149,7 @@ impl App {
         let refresh = link.callback(move |_| Msg::Refresh(node_id));
         let identify = link.callback(move |_| Msg::Identify(node_id));
         let decommission = link.callback(move |_| Msg::Decommission(node_id));
+        let forget = link.callback(move |_| Msg::Forget(node_id));
         let save_tags = link.callback(move |_| Msg::SaveTags(node_id));
         let on_tags = link.callback(move |e: InputEvent| Msg::TagsInput(node_id, input_value(e)));
 
@@ -1145,7 +1183,16 @@ impl App {
                         <div class="level-left">
                             <p class="title is-6 mb-0">{ title }</p>
                         </div>
-                        <div class="level-right">
+                        <div class="level-right tags">
+                            { if d.pending_removal {
+                                html!{ <span class="tag is-danger is-light"
+                                    title="Our fabric will be removed from it once it is back online">
+                                    { "removal pending" }</span> }
+                              } else if d.online == Some(false) {
+                                html!{ <span class="tag is-light"
+                                    title="Not advertising on our fabric at the last sync">
+                                    { "offline" }</span> }
+                              } else { html!{} } }
                             <span class="tag is-light mono">
                                 { format!("fab {} · 0x{:016x}", d.handle.fabric_index, node_id) }
                             </span>
@@ -1200,9 +1247,17 @@ impl App {
                         <button class="button is-warning is-light" disabled={self.busy_stored} onclick={identify}>
                             { "Identify" }
                         </button>
-                        <button class="button is-danger is-light" disabled={self.busy_stored} onclick={decommission}>
-                            { "Decommission" }
-                        </button>
+                        { if d.pending_removal {
+                            html!{ <button class="button is-danger is-light" disabled={self.busy_stored}
+                                title="Drop it from the list now; if it still holds our fabric, a sync lists it again"
+                                onclick={forget}>
+                                { "Forget" }
+                            </button> }
+                          } else {
+                            html!{ <button class="button is-danger is-light" disabled={self.busy_stored} onclick={decommission}>
+                                { "Decommission" }
+                            </button> }
+                          } }
                     </div>
 
                     { self.view_device_update(d, link) }

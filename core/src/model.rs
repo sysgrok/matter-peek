@@ -93,6 +93,9 @@ pub struct StoredDevice {
     pub fingerprint: DeviceFingerprint,
     /// Local user tags for filtering/grouping.
     pub tags: alloc::vec::Vec<alloc::string::String>,
+    /// Our fabric is to be removed from the device, which could not be reached
+    /// when asked; a sync does it once the device advertises again.
+    pub pending_removal: bool,
 }
 
 /// Device identity read from the BasicInformation cluster at commission time.
@@ -273,6 +276,7 @@ mod tests {
             product_name: "".to_string(),
             fingerprint,
             tags: vec!["keep-me".to_string()],
+            pending_removal: false,
         }
     }
 

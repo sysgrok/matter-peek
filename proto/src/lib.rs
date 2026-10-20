@@ -103,17 +103,20 @@ pub enum Request {
     /// Answered with [`Response::Ok`].
     Unsubscribe { node_id: u64 },
     /// **Decommission** a persisted device: `RemoveFabric` our fabric on the
-    /// device (over CASE) and drop it from the local store. This is the clean
-    /// teardown — it frees the fabric slot on the device rather than leaking it.
-    /// Answered with the refreshed [`Response::Devices`] list.
+    /// device (over CASE) and drop it from the local store. Answered with the
+    /// refreshed [`Response::Devices`] list.
     ///
-    /// The device is contacted over CASE, retried a few times (a persisted
-    /// device is reached via an operational mDNS resolve, so one miss is not
-    /// proof it is gone). **The local record is dropped either way** — if the
-    /// device stays unreachable it is still removed from this controller's list,
-    /// and the answer carries a `notice` saying the device-side fabric slot was
-    /// leaked. `force` skips contacting the device at all.
+    /// The device is contacted over CASE, retried a few times. If it stays
+    /// unreachable, its record is kept as pending removal, which a
+    /// [`Request::Sync`] completes once the device advertises again. `force`
+    /// drops the record without contacting the device; a device that still holds
+    /// our fabric then shows up again on the next sync.
     Decommission { node_id: u64, force: bool },
+    /// Re-sync the device list with the devices on our fabric: adopt the ones we
+    /// have no record of, refresh the others' identity, complete pending
+    /// removals, and note which are online. Also runs periodically. Answered with
+    /// the refreshed [`Response::Devices`] list.
+    Sync,
     /// Replace the local tag set of a stored device (controller-local metadata
     /// for filtering/grouping; never touches the device). The server normalizes
     /// (trim / drop empties / de-dup) and answers with the refreshed
@@ -353,6 +356,13 @@ pub struct StoredDeviceInfo {
     pub fingerprint: Fingerprint,
     /// Local user tags for filtering/grouping.
     pub tags: Vec<String>,
+    /// Whether the device advertised on our fabric at the last sync; `None`
+    /// before the first one.
+    #[serde(default)]
+    pub online: Option<bool>,
+    /// Our fabric is to be removed from it once it is reachable again.
+    #[serde(default)]
+    pub pending_removal: bool,
 }
 
 /// The numeric BasicInformation fingerprint, mirrored for the wire.

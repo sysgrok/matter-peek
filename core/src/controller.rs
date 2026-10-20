@@ -406,19 +406,19 @@ impl<'a, C: Crypto> Controller<'a, C> {
         Ok(removed)
     }
 
-    /// Discover the first commissionable device on the local network matching
-    /// `filter` (default = any), via the compiled-in mDNS backend. Returns its
-    /// address, which can be fed straight into [`Self::commission`].
+    /// Discover a commissionable device on the local network matching `filter`
+    /// (default = any), via the compiled-in mDNS backend. Returns its address,
+    /// which can be fed straight into [`Self::commission`].
     ///
     /// Runs the mDNS backend concurrently with the browse; the transport pump
     /// need not be running for this (mDNS is a separate socket / DBus path).
+    /// `window_ms` is how long each mDNS browse window lasts.
     pub async fn discover(
         &self,
         filter: &CommissionableFilter,
-        timeout_ms: Option<u32>,
+        window_ms: Option<u32>,
     ) -> Result<crate::discovery::DiscoveredDevice, Error> {
-        crate::discovery::discover_commissionable(self.matter, self.crypto, filter, timeout_ms)
-            .await
+        crate::discovery::discover_commissionable(self.matter, self.crypto, filter, window_ms).await
     }
 
     /// Discover up to `max` commissionable devices matching `filter`, for a UI
@@ -427,9 +427,9 @@ impl<'a, C: Crypto> Controller<'a, C> {
         &self,
         filter: &CommissionableFilter,
         max: u8,
-        timeout_ms: Option<u32>,
+        window_ms: Option<u32>,
     ) -> Vec<crate::discovery::DiscoveredDevice> {
-        crate::discovery::discover_all(self.matter, self.crypto, filter, max, timeout_ms).await
+        crate::discovery::discover_all(self.matter, self.crypto, filter, max, window_ms).await
     }
 
     /// Like [`Self::discover_all`], but assumes the caller already runs the mDNS
@@ -440,10 +440,17 @@ impl<'a, C: Crypto> Controller<'a, C> {
         &self,
         filter: &CommissionableFilter,
         max: u8,
-        timeout_ms: Option<u32>,
+        window_ms: Option<u32>,
     ) -> Vec<crate::discovery::DiscoveredDevice> {
-        crate::discovery::discover_all_with_running_backend(self.matter, filter, max, timeout_ms)
+        crate::discovery::discover_all_with_running_backend(self.matter, filter, max, window_ms)
             .await
+    }
+
+    /// The devices advertising on our fabric `fab_idx`: those holding it that
+    /// are reachable, by node ID. Assumes the caller runs the mDNS backend (see
+    /// [`Self::discover_all_bg`]).
+    pub async fn browse_fabric(&self, fab_idx: NonZeroU8) -> Result<Vec<u64>, Error> {
+        crate::discovery::browse_fabric_with_running_backend(self.matter, fab_idx, None).await
     }
 
     /// Run the mDNS backend **forever** (returns only on error). A long-lived host

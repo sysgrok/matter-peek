@@ -16,14 +16,14 @@ use core::net::SocketAddr;
 use core::num::NonZeroU8;
 use core::pin::pin;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use directories::ProjectDirs;
 use embassy_futures::select::{select, select4, Either, Either4};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use log::{error, info, warn};
@@ -57,10 +57,14 @@ use matter_peek_proto as proto;
 use crate::convert;
 use crate::ota::{DirOtaStore, PartialImage};
 
-/// The device NodeID the controller assigns to the **next** newly-commissioned
-/// device. Persistent mode allocates a fresh id per device (Phase 1: a simple
-/// incrementing counter seeded past the store's max).
+/// The first device NodeID the controller hands out (see
+/// [`ControllerStore::allocate_node_id`]).
 const FIRST_DEVICE_NODE_ID: u64 = 112234;
+
+/// How long after startup the first sync runs (the mDNS backend comes up first).
+const FIRST_SYNC_DELAY_SECS: u64 = 5;
+/// How often the device list is synced with our fabric.
+const SYNC_PERIOD_SECS: u64 = 300;
 
 /// The persistent controller stack, fed `'static` device details so `Matter`'s
 /// lifetime is `'static` and it can be shared freely across tasks.
@@ -181,6 +185,7 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
         ota_listeners,
         uploads: RefCell::new(HashMap::new()),
         next_upload_id: Cell::new(1),
+        online: RefCell::new(None),
     };
 
     // Four concurrent arms, for the actor's lifetime:
@@ -340,6 +345,9 @@ struct ActorCtx<'a, C: Crypto> {
     /// The OTA image uploads in progress, by ID.
     uploads: RefCell<HashMap<u32, Upload<'a, C>>>,
     next_upload_id: Cell<u32>,
+    /// The devices that advertised on our fabric at the last sync; `None`
+    /// before the first one.
+    online: RefCell<Option<HashSet<u64>>>,
 }
 
 /// An OTA image file being uploaded in chunks: written as it arrives, and
@@ -384,10 +392,29 @@ async fn command_loop<C: Crypto>(
     ctx: &ActorCtx<'_, C>,
     sub_submit: &async_channel::Sender<SubJob>,
 ) {
-    while let Ok(cmd) = rx.recv().await {
-        let response = service(&cmd, ctx, sub_submit).await;
-        // Best-effort: if the client vanished, dropping the reply is fine.
-        let _ = cmd.reply.send(response).await;
+    let mut next_sync = Instant::now() + Duration::from_secs(FIRST_SYNC_DELAY_SECS);
+
+    loop {
+        match select(rx.recv(), Timer::at(next_sync)).await {
+            Either::First(Ok(cmd)) => {
+                let response = service(&cmd, ctx, sub_submit).await;
+
+                if matches!(cmd.request, proto::Request::Sync) {
+                    next_sync = Instant::now() + Duration::from_secs(SYNC_PERIOD_SECS);
+                }
+
+                // Best-effort: if the client vanished, dropping the reply is fine.
+                let _ = cmd.reply.send(response).await;
+            }
+            Either::First(Err(_)) => return,
+            Either::Second(()) => {
+                if let Err(e) = sync_devices(ctx, false).await {
+                    warn!("sync failed: {e:?}");
+                }
+
+                next_sync = Instant::now() + Duration::from_secs(SYNC_PERIOD_SECS);
+            }
+        }
     }
 }
 
@@ -409,6 +436,7 @@ async fn service<C: Crypto>(
             max,
         } => run_discover(ctx, *discriminator, setup_code.as_deref(), *max).await,
         proto::Request::ListDevices => list_devices(ctx),
+        proto::Request::Sync => sync(ctx).await,
         proto::Request::PeekDevice { node_id, with_logs } => {
             peek_device(ctx, *node_id, *with_logs).await
         }
@@ -777,9 +805,17 @@ fn list_devices<C: Crypto>(ctx: &ActorCtx<'_, C>) -> proto::Response {
 /// As [`list_devices`], but attaches a non-fatal `notice` about the operation
 /// that produced the list (e.g. a decommission that could not reach the device).
 fn list_devices_with<C: Crypto>(ctx: &ActorCtx<'_, C>, notice: Option<String>) -> proto::Response {
+    let online = ctx.online.borrow();
+
     match ctx.store.load_devices() {
         Ok(devices) => proto::Response::Devices {
-            devices: devices.into_iter().map(convert::stored_device).collect(),
+            devices: devices
+                .into_iter()
+                .map(|d| {
+                    let node_id = d.handle.node_id;
+                    convert::stored_device(d, online.as_ref().map(|o| o.contains(&node_id)))
+                })
+                .collect(),
             notice,
         },
         Err(e) => proto::Response::Error {
@@ -955,16 +991,10 @@ async fn try_remove_fabric<C: Crypto>(
 /// our fabric on the device (freeing its fabric slot), then drop the local
 /// record. Returns the refreshed device list.
 ///
-/// **The local record goes either way.** Removing it is the part we can always
-/// do, and a device that has been unplugged, factory-reset or binned must not be
-/// able to wedge itself permanently in the list. So the device is tried
-/// [`DECOMMISSION_ATTEMPTS`] times and, if it stays unreachable, the record is
-/// dropped anyway and the caller is told the device-side fabric slot leaked (it
-/// is reclaimed by factory-resetting the device, or by our orphan sweep if the
-/// unit ever comes back for re-commissioning).
-///
-/// `force` skips contacting the device at all — for a unit already known to be
-/// gone, where waiting out the retries is pointless.
+/// A device that stays unreachable keeps its record, as pending removal: a sync
+/// removes our fabric from it once it advertises again. `force` drops the record
+/// without contacting the device; one that still holds our fabric shows up again
+/// on the next sync.
 async fn decommission<C: Crypto>(
     ctx: &ActorCtx<'_, C>,
     node_id: u64,
@@ -981,63 +1011,209 @@ async fn decommission<C: Crypto>(
         let _ = stop.try_send(());
     }
 
-    let device_side = if force {
-        info!("decommission node 0x{node_id:016x}: forced — not contacting the device");
-        Err("not attempted (forced removal)".to_string())
+    let removed = if force {
+        info!("decommission node 0x{node_id:016x}: forced - not contacting the device");
+        Err(())
     } else {
-        try_remove_fabric(ctx, dev.handle, node_id).await
+        try_remove_fabric(ctx, dev.handle, node_id)
+            .await
+            .map_err(|_| ())
     };
 
-    // Drop any secure session we still hold - but only when the device was *not*
-    // torn down successfully.
-    //
-    // On the success path `RemoveFabric` has already invalidated both halves, and
-    // the exchange that carried it queues a trailing close on that session for the
-    // transport pump; evicting first only makes the pump log a TX failure for a
-    // session we removed out from under it. Nothing addresses that node again
-    // either - its record is about to go, and a re-commission assigns a fresh
-    // NodeID - so the dead session simply ages out.
-    //
-    // On the give-up path there is no such exchange, and nothing else would ever
-    // clear the session: that is the one that lingers pointing at a device we no
-    // longer track.
-    if device_side.is_err() {
+    // Drop any secure session we still hold, but only if `RemoveFabric` did not
+    // go through: on success, the exchange that carried it still has a trailing
+    // close to send on that session.
+    if removed.is_err() {
         ctx.controller.forget_sessions(dev.handle);
     }
 
-    // Drop the local record (load-all / filter / save-all).
-    match ctx.store.load_devices() {
-        Ok(mut devices) => {
-            devices.retain(|d| d.handle.node_id != node_id);
-            if let Err(e) = ctx.store.save_devices(&devices) {
-                return proto::Response::Error {
-                    message: format!("failed to update store: {e:?}"),
+    if removed.is_ok() || force {
+        set_online(ctx, node_id, false);
+
+        return update_devices(
+            ctx,
+            |devices| devices.retain(|d| d.handle.node_id != node_id),
+            None,
+        );
+    }
+
+    update_devices(
+        ctx,
+        |devices| {
+            devices
+                .iter_mut()
+                .filter(|d| d.handle.node_id == node_id)
+                .for_each(|d| d.pending_removal = true);
+        },
+        Some(format!(
+            "Device 0x{node_id:016x} could not be reached. Our fabric will be removed from \
+             it once it is back online."
+        )),
+    )
+}
+
+/// Apply `f` to the stored devices, then return the refreshed device list.
+fn update_devices<C: Crypto>(
+    ctx: &ActorCtx<'_, C>,
+    f: impl FnOnce(&mut alloc::vec::Vec<matter_peek_core::StoredDevice>),
+    notice: Option<String>,
+) -> proto::Response {
+    let updated = ctx.store.load_devices().and_then(|mut devices| {
+        f(&mut devices);
+        ctx.store.save_devices(&devices)
+    });
+
+    match updated {
+        Ok(()) => list_devices_with(ctx, notice),
+        Err(e) => proto::Response::Error {
+            message: format!("failed to update store: {e:?}"),
+        },
+    }
+}
+
+/// Re-sync the device list with our fabric (see [`proto::Request::Sync`]),
+/// refreshing the identity of every reachable device, and answer with the list.
+async fn sync<C: Crypto>(ctx: &ActorCtx<'_, C>) -> proto::Response {
+    match sync_devices(ctx, true).await {
+        Ok(notice) => list_devices_with(ctx, notice),
+        Err(e) => proto::Response::Error {
+            message: format!("sync failed: {e:?}"),
+        },
+    }
+}
+
+/// Align the device records with the devices advertising on our fabric: adopt
+/// those without a record, complete pending removals and, if `refresh`, re-read
+/// the others' identity. Notes which devices are online. Returns a notice of
+/// what changed, if anything did.
+async fn sync_devices<C: Crypto>(
+    ctx: &ActorCtx<'_, C>,
+    refresh: bool,
+) -> Result<Option<String>, Error> {
+    use matter_peek_core::StoredDevice;
+
+    let advertised = ctx.controller.browse_fabric(ctx.fab_idx).await?;
+    info!("sync: {} device(s) on our fabric", advertised.len());
+
+    let mut devices = ctx.store.load_devices()?;
+    let (mut adopted, mut removed) = (0, 0);
+
+    for &node_id in &advertised {
+        // In use on our fabric, so never to be handed out again.
+        ctx.store.reserve_node_id(node_id)?;
+
+        let handle = DeviceHandle {
+            fabric_index: ctx.fab_idx,
+            node_id,
+        };
+
+        match devices.iter().position(|d| d.handle.node_id == node_id) {
+            Some(i) if devices[i].pending_removal => {
+                match ctx.controller.decommission(handle).await {
+                    Ok(()) => {
+                        info!("sync: removed our fabric from node 0x{node_id:016x}");
+                        devices.remove(i);
+                        removed += 1;
+                    }
+                    Err(e) => {
+                        warn!("sync: removing our fabric from node 0x{node_id:016x} failed: {e:?}");
+                        continue;
+                    }
+                }
+            }
+            Some(i) => {
+                let ident = if refresh {
+                    ctx.controller.read_basic_info(handle).await
+                } else {
+                    continue;
                 };
+
+                // An unusable fingerprint means the read failed.
+                if !ident.fingerprint.is_usable() {
+                    continue;
+                }
+
+                let device: &mut StoredDevice = &mut devices[i];
+                if !ident.node_label.is_empty() {
+                    device.node_label = ident.node_label;
+                }
+                device.unique_id = ident.unique_id;
+                device.serial_number = ident.serial_number;
+                device.vendor_name = ident.vendor_name;
+                device.product_name = ident.product_name;
+                device.fingerprint = ident.fingerprint;
+            }
+            None => {
+                let ident = ctx.controller.read_basic_info(handle).await;
+
+                // Only a device that answers: an advertisement can outlive its
+                // device (cached until its TTL runs out).
+                if !ident.fingerprint.is_usable() {
+                    warn!("sync: node 0x{node_id:016x} is advertised on our fabric but does not answer");
+                    continue;
+                }
+
+                info!("sync: adopting node 0x{node_id:016x}, found on our fabric");
+                adopt(&mut devices, handle, &ident);
+                adopted += 1;
             }
         }
-        Err(e) => {
-            return proto::Response::Error {
-                message: format!("failed to load store: {e:?}"),
-            };
+
+        ctx.store.save_devices(&devices)?;
+    }
+
+    *ctx.online.borrow_mut() = Some(advertised.into_iter().collect());
+
+    let mut notice = alloc::vec::Vec::new();
+    if adopted > 0 {
+        notice.push(format!(
+            "{adopted} device(s) found on our fabric were added to the list."
+        ));
+    }
+    if removed > 0 {
+        notice.push(format!(
+            "Our fabric was removed from {removed} device(s) pending removal."
+        ));
+    }
+
+    Ok((!notice.is_empty()).then(|| notice.join(" ")))
+}
+
+/// Add a record for a device found on our fabric. A record of the same unit
+/// under another node ID is stale (a device holds our fabric only once), so it
+/// is replaced, keeping its tags and label.
+fn adopt(
+    devices: &mut alloc::vec::Vec<matter_peek_core::StoredDevice>,
+    handle: DeviceHandle,
+    ident: &matter_peek_core::DeviceIdentity,
+) {
+    use matter_peek_core::{match_device, MatchResult};
+
+    let mut record = new_record(handle, ident);
+
+    if let MatchResult::Exact { node_id } = match_device(ident, devices) {
+        if let Some(i) = devices.iter().position(|d| d.handle.node_id == node_id) {
+            let stale = devices.remove(i);
+
+            record.tags = stale.tags;
+            if record.node_label.is_empty() {
+                record.node_label = stale.node_label;
+            }
         }
     }
 
-    let notice = match device_side {
-        Ok(()) => None,
-        Err(why) => {
-            warn!(
-                "decommission node 0x{node_id:016x}: dropped the local record without removing the \
-                 device-side fabric ({why}) — that fabric slot is leaked on the device"
-            );
-            Some(format!(
-                "Device 0x{node_id:016x} could not be reached — it has been removed from this \
-                 controller, but our fabric slot is still allocated on the device. Factory-reset \
-                 it to reclaim the slot; re-commissioning it here will also clean it up."
-            ))
-        }
-    };
+    devices.push(record);
+}
 
-    list_devices_with(ctx, notice)
+/// Note whether `node_id` is online, once a sync has run.
+fn set_online<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64, online: bool) {
+    if let Some(nodes) = ctx.online.borrow_mut().as_mut() {
+        if online {
+            nodes.insert(node_id);
+        } else {
+            nodes.remove(&node_id);
+        }
+    }
 }
 
 /// Replace a stored device's local tags, then return the refreshed device list
@@ -1118,9 +1294,16 @@ async fn vertical_flow<C: Crypto>(
     // at the phase boundaries below.
     ctx.cancel.set(false);
 
-    // Allocate the device's NodeID: one past the current store max (persistent),
-    // so re-runs don't collide; ephemeral reuses the base id (removed anyway).
-    let device_node_id = next_device_node_id(ctx);
+    // A NodeID never handed out before: the device may keep it even if this run
+    // goes wrong.
+    let device_node_id = match ctx.store.allocate_node_id(FIRST_DEVICE_NODE_ID) {
+        Ok(node_id) => node_id,
+        Err(e) => {
+            return proto::Response::Error {
+                message: format!("cannot allocate a node ID: {e:?}"),
+            }
+        }
+    };
 
     // SAFEPOINT 1 — before commission: the device has no fabric of ours yet, so
     // cancelling here is side-effect-free.
@@ -1231,6 +1414,7 @@ async fn vertical_flow<C: Crypto>(
                 Ok(candidate) => rematch_candidate = candidate,
                 Err(e) => error!("actor: persisting commissioned device failed: {e:?}"),
             }
+            set_online(ctx, outcome.handle.node_id, true);
             false
         }
         proto::FabricPolicy::Ephemeral => {
@@ -1242,6 +1426,18 @@ async fn vertical_flow<C: Crypto>(
                 }
                 Err(e) => {
                     emit(cmd, Step::Decommission, failed(&e)).await;
+
+                    // The device keeps our fabric: have a sync remove it.
+                    let mut record =
+                        new_record(outcome.handle, &matter_peek_core::DeviceIdentity::default());
+                    record.pending_removal = true;
+                    if let Err(e) = ctx.store.load_devices().and_then(|mut devices| {
+                        devices.push(record);
+                        ctx.store.save_devices(&devices)
+                    }) {
+                        error!("actor: recording the pending removal failed: {e:?}");
+                    }
+
                     false
                 }
             }
@@ -1311,6 +1507,7 @@ async fn persist_commissioned<C: Crypto>(
                 product_name: ident.product_name,
                 fingerprint: ident.fingerprint,
                 tags,
+                pending_removal: false,
             });
         }
         // Fingerprint-only: possibly the same unit, possibly a sibling of the
@@ -1345,30 +1542,21 @@ fn new_record(
         product_name: ident.product_name.clone(),
         fingerprint: ident.fingerprint,
         tags: alloc::vec::Vec::new(),
+        pending_removal: false,
     }
 }
 
-/// The NodeIDs the store currently vouches for — the devices we believe we are
-/// legitimately commissioned into. Handed to the orphan sweep so it can tell a
-/// leaked fabric from a live one (see `sweep_orphaned_fabrics`).
+/// The NodeIDs of the devices we are commissioned into and mean to stay: the
+/// orphan sweep must not remove our fabric from those (see
+/// `sweep_orphaned_fabrics`). Pending removals are not among them.
 fn live_node_ids<C: Crypto>(ctx: &ActorCtx<'_, C>) -> alloc::vec::Vec<u64> {
     ctx.store
         .load_devices()
         .unwrap_or_default()
         .iter()
+        .filter(|d| !d.pending_removal)
         .map(|d| d.handle.node_id)
         .collect()
-}
-
-/// Next device NodeID: one past the current store max, so persistent re-runs
-/// don't collide. Ephemeral runs are fine reusing the base (fabric is removed).
-fn next_device_node_id<C: Crypto>(ctx: &ActorCtx<'_, C>) -> u64 {
-    ctx.store
-        .load_devices()
-        .ok()
-        .and_then(|d| d.iter().map(|x| x.handle.node_id).max())
-        .map(|m| m + 1)
-        .unwrap_or(FIRST_DEVICE_NODE_ID)
 }
 
 async fn emit(cmd: &Command, step: proto::VerticalStep, status: proto::StepStatus) {

@@ -53,6 +53,8 @@ const DEVICES_KEY: u16 = VENDOR_KEYS_START;
 /// The controller CA's signing key + tier (the one secret rs-matter's fabric
 /// persistence doesn't cover).
 const CA_KEY: u16 = VENDOR_KEYS_START + 1;
+/// The next device node ID to hand out.
+const NEXT_NODE_ID_KEY: u16 = VENDOR_KEYS_START + 2;
 
 /// Owns a shared KV store and exposes the controller's persistence operations:
 /// load/save our fabric (via rs-matter) and our device records. Generic over the
@@ -140,6 +142,49 @@ impl<'a, S: KvBlobStore> ControllerStore<'a, S> {
         Persist::new(&self.kv).store_tlv(DEVICES_KEY, wire)
     }
 
+    /// Hand out a node ID for a new device: never one handed out before, nor one
+    /// a stored device has, and at least `first`.
+    ///
+    /// A node ID must not be reused even once its record is gone: the device may
+    /// still hold our fabric under it.
+    pub fn allocate_node_id(&self, first: u64) -> Result<u64, Error> {
+        let stored = self
+            .load_devices()?
+            .iter()
+            .map(|d| d.handle.node_id + 1)
+            .max();
+        let node_id = self
+            .load_next_node_id()?
+            .into_iter()
+            .chain(stored)
+            .fold(first, u64::max);
+
+        self.save_next_node_id(node_id + 1)?;
+
+        Ok(node_id)
+    }
+
+    /// Never hand out `node_id` (seen in use on our fabric) as a new one.
+    pub fn reserve_node_id(&self, node_id: u64) -> Result<(), Error> {
+        if self.load_next_node_id()?.is_some_and(|next| next > node_id) {
+            return Ok(());
+        }
+
+        self.save_next_node_id(node_id + 1)
+    }
+
+    fn load_next_node_id(&self) -> Result<Option<u64>, Error> {
+        self.kv
+            .access(|kv, buf| match kv.load(NEXT_NODE_ID_KEY, buf)? {
+                Some(data) => Ok(Some(NextNodeId::from_tlv(&TLVElement::new(data))?.node_id)),
+                None => Ok(None),
+            })
+    }
+
+    fn save_next_node_id(&self, node_id: u64) -> Result<(), Error> {
+        Persist::new(&self.kv).store_tlv(NEXT_NODE_ID_KEY, NextNodeId { node_id })
+    }
+
     /// Replace the local tag set of the device with this `node_id`, persisting
     /// the change. Tags are normalized (trimmed, empties dropped, de-duplicated,
     /// order preserved). Returns `true` if a matching device was found and
@@ -193,6 +238,12 @@ struct CaBlob {
     signing_key: OctetsVec,
 }
 
+/// Persisted next device node ID.
+#[derive(ToTLV, FromTLV)]
+struct NextNodeId {
+    node_id: u64,
+}
+
 #[derive(ToTLV, FromTLV)]
 struct StoredDeviceList {
     devices: Vec<StoredDeviceWire>,
@@ -216,6 +267,8 @@ struct StoredDeviceWire {
     // (a missing trailing optional decodes to `None`). `None` ⇒ empty string.
     vendor_name: Option<String>,
     product_name: Option<String>,
+    // Appended LAST and `Option` too; `None` ⇒ `false`.
+    pending_removal: Option<bool>,
 }
 
 impl StoredDeviceList {
@@ -238,6 +291,7 @@ impl StoredDeviceList {
                     // and round-trips `None` ⇄ empty string).
                     vendor_name: opt_str(&d.vendor_name),
                     product_name: opt_str(&d.product_name),
+                    pending_removal: d.pending_removal.then_some(true),
                 })
                 .collect(),
         }
@@ -266,6 +320,7 @@ impl StoredDeviceList {
                         software_version: w.fp_software_version,
                     },
                     tags: w.tags,
+                    pending_removal: w.pending_removal.unwrap_or(false),
                 })
             })
             .collect()
@@ -341,6 +396,7 @@ mod tests {
             product_name: "Widget".to_string(),
             fingerprint: fp(0x1234, 0x5678),
             tags: tags.iter().map(|t| t.to_string()).collect(),
+            pending_removal: false,
         }
     }
 
@@ -443,5 +499,38 @@ mod tests {
 
         let loaded = s.load_devices().unwrap();
         assert_eq!(loaded[0].fingerprint, d.fingerprint);
+    }
+
+    #[test]
+    fn pending_removal_round_trips() {
+        let s = store();
+        let mut d = device(101, "sn-a", &[]);
+        d.pending_removal = true;
+        s.save_devices(&[d.clone(), device(102, "sn-b", &[])])
+            .unwrap();
+
+        let loaded = s.load_devices().unwrap();
+        assert!(loaded[0].pending_removal);
+        assert!(!loaded[1].pending_removal);
+    }
+
+    #[test]
+    fn node_ids_are_never_handed_out_twice() {
+        let s = store();
+        assert_eq!(s.allocate_node_id(100).unwrap(), 100);
+        assert_eq!(s.allocate_node_id(100).unwrap(), 101);
+
+        // Above any stored device, even one not handed out by us.
+        s.save_devices(&[device(200, "sn-a", &[])]).unwrap();
+        assert_eq!(s.allocate_node_id(100).unwrap(), 201);
+
+        // Not reused once the record is gone.
+        s.save_devices(&[]).unwrap();
+        assert_eq!(s.allocate_node_id(100).unwrap(), 202);
+
+        // Nor once seen in use on our fabric.
+        s.reserve_node_id(300).unwrap();
+        s.reserve_node_id(250).unwrap();
+        assert_eq!(s.allocate_node_id(100).unwrap(), 301);
     }
 }

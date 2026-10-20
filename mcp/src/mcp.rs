@@ -9,7 +9,7 @@
 //! request/response).
 //!
 //! **Safety:** read-only tools (discover / list / peek / identify) are always
-//! registered. Mutating tools (commission / set_tags) are registered only when
+//! registered. Mutating tools (commission / set_tags / sync) are registered only when
 //! [`Caps::allow_mutate`] is set — so an agent cannot commission or alter devices
 //! unless the human operator opted in (the shell sets this from `--allow-mutate`).
 
@@ -44,7 +44,7 @@ pub trait Dispatch {
     ) -> impl Future<Output = Result<proto::Response, String>>;
 }
 
-/// Whether mutating tools (commission / set_tags) are exposed.
+/// Whether mutating tools (commission / set_tags / sync) are exposed.
 #[derive(Clone, Copy)]
 pub struct Caps {
     pub allow_mutate: bool,
@@ -183,6 +183,14 @@ fn tool_list(caps: Caps) -> Vec<Value> {
                 "required": ["node_id", "tags"]
             }),
         ));
+        tools.push(tool(
+            "sync",
+            "Re-sync the stored device list with the devices on our fabric: add \
+             the ones not listed, refresh the others' identity, and remove our \
+             fabric from those pending removal. MUTATING — may alter devices' \
+             fabric tables.",
+            json!({ "type": "object", "properties": {} }),
+        ));
     }
 
     tools
@@ -219,7 +227,7 @@ async fn tools_call<D: Dispatch>(
 
 /// Map a tool name + arguments to a [`proto::Request`], enforcing the mutate gate.
 fn build_request(name: &str, args: &Value, caps: Caps) -> Result<proto::Request, ToolErr> {
-    let mutating = matches!(name, "commission" | "set_tags");
+    let mutating = matches!(name, "commission" | "set_tags" | "sync");
     if mutating && !caps.allow_mutate {
         return Err((
             jsonrpc::INVALID_PARAMS,
@@ -240,6 +248,7 @@ fn build_request(name: &str, args: &Value, caps: Caps) -> Result<proto::Request,
             max: args.get("max").and_then(Value::as_u64).unwrap_or(16) as u8,
         },
         "list_devices" => proto::Request::ListDevices,
+        "sync" => proto::Request::Sync,
         "peek_device" => proto::Request::PeekDevice {
             node_id: arg_u64(args, "node_id")?,
             with_logs: args

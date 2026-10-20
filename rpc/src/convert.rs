@@ -49,7 +49,9 @@ pub fn handle(h: core::DeviceHandle) -> proto::DeviceHandle {
     }
 }
 
-pub fn stored_device(d: core::StoredDevice) -> proto::StoredDeviceInfo {
+/// A stored device for the wire; `online` is whether it advertised on our fabric
+/// at the last sync (`None` before the first one).
+pub fn stored_device(d: core::StoredDevice, online: Option<bool>) -> proto::StoredDeviceInfo {
     let vid = d.fingerprint.vendor_id;
 
     // Resolve a ready-to-show vendor label once, server-side, so the UI needs no
@@ -82,6 +84,8 @@ pub fn stored_device(d: core::StoredDevice) -> proto::StoredDeviceInfo {
             software_version: d.fingerprint.software_version,
         },
         tags: d.tags,
+        online,
+        pending_removal: d.pending_removal,
     }
 }
 
