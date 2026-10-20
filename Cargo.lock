@@ -318,6 +318,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd307490d624467aa6f74b0eabb77633d1f758a7b25f12bceb0b22e08d9726f6"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1560,6 +1566,7 @@ dependencies = [
  "async-io",
  "async-net",
  "async-tungstenite",
+ "base64",
  "directories",
  "embassy-futures",
  "embassy-time",
@@ -2230,7 +2237,6 @@ dependencies = [
 [[package]]
 name = "rs-matter"
 version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#a95bab0fdba4184f1aacb6bd022b2b374b6bc20c"
 dependencies = [
  "aes",
  "astro-dnssd",
@@ -2293,7 +2299,6 @@ dependencies = [
 [[package]]
 name = "rs-matter-codegen"
 version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#a95bab0fdba4184f1aacb6bd022b2b374b6bc20c"
 dependencies = [
  "convert_case",
  "miette",
@@ -2312,7 +2317,6 @@ dependencies = [
 [[package]]
 name = "rs-matter-macros"
 version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#a95bab0fdba4184f1aacb6bd022b2b374b6bc20c"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

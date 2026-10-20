@@ -91,3 +91,17 @@ pub fn policy(p: proto::FabricPolicy) -> core::FabricPolicy {
         proto::FabricPolicy::Ephemeral => core::FabricPolicy::Ephemeral,
     }
 }
+
+pub fn ota_image(image: core::ota::OtaImage) -> proto::OtaImageInfo {
+    proto::OtaImageInfo {
+        name: image.name,
+        vendor_id: image.vendor_id,
+        product_id: image.product_id,
+        version: image.version,
+        version_str: image.version_str,
+        min_applicable_version: image.min_applicable_version,
+        max_applicable_version: image.max_applicable_version,
+        release_notes_url: image.release_notes_url,
+        size: image.size,
+    }
+}

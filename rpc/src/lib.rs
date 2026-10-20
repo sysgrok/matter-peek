@@ -18,6 +18,7 @@ use async_executor::LocalExecutor;
 
 pub mod actor;
 pub mod convert;
+pub mod ota;
 pub mod server;
 
 thread_local! {

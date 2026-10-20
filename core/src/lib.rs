@@ -43,6 +43,8 @@ pub mod diagnostics;
 pub mod discovery;
 pub mod logs;
 pub mod model;
+pub mod node;
+pub mod ota;
 pub mod persist;
 pub mod subscribe;
 pub mod vendors;

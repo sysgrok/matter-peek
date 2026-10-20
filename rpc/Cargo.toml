@@ -36,3 +36,5 @@ env_logger = { workspace = true }
 # Platform-standard data dir for the persistence store (~/.local/share on Linux,
 # ~/Library/Application Support on macOS) instead of a volatile /tmp path.
 directories = "6"
+# OTA image uploads arrive base64-encoded over the WebSocket.
+base64 = "0.22"

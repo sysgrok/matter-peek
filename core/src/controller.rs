@@ -484,10 +484,12 @@ impl<'a, C: Crypto> Controller<'a, C> {
     ///
     /// Runs **indefinitely**, self-healing across session drops (a stale
     /// subscription is re-established with a fresh device-side id), until the
-    /// returned future is dropped (the cancel). The transport pump must be running
-    /// in a sibling task.
+    /// returned future is dropped (the cancel). The transport pump and the
+    /// controller node ([`crate::node::run`], with the same `reports`) must run in
+    /// sibling tasks.
     pub async fn subscribe_health(
         &self,
+        reports: &crate::subscribe::Reports,
         dev: DeviceHandle,
         which: DiagSet,
         on_update: impl FnMut(DeviceHealth),
@@ -496,6 +498,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
         crate::subscribe::subscribe_health(
             self.matter,
             self.crypto,
+            reports,
             dev.fabric_index,
             dev.node_id,
             which,
@@ -503,6 +506,27 @@ impl<'a, C: Crypto> Controller<'a, C> {
             on_state,
         )
         .await
+    }
+
+    /// Serve what devices reach on us: the OTA Provider of `ota` and the reports
+    /// of the subscriptions using `reports`. See [`crate::node::run`].
+    pub async fn run_node<P>(
+        &self,
+        reports: &crate::subscribe::Reports,
+        ota: &P,
+    ) -> Result<(), Error>
+    where
+        P: rs_matter::dm::clusters::ota_prov::OtaImagesRegistry
+            + rs_matter::dm::clusters::ota_prov::OtaImages,
+    {
+        crate::node::run(self.matter, self.crypto, reports, ota).await
+    }
+
+    /// Announce us to the device as its OTA Provider, with an update for it: it
+    /// then asks us for the update it is allowed (see
+    /// [`OtaProvider::allow`](crate::ota::OtaProvider::allow)).
+    pub async fn announce_ota_provider(&self, dev: DeviceHandle) -> Result<(), Error> {
+        crate::ota::announce(self.matter, self.crypto, dev.fabric_index, dev.node_id).await
     }
 
     /// Read a device's stable identity (`UniqueID` / `SerialNumber` /

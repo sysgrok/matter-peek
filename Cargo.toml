@@ -58,5 +58,6 @@ nix = { version = "0.30", features = ["net"] }
 #     decommissioning can drop the stale session for the device it just tore
 #     down.
 [patch.crates-io]
-#rs-matter = { path = "../rs-matter/rs-matter" }
-rs-matter = { git = "https://github.com/project-chip/rs-matter" }
+rs-matter = { path = "../rs-matter/rs-matter" }
+# `ota-image-infra`: the OTA image format (`rs_matter::ota`), until it lands upstream.
+#rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "ota-image-infra" }

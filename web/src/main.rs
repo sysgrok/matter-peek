@@ -58,6 +58,7 @@ enum Tab {
     Discover,
     Commission,
     Devices,
+    Updates,
 }
 
 /// How long a commission may run before the UI auto-cancels it.
@@ -102,6 +103,20 @@ enum Msg {
     SaveTags(u64),
     /// Filter the stored list by tag substring.
     TagFilter(String),
+    /// Fetch the stored OTA images.
+    OtaImages,
+    /// The user picked an OTA image file to upload.
+    OtaFile(web_sys::File),
+    /// How an OTA image upload goes (percent).
+    OtaUploading(u8),
+    /// Delete stored OTA image `name`.
+    OtaDelete(String),
+    /// The user chose the image to update a device (node_id) to.
+    OtaChoose(u64, String),
+    /// Update a device (node_id) to its chosen image.
+    OtaUpdate(u64),
+    /// How a device's (node_id) update goes.
+    OtaProgress(u64, proto::OtaProgress),
     Step(StepLine),
     Done(proto::Response),
     Error(String),
@@ -150,6 +165,12 @@ struct App {
     /// True while showing the "you just commissioned this — re-commission anyway?"
     /// confirmation, instead of immediately running.
     confirm_recommission: bool,
+    /// The stored OTA images.
+    ota_images: Vec<proto::OtaImageInfo>,
+    /// The image chosen to update each device to (node_id → image name).
+    ota_choice: HashMap<u64, String>,
+    /// How each device's update goes (node_id → status line).
+    ota_status: HashMap<u64, String>,
     error: Option<String>,
 }
 
@@ -179,6 +200,9 @@ impl Component for App {
             notice: None,
             last_commissioned_addr: None,
             confirm_recommission: false,
+            ota_images: Vec::new(),
+            ota_choice: HashMap::new(),
+            ota_status: HashMap::new(),
             error: None,
         }
     }
@@ -194,6 +218,51 @@ impl Component for App {
                     self.stored_status = None;
                     send_request(ctx.link().clone(), proto::Request::ListDevices);
                 }
+                // Devices offer updates to the images.
+                if matches!(tab, Tab::Devices | Tab::Updates) {
+                    send_request(ctx.link().clone(), proto::Request::OtaImages);
+                }
+                true
+            }
+            Msg::OtaImages => {
+                send_request(ctx.link().clone(), proto::Request::OtaImages);
+                false
+            }
+            Msg::OtaFile(file) => {
+                self.notice = Some(upload_notice(0));
+                send_ota_upload(ctx.link().clone(), file);
+                true
+            }
+            Msg::OtaUploading(percent) => {
+                self.notice = Some(upload_notice(percent));
+                true
+            }
+            Msg::OtaDelete(name) => {
+                send_request(ctx.link().clone(), proto::Request::OtaDelete { name });
+                false
+            }
+            Msg::OtaChoose(node_id, name) => {
+                self.ota_choice.insert(node_id, name);
+                true
+            }
+            Msg::OtaUpdate(node_id) => {
+                let Some(name) = self.ota_choice.get(&node_id).cloned().or_else(|| {
+                    let device = self.stored.iter().find(|d| d.handle.node_id == node_id)?;
+                    self.applicable(device)
+                        .next()
+                        .map(|image| image.name.clone())
+                }) else {
+                    return false;
+                };
+
+                self.ota_status
+                    .insert(node_id, format!("Announcing {name} to the device…"));
+                send_ota_update(ctx.link().clone(), node_id, name);
+                true
+            }
+            Msg::OtaProgress(node_id, progress) => {
+                self.ota_status
+                    .insert(node_id, ota_progress_text(&progress));
                 true
             }
             Msg::PeerAddr(v) => {
@@ -463,6 +532,18 @@ impl Component for App {
                     // `Subscribed` / streamed subscription frames arrive on the
                     // dedicated persistent subscription WS, not this one-shot path.
                     proto::Response::Subscribed { .. } => {}
+                    proto::Response::OtaImages { images } => {
+                        if self
+                            .notice
+                            .as_deref()
+                            .is_some_and(|notice| notice.starts_with(UPLOAD_NOTICE))
+                        {
+                            self.notice = None;
+                        }
+                        self.ota_images = images;
+                    }
+                    // Uploads run on their own connection (`send_ota_upload`).
+                    proto::Response::OtaUploadStarted { .. } => {}
                     proto::Response::Cancelled { decommissioned } => {
                         self.notice = Some(if decommissioned {
                             "Commission cancelled — the device had been added to our fabric and was cleaned up (decommissioned).".into()
@@ -532,6 +613,7 @@ impl Component for App {
                             Tab::Discover => self.view_discover_tab(link),
                             Tab::Commission => self.view_commission_tab(link),
                             Tab::Devices => self.view_devices_tab(link),
+                            Tab::Updates => self.view_updates_tab(link),
                         }
                     }
                 </main>
@@ -606,6 +688,9 @@ impl App {
                             } => link.send_message(Msg::HealthReport(node_id, health)),
                             proto::Event::SubscriptionState { node_id, state } => {
                                 link.send_message(Msg::SubState(node_id, state))
+                            }
+                            proto::Event::OtaProgress { node_id, progress } => {
+                                link.send_message(Msg::OtaProgress(node_id, progress))
                             }
                             proto::Event::Step { .. } => {}
                         },
@@ -708,6 +793,7 @@ impl App {
                     { tab(Tab::Discover, "Discover") }
                     { tab(Tab::Commission, "Commission") }
                     { tab(Tab::Devices, "Devices") }
+                    { tab(Tab::Updates, "Updates") }
                 </ul>
             </div>
         }
@@ -1117,10 +1203,141 @@ impl App {
                         </button>
                     </div>
 
+                    { self.view_device_update(d, link) }
+
                     // Every stored device is watched automatically — the panel is
                     // always shown (it renders "connecting…" until the first report).
                     { self.view_live_health(live) }
                 </div>
+            </div>
+        }
+    }
+
+    /// The images a device can update to: for its vendor and product, and newer
+    /// than what it runs.
+    fn applicable<'a>(
+        &'a self,
+        d: &'a proto::StoredDeviceInfo,
+    ) -> impl Iterator<Item = &'a proto::OtaImageInfo> + 'a {
+        let fp = &d.fingerprint;
+
+        self.ota_images.iter().filter(move |image| {
+            fp.vendor_id
+                .is_none_or(|vid| image.vendor_id == 0 || image.vendor_id == vid)
+                && fp
+                    .product_id
+                    .is_none_or(|pid| image.product_id == 0 || image.product_id == pid)
+                && fp.software_version.is_none_or(|v| image.version > v)
+        })
+    }
+
+    /// A device card's OTA update controls, when there is an image for it.
+    fn view_device_update(&self, d: &proto::StoredDeviceInfo, link: &html::Scope<Self>) -> Html {
+        let node_id = d.handle.node_id;
+        let images: Vec<_> = self.applicable(d).collect();
+        let status = self.ota_status.get(&node_id);
+
+        if images.is_empty() && status.is_none() {
+            return html! {};
+        }
+
+        let chosen = self
+            .ota_choice
+            .get(&node_id)
+            .cloned()
+            .or_else(|| images.first().map(|image| image.name.clone()));
+
+        let on_choose = link.callback(move |e: Event| Msg::OtaChoose(node_id, select_value(e)));
+        let update = link.callback(move |_| Msg::OtaUpdate(node_id));
+
+        html! {
+            <div class="mb-2">
+                if !images.is_empty() {
+                    <div class="field has-addons mb-1">
+                        <div class="control">
+                            <div class="select is-small">
+                                <select onchange={on_choose}>
+                                    { for images.iter().map(|image| html! {
+                                        <option value={image.name.clone()}
+                                            selected={chosen.as_deref() == Some(image.name.as_str())}>
+                                            { format!("{} ({})", image.version_str, image.version) }
+                                        </option>
+                                    }) }
+                                </select>
+                            </div>
+                        </div>
+                        <div class="control">
+                            <button class="button is-small is-primary is-light" onclick={update}>
+                                { "Update" }
+                            </button>
+                        </div>
+                    </div>
+                }
+                { for status.map(|status| html! {
+                    <p class="is-size-7 has-text-grey">{ status.clone() }</p>
+                }) }
+            </div>
+        }
+    }
+
+    /// The Updates tab: upload, list and delete OTA images.
+    fn view_updates_tab(&self, link: &html::Scope<Self>) -> Html {
+        let on_file = link.batch_callback(|e: Event| {
+            use wasm_bindgen::JsCast;
+
+            e.target()
+                .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+                .and_then(|input| input.files())
+                .and_then(|files| files.get(0))
+                .map(Msg::OtaFile)
+        });
+        let refresh = link.callback(|_| Msg::OtaImages);
+
+        html! {
+            <div class="box">
+                <div class="field">
+                    <label class="label">{ "Upload an OTA image (.ota)" }</label>
+                    <div class="control">
+                        <input class="input" type="file" accept=".ota" onchange={on_file} />
+                    </div>
+                    <p class="help">
+                        { "Its header and digest are checked; devices then find it under Update, if it is newer than what they run." }
+                    </p>
+                </div>
+
+                <table class="table is-fullwidth is-narrow">
+                    <thead>
+                        <tr>
+                            <th>{ "Image" }</th>
+                            <th>{ "Vendor / product" }</th>
+                            <th>{ "Version" }</th>
+                            <th>{ "Size" }</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        { for self.ota_images.iter().map(|image| {
+                            let name = image.name.clone();
+                            let delete = link.callback(move |_| Msg::OtaDelete(name.clone()));
+
+                            html! {
+                                <tr>
+                                    <td>{ image.name.clone() }</td>
+                                    <td>{ format!("0x{:04X} / 0x{:04X}", image.vendor_id, image.product_id) }</td>
+                                    <td>{ format!("{} ({})", image.version_str, image.version) }</td>
+                                    <td>{ format!("{} KiB", image.size / 1024) }</td>
+                                    <td>
+                                        <button class="button is-small is-danger is-light" onclick={delete}>
+                                            { "Delete" }
+                                        </button>
+                                    </td>
+                                </tr>
+                            }
+                        }) }
+                    </tbody>
+                </table>
+
+                <button class="button is-small" onclick={refresh}>{ "Refresh" }</button>
             </div>
         }
     }
@@ -1314,7 +1531,9 @@ fn send_request(link: html::Scope<App>, request: proto::Request) {
                     }
                     // Subscription events flow on the dedicated persistent WS, not
                     // this one-shot connection — ignore any that land here.
-                    proto::Event::HealthReport { .. } | proto::Event::SubscriptionState { .. } => {}
+                    proto::Event::HealthReport { .. }
+                    | proto::Event::SubscriptionState { .. }
+                    | proto::Event::OtaProgress { .. } => {}
                 },
                 proto::ServerMsg::Response { response, .. } => {
                     link.send_message(Msg::Done(response));
@@ -1323,6 +1542,175 @@ fn send_request(link: html::Scope<App>, request: proto::Request) {
             }
         }
     });
+}
+
+/// The size of an upload chunk, before base64.
+const UPLOAD_CHUNK_LEN: u64 = 256 * 1024;
+
+const UPLOAD_NOTICE: &str = "Uploading the OTA image";
+
+fn upload_notice(percent: u8) -> String {
+    format!("{UPLOAD_NOTICE}: {percent}%")
+}
+
+/// Upload an OTA image file in chunks, on its own connection.
+fn send_ota_upload(link: html::Scope<App>, file: web_sys::File) {
+    spawn_local(async move {
+        if let Err(e) = ota_upload(&link, gloo_file::File::from(file)).await {
+            link.send_message(Msg::Error(e));
+        }
+    });
+}
+
+async fn ota_upload(link: &html::Scope<App>, file: gloo_file::File) -> Result<(), String> {
+    use base64::Engine as _;
+
+    let ws = WebSocket::open(WS_URL).map_err(|e| format!("connect failed: {e}"))?;
+    let (mut write, mut read) = ws.split();
+
+    let size = file.size();
+    let mut req_id = 0;
+
+    let begin = proto::Request::OtaUploadBegin { size };
+    let upload_id = match call(&mut write, &mut read, &mut req_id, begin).await? {
+        proto::Response::OtaUploadStarted { upload_id } => upload_id,
+        other => return Err(response_error(other)),
+    };
+
+    let mut offset = 0;
+    while offset < size {
+        let end = (offset + UPLOAD_CHUNK_LEN).min(size);
+        let chunk = gloo_file::futures::read_as_bytes(&file.slice(offset, end))
+            .await
+            .map_err(|e| format!("cannot read the file: {e}"))?;
+
+        let request = proto::Request::OtaUploadChunk {
+            upload_id,
+            offset,
+            data: base64::engine::general_purpose::STANDARD.encode(chunk),
+        };
+        match call(&mut write, &mut read, &mut req_id, request).await? {
+            proto::Response::Ok => (),
+            other => return Err(response_error(other)),
+        }
+
+        offset = end;
+        link.send_message(Msg::OtaUploading((offset * 100 / size.max(1)) as u8));
+    }
+
+    let end = proto::Request::OtaUploadEnd { upload_id };
+    let images = call(&mut write, &mut read, &mut req_id, end).await?;
+    link.send_message(Msg::Done(images));
+
+    Ok(())
+}
+
+/// Send `request` with the next `req_id`, and wait for its response.
+async fn call<W, R>(
+    write: &mut W,
+    read: &mut R,
+    req_id: &mut proto::ReqId,
+    request: proto::Request,
+) -> Result<proto::Response, String>
+where
+    W: futures::Sink<Message, Error = gloo_net::websocket::WebSocketError> + Unpin,
+    R: futures::Stream<Item = Result<Message, gloo_net::websocket::WebSocketError>> + Unpin,
+{
+    *req_id += 1;
+    let json = serde_json::to_string(&proto::ClientMsg {
+        req_id: *req_id,
+        request,
+    })
+    .unwrap();
+    write
+        .send(Message::Text(json))
+        .await
+        .map_err(|e| format!("send failed: {e}"))?;
+
+    while let Some(frame) = read.next().await {
+        let Ok(Message::Text(text)) = frame else {
+            continue;
+        };
+
+        if let Ok(proto::ServerMsg::Response {
+            req_id: id,
+            response,
+        }) = serde_json::from_str(&text)
+        {
+            if id == *req_id {
+                return Ok(response);
+            }
+        }
+    }
+
+    Err("the connection closed".into())
+}
+
+fn response_error(response: proto::Response) -> String {
+    match response {
+        proto::Response::Error { message } => message,
+        other => format!("unexpected response: {other:?}"),
+    }
+}
+
+/// Start the OTA update of a device on its own connection, and follow it there
+/// until the device runs the new image.
+fn send_ota_update(link: html::Scope<App>, node_id: u64, name: String) {
+    spawn_local(async move {
+        let ws = match WebSocket::open(WS_URL) {
+            Ok(ws) => ws,
+            Err(e) => {
+                link.send_message(Msg::Error(format!("connect failed: {e}")));
+                return;
+            }
+        };
+        let (mut write, mut read) = ws.split();
+
+        let client_msg = proto::ClientMsg {
+            req_id: 1,
+            request: proto::Request::OtaUpdate { node_id, name },
+        };
+        let json = serde_json::to_string(&client_msg).unwrap();
+        if let Err(e) = write.send(Message::Text(json)).await {
+            link.send_message(Msg::Error(format!("send failed: {e}")));
+            return;
+        }
+
+        while let Some(Ok(Message::Text(text))) = read.next().await {
+            match serde_json::from_str(&text) {
+                Ok(proto::ServerMsg::Event {
+                    event: proto::Event::OtaProgress { node_id, progress },
+                }) => {
+                    let applied = matches!(progress, proto::OtaProgress::Applied { .. });
+                    link.send_message(Msg::OtaProgress(node_id, progress));
+                    if applied {
+                        return;
+                    }
+                }
+                Ok(proto::ServerMsg::Response {
+                    response: proto::Response::Error { message },
+                    ..
+                }) => {
+                    link.send_message(Msg::Error(message));
+                    return;
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
+/// A status line for a stage of an OTA update.
+fn ota_progress_text(progress: &proto::OtaProgress) -> String {
+    match progress {
+        proto::OtaProgress::Offered { name } => format!("The device asked; offered {name}"),
+        proto::OtaProgress::NotOffered => {
+            "The device asked, but the image is not an update for it".into()
+        }
+        proto::OtaProgress::Downloading { percent } => format!("Downloading: {percent}%"),
+        proto::OtaProgress::Applying { version } => format!("Applying version {version}…"),
+        proto::OtaProgress::Applied { version } => format!("Updated: runs version {version}"),
+    }
 }
 
 /// Fire-and-forget a `Cancel` on its own short-lived WS connection. The running
@@ -1360,6 +1748,15 @@ fn input_value(e: InputEvent) -> String {
     e.target()
         .and_then(|t| t.dyn_into::<HtmlInputElement>().ok())
         .map(|i| i.value())
+        .unwrap_or_default()
+}
+
+fn select_value(e: Event) -> String {
+    use wasm_bindgen::JsCast;
+    use web_sys::HtmlSelectElement;
+    e.target()
+        .and_then(|t| t.dyn_into::<HtmlSelectElement>().ok())
+        .map(|s| s.value())
         .unwrap_or_default()
 }
 

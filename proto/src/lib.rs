@@ -123,6 +123,28 @@ pub enum Request {
     /// [`Response::Ok`]; the cancelled vertical itself replies
     /// [`Response::Cancelled`].
     Cancel,
+    /// List the stored OTA images. Answered with [`Response::OtaImages`].
+    OtaImages,
+    /// Start uploading an OTA image file (`.ota`) of `size` bytes, in chunks on
+    /// this connection. Answered with [`Response::OtaUploadStarted`].
+    OtaUploadBegin { size: u64 },
+    /// The next chunk of upload `upload_id`, at `offset`, base64-encoded; send
+    /// the next once this one is answered with [`Response::Ok`]. The file is
+    /// checked as it arrives: a bad one fails the upload.
+    OtaUploadChunk {
+        upload_id: u32,
+        offset: u64,
+        data: String,
+    },
+    /// Finish upload `upload_id`: check the file's payload digest and store it.
+    /// Answered with [`Response::OtaImages`].
+    OtaUploadEnd { upload_id: u32 },
+    /// Delete stored OTA image `name`. Answered with [`Response::OtaImages`].
+    OtaDelete { name: String },
+    /// Update a stored device to OTA image `name`: allow it that image, and
+    /// announce us to it as its OTA Provider. Answered with [`Response::Ok`] once
+    /// announced; progress follows as [`Event::OtaProgress`] frames.
+    OtaUpdate { node_id: u64, name: String },
 }
 
 /// A reply to a [`Request`].
@@ -162,6 +184,10 @@ pub enum Response {
     /// [`Event::HealthReport`] / [`Event::SubscriptionState`] frames. `already`
     /// is `true` if the device was already subscribed (the request was a no-op).
     Subscribed { node_id: u64, already: bool },
+    /// The stored OTA images.
+    OtaImages { images: Vec<OtaImageInfo> },
+    /// An upload started by [`Request::OtaUploadBegin`]; send its chunks.
+    OtaUploadStarted { upload_id: u32 },
     /// The request failed before producing a result.
     Error { message: String },
 }
@@ -199,6 +225,38 @@ pub enum Event {
         node_id: u64,
         state: SubscriptionState,
     },
+    /// How an update started by [`Request::OtaUpdate`] goes.
+    OtaProgress { node_id: u64, progress: OtaProgress },
+}
+
+/// The stages of an OTA update, as the provider sees them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+pub enum OtaProgress {
+    /// The device asked for an update and was offered `name`.
+    Offered { name: String },
+    /// The device asked for an update and was told there is none for it.
+    NotOffered,
+    /// The device downloaded `percent` of its image.
+    Downloading { percent: u8 },
+    /// The device was told to apply `version`.
+    Applying { version: u32 },
+    /// The device reports that it runs `version`.
+    Applied { version: u32 },
+}
+
+/// A stored OTA image, as its header describes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OtaImageInfo {
+    pub name: String,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub version: u32,
+    pub version_str: String,
+    pub min_applicable_version: Option<u32>,
+    pub max_applicable_version: Option<u32>,
+    pub release_notes_url: Option<String>,
+    pub size: u64,
 }
 
 /// The connection state of a live health subscription (mirrors core's `SubState`).

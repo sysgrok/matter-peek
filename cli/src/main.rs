@@ -22,7 +22,7 @@ use core::pin::pin;
 use std::net::{SocketAddr, UdpSocket};
 use std::process::ExitCode;
 
-use embassy_futures::select::{select, select3, Either, Either3};
+use embassy_futures::select::{select3, Either3};
 
 use log::{error, info};
 
@@ -37,6 +37,8 @@ use rs_matter::Matter;
 use static_cell::StaticCell;
 
 use matter_peek_core::controller::FabricIdentity;
+use matter_peek_core::ota::OtaProvider;
+use matter_peek_core::subscribe::Reports;
 use matter_peek_core::{Controller, DiagSet, FabricPolicy, LogIntent};
 
 const DEFAULT_PASSCODE: u32 = 20202021;
@@ -446,7 +448,14 @@ async fn flow<'a, C: rs_matter::crypto::Crypto>(
         // local that the pinned subscription future would outlive on drop).
         let update_count = std::rc::Rc::new(core::cell::Cell::new(0usize));
         let counter = update_count.clone();
+
+        // Reports reach the subscription through our node's responder.
+        let reports = Reports::new();
+        let ota = OtaProvider::new((), |_| {});
+        let node = controller.run_node(&reports, &ota);
+
         let sub = controller.subscribe_health(
+            &reports,
             outcome.handle,
             DiagSet::ALL,
             move |health| {
@@ -457,13 +466,14 @@ async fn flow<'a, C: rs_matter::crypto::Crypto>(
             |state| info!("subscription state: {state:?}"),
         );
         let timer = embassy_time::Timer::after(embassy_time::Duration::from_secs(SUBSCRIBE_SECS));
-        match select(pin!(sub), pin!(timer)).await {
-            Either::First(r) => {
+        match select3(pin!(sub), pin!(timer), pin!(node)).await {
+            Either3::First(r) => {
                 if let Err(e) = r {
                     error!("subscription ended early: {e:?}");
                 }
             }
-            Either::Second(()) => info!(
+            Either3::Third(r) => error!("controller node ended: {r:?}"),
+            Either3::Second(()) => info!(
                 "subscription window elapsed ({} update(s))",
                 update_count.get()
             ),

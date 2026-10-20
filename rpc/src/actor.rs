@@ -28,7 +28,11 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use log::{error, info, warn};
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+
 use rs_matter::crypto::{default_crypto, Crypto};
+use rs_matter::dm::clusters::ota_prov::OtaRequestorId;
 use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::persist::DirKvBlobStore;
@@ -41,12 +45,16 @@ use static_cell::StaticCell;
 
 use matter_peek_core::ca::{CaTier, ControllerCa};
 use matter_peek_core::controller::FabricIdentity;
+use matter_peek_core::node;
+use matter_peek_core::ota::{OtaEvent, OtaProvider, OtaStore as _, OtaVerifier};
 use matter_peek_core::persist::{kv_buf, ControllerStore};
+use matter_peek_core::subscribe::Reports;
 use matter_peek_core::{Controller, DeviceHandle, DiagSet, LogIntent};
 
 use matter_peek_proto as proto;
 
 use crate::convert;
+use crate::ota::{DirOtaStore, PartialImage};
 
 /// The device NodeID the controller assigns to the **next** newly-commissioned
 /// device. Persistent mode allocates a fresh id per device (Phase 1: a simple
@@ -104,7 +112,7 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
     let dir = store_dir();
     info!("actor: persistence store at {}", dir.display());
     let kv_buf = kv_buf();
-    let store = ControllerStore::new(DirKvBlobStore::new(dir), &kv_buf);
+    let store = ControllerStore::new(DirKvBlobStore::new(dir.clone()), &kv_buf);
     if let Err(e) = matter.startup(store.kv()) {
         error!("actor: startup failed: {e:?} (continuing with fresh state)");
     }
@@ -142,6 +150,17 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
 
     let controller = Controller::new(matter, &crypto);
 
+    // Our OTA Provider: the devices on our fabric may ask it for updates.
+    if let Err(e) = node::allow_ota_requestors(matter, &store, fab_idx) {
+        warn!("actor: cannot open our OTA Provider to the devices: {e:?}");
+    }
+
+    let ota_listeners = Rc::new(RefCell::new(Vec::new()));
+    let ota = OtaProvider::new(
+        DirOtaStore::new(dir.join("ota")),
+        ota_events(ota_listeners.clone()),
+    );
+
     // Channel over which the command handler hands new subscription *jobs* to the
     // concurrent driver. Jobs carry only owned data, so this is `'static` and can
     // be declared before `ctx`. Unbounded so `Subscribe` never blocks the loop.
@@ -149,12 +168,18 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
 
     let ctx = ActorCtx {
         matter,
+        crypto: &crypto,
         controller,
         ca,
         fab_idx,
         store,
         cancel,
         subs: RefCell::new(HashMap::new()),
+        reports: Reports::new(),
+        ota,
+        ota_listeners,
+        uploads: RefCell::new(HashMap::new()),
+        next_upload_id: Cell::new(1),
     };
 
     // Four concurrent arms, for the actor's lifetime:
@@ -174,12 +199,22 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
     let mut loop_ = pin!(command_loop(rx, &ctx, &sub_submit));
     let mut subs = pin!(run_subscriptions(sub_recv, &ctx));
     let mut mdns = pin!(ctx.controller.run_mdns_backend());
+    // What devices reach on us: our OTA Provider and the subscription reports.
+    let mut node = pin!(ctx.controller.run_node(&ctx.reports, &ctx.ota));
 
-    match select4(&mut pump, &mut loop_, &mut subs, &mut mdns).await {
+    match select4(
+        &mut pump,
+        &mut loop_,
+        &mut subs,
+        select(&mut mdns, &mut node),
+    )
+    .await
+    {
         Either4::First(r) => error!("actor: transport pump exited: {r:?}"),
         Either4::Second(()) => info!("actor: command channel closed, exiting"),
         Either4::Third(()) => info!("actor: subscription driver exited"),
-        Either4::Fourth(r) => error!("actor: mDNS backend exited: {r:?}"),
+        Either4::Fourth(Either::First(r)) => error!("actor: mDNS backend exited: {r:?}"),
+        Either4::Fourth(Either::Second(r)) => error!("actor: controller node exited: {r:?}"),
     }
 }
 
@@ -231,6 +266,7 @@ async fn run_subscription<C: Crypto>(job: SubJob, ctx: &ActorCtx<'_, C>) {
     let out_state = out.clone();
 
     let subscription = ctx.controller.subscribe_health(
+        &ctx.reports,
         handle,
         DiagSet::ALL,
         move |health| {
@@ -281,6 +317,7 @@ async fn run_subscription<C: Crypto>(job: SubJob, ctx: &ActorCtx<'_, C>) {
 /// Shared state every command handler operates on.
 struct ActorCtx<'a, C: Crypto> {
     matter: &'a Matter<'a>,
+    crypto: &'a C,
     controller: Controller<'a, C>,
     ca: ControllerCa,
     fab_idx: NonZeroU8,
@@ -293,6 +330,33 @@ struct ActorCtx<'a, C: Crypto> {
     /// `select` complete, dropping the `subscribe_health` future and tearing the
     /// subscription down. Present ⇒ that device is being watched.
     subs: RefCell<HashMap<u64, async_channel::Sender<()>>>,
+    /// Routes the reports of the live subscriptions to them.
+    reports: Reports,
+    /// Our OTA Provider, over the images in the data directory.
+    ota: OtaProvider<DirOtaStore, Box<dyn Fn(OtaEvent)>>,
+    /// The connections following OTA updates.
+    ota_listeners: Rc<RefCell<Vec<OtaListener>>>,
+    /// The OTA image uploads in progress, by ID.
+    uploads: RefCell<HashMap<u32, Upload<'a, C>>>,
+    next_upload_id: Cell<u32>,
+}
+
+/// An OTA image file being uploaded in chunks: written as it arrives, and
+/// checked as it is.
+struct Upload<'a, C: Crypto + 'a> {
+    verifier: OtaVerifier<C::Hash<'a>>,
+    partial: PartialImage,
+    size: u64,
+    received: u64,
+    /// The connection uploading it; the upload is dropped once it closes.
+    out: async_channel::Sender<proto::ServerMsg>,
+}
+
+/// A connection following the OTA update of a device.
+struct OtaListener {
+    node_id: u64,
+    name: String,
+    out: async_channel::Sender<proto::ServerMsg>,
 }
 
 /// A subscription request submitted to the concurrent driver. Carries only owned
@@ -359,7 +423,308 @@ async fn service<C: Crypto>(
             ctx.cancel.set(false);
             proto::Response::Ok
         }
+        proto::Request::OtaImages => ota_images(ctx),
+        proto::Request::OtaUploadBegin { size } => ota_upload_begin(cmd, ctx, *size),
+        proto::Request::OtaUploadChunk {
+            upload_id,
+            offset,
+            data,
+        } => ota_upload_chunk(ctx, *upload_id, *offset, data),
+        proto::Request::OtaUploadEnd { upload_id } => ota_upload_end(ctx, *upload_id),
+        proto::Request::OtaDelete { name } => ota_delete(ctx, name),
+        proto::Request::OtaUpdate { node_id, name } => ota_update(cmd, ctx, *node_id, name).await,
     }
+}
+
+fn ota_images<C: Crypto>(ctx: &ActorCtx<'_, C>) -> proto::Response {
+    proto::Response::OtaImages {
+        images: ctx
+            .ota
+            .store()
+            .images()
+            .into_iter()
+            .map(convert::ota_image)
+            .collect(),
+    }
+}
+
+/// The largest upload chunk taken, decoded.
+const MAX_UPLOAD_CHUNK_LEN: usize = 4 * 1024 * 1024;
+
+fn ota_upload_begin<'a, C: Crypto>(
+    cmd: &Command,
+    ctx: &ActorCtx<'a, C>,
+    size: u64,
+) -> proto::Response {
+    let Some(out) = cmd.out.clone() else {
+        return proto::Response::Error {
+            message: "uploads require a streaming connection".into(),
+        };
+    };
+
+    drop_closed_uploads(ctx);
+
+    let crypto: &'a C = ctx.crypto;
+    let upload_id = ctx.next_upload_id.get();
+    ctx.next_upload_id.set(upload_id.wrapping_add(1));
+
+    let upload = crypto.hash().and_then(|hasher| {
+        Ok(Upload {
+            verifier: OtaVerifier::new(hasher),
+            partial: ctx.ota.store().begin(upload_id)?,
+            size,
+            received: 0,
+            out,
+        })
+    });
+
+    match upload {
+        Ok(upload) => {
+            ctx.uploads.borrow_mut().insert(upload_id, upload);
+            proto::Response::OtaUploadStarted { upload_id }
+        }
+        Err(e) => proto::Response::Error {
+            message: format!("cannot start the upload: {:?}", e.code()),
+        },
+    }
+}
+
+fn ota_upload_chunk<C: Crypto>(
+    ctx: &ActorCtx<'_, C>,
+    upload_id: u32,
+    offset: u64,
+    data: &str,
+) -> proto::Response {
+    let chunk = match BASE64.decode(data) {
+        Ok(chunk) if chunk.len() <= MAX_UPLOAD_CHUNK_LEN => chunk,
+        Ok(_) => return ota_upload_fail(ctx, upload_id, "a chunk is too big".into()),
+        Err(e) => return ota_upload_fail(ctx, upload_id, format!("a chunk is not base64: {e}")),
+    };
+
+    let mut uploads = ctx.uploads.borrow_mut();
+    let Some(upload) = uploads.get_mut(&upload_id) else {
+        return proto::Response::Error {
+            message: format!("no upload {upload_id}"),
+        };
+    };
+
+    if offset != upload.received {
+        let message = format!("expected the chunk at {}, got {offset}", upload.received);
+        drop(uploads);
+        return ota_upload_fail(ctx, upload_id, message);
+    }
+
+    let taken = if upload.received + chunk.len() as u64 > upload.size {
+        Err("more data than announced".to_string())
+    } else if let Err(e) = upload.verifier.update(&chunk) {
+        Err(format!("not a valid OTA image: {:?}", e.code()))
+    } else if let Err(e) = upload.partial.write(&chunk) {
+        Err(format!("cannot write the image: {:?}", e.code()))
+    } else {
+        upload.received += chunk.len() as u64;
+        Ok(())
+    };
+
+    drop(uploads);
+
+    match taken {
+        Ok(()) => proto::Response::Ok,
+        Err(message) => ota_upload_fail(ctx, upload_id, message),
+    }
+}
+
+fn ota_upload_end<C: Crypto>(ctx: &ActorCtx<'_, C>, upload_id: u32) -> proto::Response {
+    let Some(upload) = ctx.uploads.borrow_mut().remove(&upload_id) else {
+        return proto::Response::Error {
+            message: format!("no upload {upload_id}"),
+        };
+    };
+
+    let store = ctx.ota.store();
+
+    if upload.received != upload.size {
+        store.discard(upload.partial);
+        return proto::Response::Error {
+            message: format!(
+                "the upload ended at {} of {} bytes",
+                upload.received, upload.size
+            ),
+        };
+    }
+
+    let image = match upload.verifier.finish() {
+        Ok(image) => image,
+        Err(e) => {
+            store.discard(upload.partial);
+            return proto::Response::Error {
+                message: format!("not a valid OTA image: {:?}", e.code()),
+            };
+        }
+    };
+
+    match store.finish(upload.partial, &image).map(|()| image) {
+        Ok(image) => {
+            info!(
+                "actor: stored OTA image {} ({})",
+                image.name, image.version_str
+            );
+            ota_images(ctx)
+        }
+        Err(e) => proto::Response::Error {
+            message: format!("cannot store the OTA image: {:?}", e.code()),
+        },
+    }
+}
+
+/// Drop upload `upload_id` and its partial file, answering with `message`.
+fn ota_upload_fail<C: Crypto>(
+    ctx: &ActorCtx<'_, C>,
+    upload_id: u32,
+    message: String,
+) -> proto::Response {
+    if let Some(upload) = ctx.uploads.borrow_mut().remove(&upload_id) {
+        ctx.ota.store().discard(upload.partial);
+    }
+
+    proto::Response::Error { message }
+}
+
+/// Drop the uploads of the connections that closed.
+fn drop_closed_uploads<C: Crypto>(ctx: &ActorCtx<'_, C>) {
+    let mut uploads = ctx.uploads.borrow_mut();
+
+    let closed: Vec<u32> = uploads
+        .iter()
+        .filter(|(_, upload)| upload.out.is_closed())
+        .map(|(id, _)| *id)
+        .collect();
+
+    for id in closed {
+        if let Some(upload) = uploads.remove(&id) {
+            warn!("actor: dropping OTA upload {id}: its connection closed");
+            ctx.ota.store().discard(upload.partial);
+        }
+    }
+}
+
+fn ota_delete<C: Crypto>(ctx: &ActorCtx<'_, C>, name: &str) -> proto::Response {
+    match ctx.ota.store().remove(name) {
+        Ok(()) => ota_images(ctx),
+        Err(e) => proto::Response::Error {
+            message: format!("cannot delete OTA image {name}: {:?}", e.code()),
+        },
+    }
+}
+
+/// Allow the device image `name`, follow its update on the connection, and
+/// announce us to it as its OTA Provider.
+async fn ota_update<C: Crypto>(
+    cmd: &Command,
+    ctx: &ActorCtx<'_, C>,
+    node_id: u64,
+    name: &str,
+) -> proto::Response {
+    let Some(dev) = lookup_stored(ctx, node_id) else {
+        return proto::Response::Error {
+            message: format!("no stored device with node_id 0x{node_id:016x}"),
+        };
+    };
+
+    if !ctx
+        .ota
+        .store()
+        .images()
+        .iter()
+        .any(|image| image.name == name)
+    {
+        return proto::Response::Error {
+            message: format!("no OTA image {name}"),
+        };
+    }
+
+    // Before the announcement: the device asks for the update right away.
+    ctx.ota.allow(
+        OtaRequestorId {
+            fab_idx: dev.handle.fabric_index,
+            node_id,
+        },
+        name,
+    );
+
+    if let Some(out) = cmd.out.clone() {
+        let mut listeners = ctx.ota_listeners.borrow_mut();
+        listeners.retain(|listener| listener.node_id != node_id);
+        listeners.push(OtaListener {
+            node_id,
+            name: name.to_string(),
+            out,
+        });
+    }
+
+    match ctx.controller.announce_ota_provider(dev.handle).await {
+        Ok(()) => proto::Response::Ok,
+        Err(e) => proto::Response::Error {
+            message: format!("cannot announce us to the device: {:?}", e.code()),
+        },
+    }
+}
+
+/// Send each OTA event to the connections following that update.
+fn ota_events(listeners: Rc<RefCell<Vec<OtaListener>>>) -> Box<dyn Fn(OtaEvent)> {
+    Box::new(move |event| {
+        let mut listeners = listeners.borrow_mut();
+        listeners.retain(|listener| !listener.out.is_closed());
+
+        let (followers, progress): (Vec<&OtaListener>, _) = match event {
+            OtaEvent::Offered { node, image } => (
+                listeners
+                    .iter()
+                    .filter(|l| l.node_id == node.node_id)
+                    .collect(),
+                proto::OtaProgress::Offered { name: image },
+            ),
+            OtaEvent::NotOffered { node } => (
+                listeners
+                    .iter()
+                    .filter(|l| l.node_id == node.node_id)
+                    .collect(),
+                proto::OtaProgress::NotOffered,
+            ),
+            OtaEvent::Downloaded {
+                image,
+                offset,
+                size,
+            } => (
+                listeners.iter().filter(|l| l.name == image).collect(),
+                proto::OtaProgress::Downloading {
+                    percent: (offset as u128 * 100 / size.max(1) as u128) as u8,
+                },
+            ),
+            OtaEvent::Applying { node, version } => (
+                listeners
+                    .iter()
+                    .filter(|l| l.node_id == node.node_id)
+                    .collect(),
+                proto::OtaProgress::Applying { version },
+            ),
+            OtaEvent::Applied { node, version } => (
+                listeners
+                    .iter()
+                    .filter(|l| l.node_id == node.node_id)
+                    .collect(),
+                proto::OtaProgress::Applied { version },
+            ),
+        };
+
+        for listener in followers {
+            let _ = listener.out.try_send(proto::ServerMsg::Event {
+                event: proto::Event::OtaProgress {
+                    node_id: listener.node_id,
+                    progress: progress.clone(),
+                },
+            });
+        }
+    })
 }
 
 /// Browse for commissionable devices and return a pick-list. Uses the shared
