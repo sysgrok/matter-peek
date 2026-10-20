@@ -19,7 +19,7 @@ fn main() {
     //   ws_client [URL] discover [setup_code]
     //   ws_client [URL] list
     //   ws_client [URL] sync
-    //   ws_client [URL] peek <node_id_hex_or_dec>
+    //   ws_client [URL] peek <node_id_hex_or_dec> [logs]
     //   ws_client [URL] identify <node_id> [secs]
     //   ws_client [URL] subscribe <node_id> [secs]      (live health stream)
     //   ws_client [URL] settags <node_id> <comma,separated,tags>
@@ -54,7 +54,7 @@ fn main() {
         "cancel" => proto::Request::Cancel,
         "peek" => proto::Request::PeekDevice {
             node_id: parse_node(arg3.as_deref().unwrap_or("0")),
-            with_logs: false,
+            with_logs: args.next().as_deref() == Some("logs"),
         },
         "identify" => proto::Request::Identify {
             node_id: parse_node(arg3.as_deref().unwrap_or("0")),

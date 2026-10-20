@@ -839,11 +839,17 @@ async fn peek_device<C: Crypto>(
 
     let health = ctx.controller.read_health(dev.handle, DiagSet::ALL).await;
     let crash_log_bytes = if with_logs {
-        ctx.controller
+        match ctx
+            .controller
             .retrieve_logs(dev.handle, LogIntent::CrashLogs)
             .await
-            .ok()
-            .map(|b| b.len())
+        {
+            Ok(log) => Some(log.len()),
+            Err(e) => {
+                warn!("peek node 0x{node_id:016x}: no crash logs: {e:?}");
+                None
+            }
+        }
     } else {
         None
     };

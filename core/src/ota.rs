@@ -111,11 +111,20 @@ impl OtaImage {
         }
     }
 
-    /// The file name of an image: one per vendor, product and version, e.g.
-    /// `fff1-8001-2.ota`. It is 8 to 32 characters, as an update token must be.
+    /// The file name of an image, e.g. `fff1-8001-2-0c090f.ota`: its vendor,
+    /// product and version, and the start of its payload digest, so that two
+    /// builds of the same version don't replace each other. It is at most 31
+    /// characters, within the 8 to 32 an update token may have.
     pub fn file_name(header: &OtaImageHeader) -> String {
+        let digest: String = header
+            .image_digest
+            .iter()
+            .take(3)
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+
         format!(
-            "{:04x}-{:04x}-{}.ota",
+            "{:04x}-{:04x}-{}-{digest}.ota",
             header.vendor_id, header.product_id, header.software_version
         )
     }
@@ -616,9 +625,14 @@ mod tests {
 
     /// A valid image file of `version` for VID 0xFFF1 / PID 0x8001.
     fn image_file(version: u32, version_str: &str) -> Vec<u8> {
+        image_file_with(version, version_str, PAYLOAD)
+    }
+
+    /// [`image_file`], with `payload`.
+    fn image_file_with(version: u32, version_str: &str, payload: &[u8]) -> Vec<u8> {
         let crypto = test_only_crypto();
         let mut hasher = crypto.hash().unwrap();
-        hasher.update(PAYLOAD).unwrap();
+        hasher.update(payload).unwrap();
         let mut digest = CryptoSensitive::<HASH_LEN>::new();
         hasher.finish(&mut digest).unwrap();
 
@@ -627,7 +641,7 @@ mod tests {
             product_id: 0x8001,
             software_version: version,
             software_version_str: version_str,
-            payload_size: PAYLOAD.len() as u64,
+            payload_size: payload.len() as u64,
             min_applicable_software_version: None,
             max_applicable_software_version: None,
             release_notes_url: None,
@@ -638,7 +652,7 @@ mod tests {
         let mut file = vec![0; 512];
         let len = header.encode(&mut file).unwrap();
         file.truncate(len);
-        file.extend_from_slice(PAYLOAD);
+        file.extend_from_slice(payload);
 
         file
     }
@@ -669,7 +683,7 @@ mod tests {
         let file = image_file(2, "climanode-espidf-c6-8-0.0.2");
         let image = verify(test_only_crypto(), &file).unwrap();
 
-        assert_eq!(image.name, "fff1-8001-2.ota");
+        assert_eq!(image.name, "fff1-8001-2-0c090f.ota");
         assert_eq!(image.version_str, "climanode-espidf-c6-8-0.0.2");
         assert_eq!(image.size, file.len() as u64);
 
@@ -682,6 +696,23 @@ mod tests {
     }
 
     #[test]
+    fn builds_of_the_same_version_are_named_apart() {
+        let c6_8 = verify(test_only_crypto(), &image_file(2, "c6-8")).unwrap();
+        let c6_4 = verify(
+            test_only_crypto(),
+            &image_file_with(2, "c6-4", b"other build"),
+        )
+        .unwrap();
+
+        assert_ne!(c6_8.name, c6_4.name);
+        assert!(c6_4.name.starts_with("fff1-8001-2-"));
+
+        // The longest name still fits an update token.
+        let latest = verify(test_only_crypto(), &image_file(u32::MAX, "x")).unwrap();
+        assert!(latest.name.len() <= 32);
+    }
+
+    #[test]
     fn verifies_in_chunks_of_any_size() {
         let file = image_file(2, "2.0");
         let crypto = test_only_crypto();
@@ -691,7 +722,7 @@ mod tests {
             for piece in file.chunks(chunk) {
                 verifier.update(piece).unwrap();
             }
-            assert_eq!(verifier.finish().unwrap().name, "fff1-8001-2.ota");
+            assert_eq!(verifier.finish().unwrap().name, "fff1-8001-2-0c090f.ota");
         }
 
         // Too much data is refused as it arrives.
@@ -719,11 +750,11 @@ mod tests {
         // Not before the user allows it.
         assert_eq!(query(&provider, NODE, 0x8001, 1), None);
 
-        provider.allow(NODE, "fff1-8001-2.ota");
+        provider.allow(NODE, "fff1-8001-2-0c090f.ota");
 
         assert_eq!(
             query(&provider, NODE, 0x8001, 1),
-            Some((2, "2.0".into(), "fff1-8001-2.ota".into()))
+            Some((2, "2.0".into(), "fff1-8001-2-0c090f.ota".into()))
         );
 
         // Not to another node, another product, or a node already running it.
@@ -733,7 +764,7 @@ mod tests {
 
         assert!(events.borrow().contains(&OtaEvent::Offered {
             node: NODE,
-            image: "fff1-8001-2.ota".into(),
+            image: "fff1-8001-2-0c090f.ota".into(),
         }));
         assert!(events
             .borrow()
@@ -747,8 +778,8 @@ mod tests {
             events.borrow_mut().push(event)
         });
 
-        provider.allow(NODE, "fff1-8001-2.ota");
-        block_on(provider.applied(NODE, b"fff1-8001-2.ota", 2));
+        provider.allow(NODE, "fff1-8001-2-0c090f.ota");
+        block_on(provider.applied(NODE, b"fff1-8001-2-0c090f.ota", 2));
 
         assert_eq!(provider.allowed(NODE), None);
         assert_eq!(
@@ -768,7 +799,7 @@ mod tests {
             events.borrow_mut().push(event)
         });
 
-        let name = b"fff1-8001-2.ota";
+        let name = b"fff1-8001-2-0c090f.ota";
         assert_eq!(block_on(provider.size(name)), Some(file.len() as u64));
         assert_eq!(block_on(provider.size(b"none.ota")), None);
 
@@ -788,7 +819,7 @@ mod tests {
         assert_eq!(
             events.last(),
             Some(&OtaEvent::Downloaded {
-                image: "fff1-8001-2.ota".into(),
+                image: "fff1-8001-2-0c090f.ota".into(),
                 offset: file.len() as u64,
                 size: file.len() as u64,
             })
