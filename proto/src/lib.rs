@@ -59,7 +59,8 @@ pub enum Request {
     RunVertical {
         /// e.g. `"[::1]:5540"`.
         peer_addr: String,
-        passcode: u32,
+        /// The device's passcode, manual pairing code or QR code payload.
+        setup_code: String,
         policy: FabricPolicy,
     },
     /// Browse the local network for commissionable devices via mDNS, returning a
@@ -67,6 +68,10 @@ pub enum Request {
     /// when several commissionable devices are present).
     Discover {
         discriminator: Option<u16>,
+        /// Narrows to the device of this setup code, unless `discriminator` is
+        /// given. A bare passcode does not narrow.
+        #[serde(default)]
+        setup_code: Option<String>,
         /// Stop after this many matches (the UI caps the list).
         max: u8,
     },
@@ -305,6 +310,7 @@ pub enum FabricPolicy {
 /// Identifies a commissioned device on our fabric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceHandle {
+    /// Our fabric, in the controller's fabric table.
     pub fabric_index: u8,
     pub node_id: u64,
 }

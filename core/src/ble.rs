@@ -239,7 +239,7 @@ where
 
     Ok(CommissionOutcome {
         handle: DeviceHandle {
-            fabric_index: phase1.fabric_index,
+            fabric_index: controller_fab_idx,
             node_id: phase1.device_node_id,
         },
         policy,

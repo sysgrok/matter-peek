@@ -16,7 +16,7 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // Usage:
-    //   ws_client [URL] discover
+    //   ws_client [URL] discover [setup_code]
     //   ws_client [URL] list
     //   ws_client [URL] peek <node_id_hex_or_dec>
     //   ws_client [URL] identify <node_id> [secs]
@@ -26,8 +26,10 @@ fn main() {
     //   ws_client [URL] ota-upload <file.ota>
     //   ws_client [URL] ota-delete <name>
     //   ws_client [URL] ota-update <node_id> <name>   (follows the update)
-    //   ws_client [URL] persistent <addr> [passcode]   (persistent commission)
-    //   ws_client [URL] <addr> [passcode]               (ephemeral vertical)
+    //   ws_client [URL] persistent <addr> [setup_code] (persistent commission)
+    //   ws_client [URL] <addr> [setup_code]             (ephemeral vertical)
+    //
+    // A setup code is a passcode, a manual pairing code or an MT: QR code payload.
     let mut args = std::env::args().skip(1);
     let url = args.next().unwrap_or_else(|| "ws://127.0.0.1:8087".into());
     let arg2 = args.next().unwrap_or_else(|| "[::1]:5540".into());
@@ -43,6 +45,7 @@ fn main() {
     let request = match arg2.as_str() {
         "discover" => proto::Request::Discover {
             discriminator: None,
+            setup_code: arg3.clone(),
             max: 16,
         },
         "list" => proto::Request::ListDevices,
@@ -90,12 +93,12 @@ fn main() {
         },
         "persistent" => proto::Request::RunVertical {
             peer_addr: arg3.clone().unwrap_or_else(|| "[::1]:5540".into()),
-            passcode: args.next().and_then(|s| s.parse().ok()).unwrap_or(20202021),
+            setup_code: args.next().unwrap_or_else(|| "20202021".into()),
             policy: proto::FabricPolicy::Persistent,
         },
         addr => proto::Request::RunVertical {
             peer_addr: addr.to_string(),
-            passcode: arg3.and_then(|s| s.parse().ok()).unwrap_or(20202021),
+            setup_code: arg3.unwrap_or_else(|| "20202021".into()),
             policy: proto::FabricPolicy::Ephemeral,
         },
     };

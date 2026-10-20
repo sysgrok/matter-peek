@@ -46,6 +46,7 @@ pub mod model;
 pub mod node;
 pub mod ota;
 pub mod persist;
+pub mod setup_code;
 pub mod subscribe;
 pub mod vendors;
 

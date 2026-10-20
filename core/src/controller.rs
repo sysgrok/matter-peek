@@ -272,7 +272,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
 
         Ok(CommissionFlow::Done(CommissionOutcome {
             handle: DeviceHandle {
-                fabric_index: phase1.fabric_index,
+                fabric_index: controller_fab_idx,
                 node_id: phase1.device_node_id,
             },
             policy,
@@ -559,21 +559,22 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// controller's NOC. This is the `Ephemeral` policy's teardown and also the
     /// orphaned-fabric cleanup primitive.
     ///
-    /// `dev.fabric_index` is the device-local fabric slot the device assigned to
-    /// us during commissioning (carried on the [`DeviceHandle`]); a controller is
-    /// allowed to pass its own `FabricIndex` to `RemoveFabric`.
+    /// `RemoveFabric` takes the device's own index of our fabric, which is
+    /// unrelated to ours, so it is read first (`CurrentFabricIndex`).
     pub async fn decommission(&self, dev: DeviceHandle) -> Result<(), Error> {
+        let device_fab_idx = self.device_fabric_index(dev).await?;
+
         let exchange =
             Exchange::initiate(self.matter, self.crypto, dev.fabric_index, dev.node_id).await?;
 
         exchange
             .operational_credentials()
-            .remove_fabric(0, |req| req.fabric_index(dev.fabric_index.get())?.end())
+            .remove_fabric(0, |req| req.fabric_index(device_fab_idx)?.end())
             .await?
             .complete()
             .await?;
 
-        info!("decommissioned: removed fabric index {}", dev.fabric_index);
+        info!("decommissioned: removed device fabric index {device_fab_idx}");
 
         // NOTE: the stale session is dropped by the *caller*, not here. This
         // exchange queues a trailing close on that session for the transport
@@ -581,6 +582,37 @@ impl<'a, C: Crypto> Controller<'a, C> {
         // failure for it. See `forget_sessions`.
 
         Ok(())
+    }
+
+    /// The device's index of our fabric.
+    async fn device_fabric_index(&self, dev: DeviceHandle) -> Result<u8, Error> {
+        let exchange =
+            Exchange::initiate(self.matter, self.crypto, dev.fabric_index, dev.node_id).await?;
+
+        let mut chunk = exchange
+            .read_with(|msg| {
+                msg.attr_requests()?
+                    .operational_credentials_read()
+                    .current_fabric_index(0)?
+                    .end()?
+                    .fabric_filtered(true)?
+                    .end()
+            })
+            .await?;
+
+        let mut fab_idx = None;
+        for (_endpoint, result) in chunk
+            .response()?
+            .operational_credentials_read_resp()
+            .current_fabric_index()
+        {
+            fab_idx = Some(result?);
+        }
+        while let Some(next) = chunk.complete().await? {
+            chunk = next;
+        }
+
+        fab_idx.ok_or_else(|| ErrorCode::NotFound.into())
     }
 
     /// Drop any secure session we still hold with `dev`, returning how many were

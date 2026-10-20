@@ -109,6 +109,10 @@ fn tool_list(caps: Caps) -> Vec<Value> {
                         "type": "integer",
                         "description": "Optional 12-bit discriminator to narrow to one device."
                     },
+                    "setup_code": {
+                        "type": "string",
+                        "description": "Optional manual pairing code or MT: QR code payload to narrow to its device."
+                    },
                     "max": { "type": "integer", "description": "Max devices to return (default 16)." }
                 }
             }),
@@ -160,7 +164,7 @@ fn tool_list(caps: Caps) -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "peer_addr": { "type": "string", "description": "e.g. \"192.168.1.20:5540\" or \"[fe80::1]:5540\"." },
-                    "passcode": { "type": "integer", "description": "Setup passcode (default 20202021)." },
+                    "setup_code": { "type": "string", "description": "Setup passcode, manual pairing code or MT: QR code payload (default 20202021)." },
                     "persistent": { "type": "boolean", "description": "Keep the device (true) or self-destruct after (false). Default false." }
                 },
                 "required": ["peer_addr"]
@@ -229,6 +233,10 @@ fn build_request(name: &str, args: &Value, caps: Caps) -> Result<proto::Request,
                 .get("discriminator")
                 .and_then(Value::as_u64)
                 .map(|d| d as u16),
+            setup_code: args
+                .get("setup_code")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             max: args.get("max").and_then(Value::as_u64).unwrap_or(16) as u8,
         },
         "list_devices" => proto::Request::ListDevices,
@@ -249,10 +257,11 @@ fn build_request(name: &str, args: &Value, caps: Caps) -> Result<proto::Request,
                 .and_then(Value::as_str)
                 .ok_or((jsonrpc::INVALID_PARAMS, "missing peer_addr".to_string()))?
                 .to_string(),
-            passcode: args
-                .get("passcode")
-                .and_then(Value::as_u64)
-                .unwrap_or(20202021) as u32,
+            setup_code: args
+                .get("setup_code")
+                .and_then(Value::as_str)
+                .unwrap_or("20202021")
+                .to_string(),
             policy: if args
                 .get("persistent")
                 .and_then(Value::as_bool)

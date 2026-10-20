@@ -1,7 +1,7 @@
 //! matter-peek web UI (Yew/Wasm).
 //!
 //! A WS/JSON client over the [`matter_peek_proto`] contract. Phase 1 slice:
-//! enter a peer address + passcode, run the full vertical (commission → health
+//! enter a peer address + setup code, run the full vertical (commission → health
 //! → CrashLogs → decommission) on the RPC server, and render streamed step
 //! events plus the final result.
 
@@ -67,8 +67,8 @@ const COMMISSION_TIMEOUT_SECS: u32 = 90;
 enum Msg {
     SelectTab(Tab),
     PeerAddr(String),
-    Passcode(String),
-    Discriminator(String),
+    SetupCode(String),
+    DiscoverFilter(String),
     Persistent(bool),
     Run,
     /// Proceed with a commission despite the "already commissioned this address"
@@ -125,9 +125,10 @@ enum Msg {
 struct App {
     tab: Tab,
     peer_addr: String,
-    passcode: String,
-    /// Optional discriminator filter for discovery (empty = any).
-    discriminator: String,
+    /// Passcode, manual pairing code or `MT:` QR code payload.
+    setup_code: String,
+    /// Discovery filter: a discriminator or a setup code (empty = any).
+    discover_filter: String,
     /// Commission persistently (keep the device on our fabric + in the store)
     /// rather than the throwaway ephemeral fabric.
     persistent: bool,
@@ -182,8 +183,8 @@ impl Component for App {
         Self {
             tab: Tab::Discover,
             peer_addr: "[::1]:5540".into(),
-            passcode: "20202021".into(),
-            discriminator: String::new(),
+            setup_code: "20202021".into(),
+            discover_filter: String::new(),
             persistent: false,
             running: false,
             discovering: false,
@@ -269,12 +270,12 @@ impl Component for App {
                 self.peer_addr = v;
                 false
             }
-            Msg::Passcode(v) => {
-                self.passcode = v;
+            Msg::SetupCode(v) => {
+                self.setup_code = v;
                 false
             }
-            Msg::Discriminator(v) => {
-                self.discriminator = v;
+            Msg::DiscoverFilter(v) => {
+                self.discover_filter = v;
                 false
             }
             Msg::Persistent(v) => {
@@ -282,15 +283,16 @@ impl Component for App {
                 false
             }
             Msg::Discover => {
-                let discriminator = match self.discriminator.trim() {
-                    "" => None,
-                    s => match s.parse::<u16>() {
-                        Ok(d) => Some(d),
-                        Err(_) => {
-                            self.error = Some("discriminator must be a u16 (or blank)".into());
-                            return true;
-                        }
-                    },
+                // Up to 4 digits is a discriminator; anything else a setup code,
+                // which the Commission tab then uses too.
+                let filter = self.discover_filter.trim();
+                let (discriminator, setup_code) = if filter.is_empty() {
+                    (None, None)
+                } else if filter.len() <= 4 && filter.bytes().all(|b| b.is_ascii_digit()) {
+                    (filter.parse::<u16>().ok(), None)
+                } else {
+                    self.setup_code = filter.to_string();
+                    (None, Some(filter.to_string()))
                 };
                 self.discovering = true;
                 self.discovered.clear();
@@ -299,6 +301,7 @@ impl Component for App {
                     ctx.link().clone(),
                     proto::Request::Discover {
                         discriminator,
+                        setup_code,
                         max: 16,
                     },
                 );
@@ -741,13 +744,11 @@ impl App {
 
     /// Kick off the commission vertical (shared by `Run` and `RunAnyway`).
     fn start_commission(&mut self, ctx: &Context<Self>) -> bool {
-        let passcode: u32 = match self.passcode.trim().parse() {
-            Ok(p) => p,
-            Err(_) => {
-                self.error = Some("passcode must be a u32".into());
-                return true;
-            }
-        };
+        let setup_code = self.setup_code.trim().to_string();
+        if setup_code.is_empty() {
+            self.error = Some("enter the device's setup code".into());
+            return true;
+        }
         self.running = true;
         self.steps.clear();
         self.result = None;
@@ -761,7 +762,7 @@ impl App {
         };
         let req = proto::Request::RunVertical {
             peer_addr: self.peer_addr.trim().to_string(),
-            passcode,
+            setup_code,
             policy,
         };
         send_request(ctx.link().clone(), req);
@@ -807,9 +808,9 @@ impl App {
                 <h2 class="title is-5">{ "Find commissionable devices" }</h2>
                 <div class="field is-grouped">
                     <div class="control">
-                        <input class="input" placeholder="discriminator (any)"
-                            value={self.discriminator.clone()}
-                            oninput={link.callback(|e: InputEvent| Msg::Discriminator(input_value(e)))} />
+                        <input class="input" placeholder="discriminator or setup code (any)"
+                            value={self.discover_filter.clone()}
+                            oninput={link.callback(|e: InputEvent| Msg::DiscoverFilter(input_value(e)))} />
                     </div>
                     <div class="control">
                         <button class={classes!("button", "is-primary", self.discovering.then_some("is-loading"))}
@@ -873,11 +874,12 @@ impl App {
                     </div>
 
                     <div class="field">
-                        <label class="label">{ "Passcode" }</label>
+                        <label class="label">{ "Setup code" }</label>
                         <div class="control">
-                            <input class="input mono" value={self.passcode.clone()}
-                                oninput={link.callback(|e: InputEvent| Msg::Passcode(input_value(e)))} />
+                            <input class="input mono" value={self.setup_code.clone()}
+                                oninput={link.callback(|e: InputEvent| Msg::SetupCode(input_value(e)))} />
                         </div>
+                        <p class="help">{ "Passcode, manual pairing code or MT: QR code payload." }</p>
                     </div>
 
                     <div class="field">

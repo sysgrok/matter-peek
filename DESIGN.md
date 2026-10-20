@@ -312,7 +312,7 @@ live `system_tests` device → response, incl. 5000-byte multi-block BDX log)
 via the `rpc` `ws_client` example.
 
 Chosen contract shape: `ClientMsg{req_id, Request}` → `ServerMsg::{Response,
-Event}`; the first op is `RunVertical{peer_addr, passcode, policy}`. This is the
+Event}`; the first op is `RunVertical{peer_addr, setup_code, policy}`. This is the
 artifact the UniFFI mobile surface will mirror.
 
 **mDNS discovery** is now wired (`core::discovery`): `Controller::discover`

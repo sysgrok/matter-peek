@@ -6,8 +6,10 @@
 //! `chip-all-clusters-app` or an rs-matter example device.
 //!
 //! ```text
-//! matter-peek [PASSCODE] [PEER_ADDR]
+//! matter-peek [SETUP_CODE] [PEER_ADDR]
 //! ```
+//!
+//! `SETUP_CODE` is a passcode, a manual pairing code or an `MT:` QR code payload.
 //!
 //! On success prints one machine-readable line:
 //! ```text
@@ -38,6 +40,7 @@ use static_cell::StaticCell;
 
 use matter_peek_core::controller::FabricIdentity;
 use matter_peek_core::ota::OtaProvider;
+use matter_peek_core::setup_code::SetupCode;
 use matter_peek_core::subscribe::Reports;
 use matter_peek_core::{Controller, DiagSet, FabricPolicy, LogIntent};
 
@@ -53,12 +56,15 @@ fn main() -> ExitCode {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("matter-peek: {msg}");
-            eprintln!("usage: matter-peek [PASSCODE] [PEER_ADDR] [--subscribe]");
+            eprintln!("usage: matter-peek [SETUP_CODE] [PEER_ADDR] [--subscribe]");
             eprintln!(
-                "       matter-peek --ble [--discriminator N] [PASSCODE]   (with $THREAD_DATASET or $THREAD_DATASET_FILE)"
+                "       matter-peek --ble [--discriminator N] [SETUP_CODE]   (with $THREAD_DATASET or $THREAD_DATASET_FILE)"
             );
             eprintln!(
-                "       ... --qr-image <PNG|JPEG>                          (supplies discriminator + passcode)"
+                "       ... --qr-image <PNG|JPEG>                            (supplies the setup code)"
+            );
+            eprintln!(
+                "       SETUP_CODE: a passcode, a manual pairing code or an MT: QR code payload"
             );
             return ExitCode::FAILURE;
         }
@@ -96,17 +102,14 @@ struct Args {
     subscribe: bool,
     /// `--ble`: commission the device over Bluetooth (BTP) instead of IP,
     /// provisioning it with the Thread dataset from `$THREAD_DATASET`. The device
-    /// is matched by `--discriminator` (or the first commissionable one seen).
+    /// is matched by `filter` (or the first commissionable one seen).
     #[cfg_attr(not(feature = "ble"), allow(dead_code))]
     ble: bool,
-    /// `--discriminator <N>`: the 12-bit discriminator to match the device's BLE
-    /// advertisement against (from the scanned QR / manual pairing code). Only
-    /// used with `--ble`; `None` matches the first commissionable device seen.
-    #[cfg_attr(not(feature = "ble"), allow(dead_code))]
-    discriminator: Option<u16>,
+    /// What finds the device, over mDNS or BLE: `--discriminator <N>` (12-bit),
+    /// else the discriminator of the setup code, if it carries one.
+    filter: CommissionableFilter,
     /// `--qr-image <path>`: read the device's onboarding payload out of a QR-code
-    /// image (PNG/JPEG), instead of passing the discriminator and passcode by
-    /// hand. Supplies both.
+    /// image (PNG/JPEG), instead of passing the setup code by hand.
     #[cfg_attr(not(feature = "qr-image"), allow(dead_code))]
     qr_image: Option<String>,
 }
@@ -156,9 +159,24 @@ fn parse_args() -> Result<Args, String> {
 
     let mut iter = positionals.into_iter();
 
-    let passcode = match iter.next() {
-        Some(s) => parse_int_u32(&s).map_err(|e| format!("passcode must be u32: {e}"))?,
-        None => DEFAULT_PASSCODE,
+    let code = match iter.next() {
+        Some(s) => SetupCode::parse(&s).map_err(|e| {
+            format!(
+                "not a passcode, manual pairing code or MT: QR code payload: {:?}",
+                e.code()
+            )
+        })?,
+        None => SetupCode {
+            passcode: DEFAULT_PASSCODE,
+            filter: CommissionableFilter::default(),
+        },
+    };
+    let filter = match discriminator {
+        Some(discriminator) => CommissionableFilter {
+            discriminator: Some(discriminator),
+            ..Default::default()
+        },
+        None => code.filter,
     };
     // Second arg: an explicit `[::1]:5540` address, or the literal `discover`
     // (also the default when omitted) to find the device via mDNS. Ignored with
@@ -171,22 +189,22 @@ fn parse_args() -> Result<Args, String> {
         ),
     };
     Ok(Args {
-        passcode,
+        passcode: code.passcode,
         peer_addr,
         subscribe,
         ble,
-        discriminator,
+        filter,
         qr_image,
     })
 }
 
 /// Read a device's onboarding payload out of a QR-code image, returning its
-/// `(discriminator, passcode)`.
+/// setup code.
 ///
 /// The `image` crate turns the file into pixels; `rs-matter` does the actual QR
 /// recognition (from 8-bit greyscale) and the payload parsing.
 #[cfg(feature = "qr-image")]
-fn read_qr_image(path: &str) -> Result<(u16, u32), Error> {
+fn read_qr_image(path: &str) -> Result<SetupCode, Error> {
     use rs_matter::pairing::qr::{scan, QrPayload};
 
     let luma = image::open(path)
@@ -212,7 +230,10 @@ fn read_qr_image(path: &str) -> Result<(u16, u32), Error> {
         payload.discovery_capabilities(),
     );
 
-    Ok((payload.discriminator(), payload.passcode()))
+    Ok(SetupCode {
+        passcode: payload.passcode(),
+        filter: payload.commissionable_filter(),
+    })
 }
 
 /// Parse a `u16` in decimal or `0x`-prefixed hex.
@@ -223,26 +244,18 @@ fn parse_int_u16(s: &str) -> Result<u16, core::num::ParseIntError> {
     }
 }
 
-/// Parse a `u32` in decimal or `0x`-prefixed hex.
-fn parse_int_u32(s: &str) -> Result<u32, core::num::ParseIntError> {
-    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        Some(hex) => u32::from_str_radix(hex, 16),
-        None => s.parse::<u32>(),
-    }
-}
-
 // `args` is only mutated to fold in a `--qr-image` payload, which is feature-gated.
 #[cfg_attr(not(feature = "qr-image"), allow(unused_mut))]
 async fn run(mut args: Args) -> Result<matter_peek_core::CommissionOutcome, Error> {
-    // A QR-code image, if given, supplies both the discriminator and the passcode -
-    // it is exactly the two values one would otherwise pass by hand. Do this first,
-    // so both the BLE and the IP path below just see them as normal arguments.
+    // A QR-code image, if given, supplies the setup code one would otherwise pass
+    // by hand. Do this first, so both the BLE and the IP path below just see it as
+    // a normal argument.
     #[cfg(feature = "qr-image")]
     if let Some(path) = args.qr_image.take() {
-        let (discriminator, passcode) = read_qr_image(&path)?;
+        let code = read_qr_image(&path)?;
 
-        args.discriminator = Some(discriminator);
-        args.passcode = passcode;
+        args.filter = code.filter;
+        args.passcode = code.passcode;
     }
 
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
@@ -282,9 +295,7 @@ async fn run(mut args: Args) -> Result<matter_peek_core::CommissionOutcome, Erro
         Some(a) => a,
         None => {
             info!("=== Discovering a commissionable device via mDNS ===");
-            let found = controller
-                .discover(&CommissionableFilter::default(), None)
-                .await?;
+            let found = controller.discover(&args.filter, None).await?;
             match found.address {
                 rs_matter::transport::network::Address::Udp(a) => a,
                 other => {
@@ -381,16 +392,9 @@ async fn commission_over_ble<C: rs_matter::crypto::Crypto>(
         }
     };
 
-    // Match the advertisement by discriminator (from the QR / pairing code), if
-    // given; otherwise take the first commissionable device seen.
-    let filter = CommissionableFilter {
-        discriminator: args.discriminator,
-        ..Default::default()
-    };
-
     info!(
-        "=== BLE commissioning (discriminator={:?}, creds={}) ===",
-        args.discriminator,
+        "=== BLE commissioning (filter={:?}, creds={}) ===",
+        args.filter,
         creds
             .as_ref()
             .map(|c| c.to_string())
@@ -405,7 +409,7 @@ async fn commission_over_ble<C: rs_matter::crypto::Crypto>(
         crypto,
         ca,
         fab_idx,
-        &filter,
+        &args.filter,
         args.passcode,
         DEVICE_NODE_ID,
         creds.as_ref(),

@@ -48,6 +48,7 @@ use matter_peek_core::controller::FabricIdentity;
 use matter_peek_core::node;
 use matter_peek_core::ota::{OtaEvent, OtaProvider, OtaStore as _, OtaVerifier};
 use matter_peek_core::persist::{kv_buf, ControllerStore};
+use matter_peek_core::setup_code::SetupCode;
 use matter_peek_core::subscribe::Reports;
 use matter_peek_core::{Controller, DeviceHandle, DiagSet, LogIntent};
 
@@ -399,12 +400,14 @@ async fn service<C: Crypto>(
     match &cmd.request {
         proto::Request::RunVertical {
             peer_addr,
-            passcode,
+            setup_code,
             policy,
-        } => run_vertical(cmd, ctx, peer_addr, *passcode, *policy).await,
-        proto::Request::Discover { discriminator, max } => {
-            run_discover(ctx, *discriminator, *max).await
-        }
+        } => run_vertical(cmd, ctx, peer_addr, setup_code, *policy).await,
+        proto::Request::Discover {
+            discriminator,
+            setup_code,
+            max,
+        } => run_discover(ctx, *discriminator, setup_code.as_deref(), *max).await,
         proto::Request::ListDevices => list_devices(ctx),
         proto::Request::PeekDevice { node_id, with_logs } => {
             peek_device(ctx, *node_id, *with_logs).await
@@ -732,11 +735,19 @@ fn ota_events(listeners: Rc<RefCell<Vec<OtaListener>>>) -> Box<dyn Fn(OtaEvent)>
 async fn run_discover<C: Crypto>(
     ctx: &ActorCtx<'_, C>,
     discriminator: Option<u16>,
+    setup_code: Option<&str>,
     max: u8,
 ) -> proto::Response {
-    let filter = CommissionableFilter {
-        discriminator,
-        ..Default::default()
+    let filter = match (discriminator, setup_code) {
+        (Some(discriminator), _) => CommissionableFilter {
+            discriminator: Some(discriminator),
+            ..Default::default()
+        },
+        (None, Some(code)) => match SetupCode::parse(code) {
+            Ok(code) => code.filter,
+            Err(e) => return invalid_setup_code(e),
+        },
+        (None, None) => CommissionableFilter::default(),
     };
 
     // The actor already runs the mDNS backend (a permanent arm); use the `_bg`
@@ -1062,7 +1073,7 @@ async fn run_vertical<C: Crypto>(
     cmd: &Command,
     ctx: &ActorCtx<'_, C>,
     peer_addr: &str,
-    passcode: u32,
+    setup_code: &str,
     policy: proto::FabricPolicy,
 ) -> proto::Response {
     let peer_addr: SocketAddr = match peer_addr.parse() {
@@ -1074,7 +1085,21 @@ async fn run_vertical<C: Crypto>(
         }
     };
 
+    let passcode = match SetupCode::parse(setup_code) {
+        Ok(code) => code.passcode,
+        Err(e) => return invalid_setup_code(e),
+    };
+
     vertical_flow(cmd, ctx, peer_addr, passcode, policy).await
+}
+
+fn invalid_setup_code(e: Error) -> proto::Response {
+    proto::Response::Error {
+        message: format!(
+            "invalid setup code ({:?}): expected a passcode, a manual pairing code or an MT: QR code payload",
+            e.code()
+        ),
+    }
 }
 
 /// The vertical proper: commission → health → logs → (persist | decommission),

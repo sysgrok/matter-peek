@@ -54,7 +54,8 @@ pub enum LogIntent {
 /// A device the controller has commissioned and can address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceHandle {
-    /// Our fabric slot on the device.
+    /// Our fabric, in the controller's fabric table. Not the device's index of
+    /// it, which can differ (e.g. when the device is on other fabrics too).
     pub fabric_index: NonZeroU8,
     /// NodeID we assigned to the device on our fabric.
     pub node_id: u64,

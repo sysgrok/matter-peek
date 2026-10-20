@@ -54,6 +54,8 @@ cargo build
 # Against an rs-matter example device / chip-all-clusters-app on the defaults:
 cargo run -p matter-peek-cli            # passcode 20202021, peer [::1]:5540
 cargo run -p matter-peek-cli -- 20202021 '[::1]:5540'
+# Any setup code works: a passcode, a manual pairing code or an MT: QR payload.
+cargo run -p matter-peek-cli -- 3497-011-2332
 ```
 
 For local co-development against working clones, uncomment the `[patch.crates-io]`
