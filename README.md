@@ -52,12 +52,18 @@ cargo run --bin matter-peek -- --help
 # The MCP server (stdio), for an AI agent: through the server, or on its own;
 # mutating tools need --allow-mutate
 cargo run --bin matter-peek -- --server ws://127.0.0.1:8087 mcp --allow-mutate
+
+# A chat with an AI model about the devices (any OpenAI-compatible API)
+cargo run --bin matter-peek -- chat --llm-url http://localhost:11434/v1 --model qwen3.5:9b
 ```
 
 ### MCP (AI agents)
 
 `matter-peek mcp` offers the API as MCP tools over stdio (newline-delimited
-JSON-RPC 2.0, protocol version `2024-11-05`); logs go to stderr. Without
+JSON-RPC 2.0, protocol version `2025-06-18`, or `2024-11-05` for older
+clients); logs go to stderr. Each tool carries the MCP annotations
+`readOnlyHint` / `destructiveHint`; devices are named by node id, as a number
+or as its hex form (`"0x1B67B"`); a failed tool says why in plain words. Without
 `--server` it holds the store for as long as it runs (syncing the device list
 periodically, like the server), so to share the store with the web UI, run
 `matter-peek-server` and pass `--server`.
@@ -86,6 +92,31 @@ Claude Desktop (`claude_desktop_config.json`):
 
 Add `"--allow-mutate"` to `args` only when the agent may change devices, and
 `"--server", "ws://127.0.0.1:8087"` (before `mcp`) to go through a running server.
+
+### Chat (an AI agent in the terminal)
+
+`matter-peek chat` asks an AI model about the devices: the model looks into
+them with the same tools as MCP, run in process, and answers in Markdown,
+rendered in the terminal. Any model behind an OpenAI-compatible API will do: a
+local one (Ollama, LM Studio, vLLM) or a provider's (OpenAI, OpenRouter, …).
+
+```sh
+export MATTER_PEEK_LLM_URL=http://localhost:11434/v1   # or --llm-url
+export MATTER_PEEK_LLM_MODEL=qwen3.5:9b                # or --model
+export MATTER_PEEK_LLM_KEY=…                           # if the API needs a key
+matter-peek chat                                       # a chat; /reset, /tools, /quit
+matter-peek chat "Which of my devices are offline?"    # one question
+matter-peek chat --allow-mutate                        # may change things
+```
+
+With `--allow-mutate`, every tool not marked read-only is asked for first
+(`[y]es / [n]o / [a]lways`). `--no-think` asks the model not to think first
+(faster, less careful), `--show-thinking` shows its thinking, `--verbose` the
+tools' results and the model's tokens. Without `--server`, it holds the store
+and syncs the device list before the first question.
+
+The loop is `core`'s `api::agent`, so the web UI and the mobile apps can have
+the same chat.
 
 ### Mobile bindings
 

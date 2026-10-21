@@ -53,6 +53,19 @@ const MUTATING_TOOLS: &[&str] = &[
     "reorder_network",
 ];
 
+/// What an agent should know about the tools, for its instructions.
+pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-only tools \
+     (discover, list_devices, peek_device, read_network, retrieve_logs, identify, \
+     read_qr_image, ota_images) are always available. The tools that change devices \
+     or the stored state (commission, decommission, remember, set_tags, \
+     sync, ota_upload, ota_delete, ota_update, add_network, remove_network, \
+     connect_network, reorder_network) are available only if the \
+     operator allowed them (e.g. `matter-peek mcp --allow-mutate`). \
+     A device is named by its node_id: the number list_devices gives, or its \
+     hex form (\"0x1B67B\"). A failed tool says why in plain words, with \
+     the error code in parentheses: pass that on to the user, with what they \
+     can do about it.";
+
 /// The mutating tools whose harm may be hard to undo: they cost a device its
 /// fabric, its network or its firmware, or lose an image.
 const DESTRUCTIVE_TOOLS: &[&str] = &[
@@ -133,18 +146,7 @@ fn initialize_result(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": {} },
         "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-        "instructions":
-            "Vendor-agnostic Matter controller. Read-only tools \
-             (discover, list_devices, peek_device, read_network, retrieve_logs, identify, \
-             read_qr_image, ota_images) are always available. The tools that change devices \
-             or the stored state (commission, decommission, remember, set_tags, \
-             sync, ota_upload, ota_delete, ota_update, add_network, remove_network, \
-             connect_network, reorder_network) are available only if the \
-             operator allowed them (e.g. `matter-peek mcp --allow-mutate`). \
-             A device is named by its node_id: the number list_devices gives, or its \
-             hex form (\"0x1B67B\"). A failed tool says why in plain words, with \
-             the error code in parentheses: pass that on to the user, with what they \
-             can do about it."
+        "instructions": INSTRUCTIONS
     })
 }
 
@@ -153,7 +155,7 @@ fn initialize_result(params: &Value) -> Value {
 // ---------------------------------------------------------------------------
 
 /// The tool catalog for `tools/list`, filtered by `caps`.
-fn tool_list(caps: Caps) -> Vec<Value> {
+pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
     let mut tools = vec![
         tool(
             "discover",
@@ -456,9 +458,9 @@ fn node_id_schema() -> Value {
 // tools/call → wire::Request → Dispatch → wire::Response → tool result
 // ---------------------------------------------------------------------------
 
-type ToolErr = (i64, String);
+pub(crate) type ToolErr = (i64, String);
 
-async fn tools_call<D: Dispatch>(
+pub(crate) async fn tools_call<D: Dispatch>(
     params: Value,
     dispatch: &D,
     caps: Caps,

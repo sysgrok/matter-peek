@@ -23,7 +23,7 @@ use matter_peek_server::client::{self, Connection};
 /// process, or to the server at `url`, connected on the first call and
 /// reconnected once if it was closed (e.g. the server restarted). One connection
 /// serves the whole session: an upload in progress belongs to it.
-struct ApiDispatch {
+pub(crate) struct ApiDispatch {
     url: Option<String>,
     conn: RefCell<Option<Rc<Connection>>>,
 }
@@ -86,8 +86,13 @@ pub async fn serve(server: Option<String>, allow_mutate: bool) -> io::Result<()>
         if allow_mutate { "ENABLED" } else { "disabled" }
     );
 
-    // Started at once, so that a store held by another process fails here, and
-    // the device list is synced before the first tool call.
+    stdio_loop(&dispatch(server)?, Caps { allow_mutate }).await
+}
+
+/// The API, for an agent: through the server at `server`, else through a
+/// controller started in this process now, so that a store held by another
+/// process fails here and the device list syncs before the first tool call.
+pub(crate) fn dispatch(server: Option<String>) -> io::Result<ApiDispatch> {
     let conn = match &server {
         Some(_) => None,
         // Long-lived, like a server: keep the device list in sync.
@@ -97,12 +102,10 @@ pub async fn serve(server: Option<String>, allow_mutate: bool) -> io::Result<()>
         })?)),
     };
 
-    let dispatch = ApiDispatch {
+    Ok(ApiDispatch {
         url: server,
         conn: RefCell::new(conn),
-    };
-
-    stdio_loop(&dispatch, Caps { allow_mutate }).await
+    })
 }
 
 /// The newline-delimited JSON-RPC loop: read a line from stdin, handle it,

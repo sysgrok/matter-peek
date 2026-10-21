@@ -20,6 +20,7 @@ pub use peek::{
 #[cfg(feature = "controller")]
 pub(crate) use peek::{Op, Reply, Service};
 
+pub mod agent;
 pub mod display;
 pub mod mcp;
 #[cfg(feature = "controller")]

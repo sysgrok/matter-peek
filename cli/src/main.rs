@@ -18,9 +18,11 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
 
+use matter_peek_core::api::agent::Think;
 use matter_peek_core::api::{self, display, wire};
 use matter_peek_server::client::{self, Connection};
 
+mod chat;
 mod mcp;
 
 /// How much of an OTA image goes in one upload request.
@@ -152,6 +154,35 @@ enum Command {
         #[arg(long)]
         allow_mutate: bool,
     },
+    /// Ask an AI model about the devices, in a chat: it looks into them with
+    /// the API's tools. Any model behind an OpenAI-compatible API will do,
+    /// e.g. a local Ollama. Without --server, holds the store while it runs.
+    Chat {
+        /// Ask this, answer, and end (else chat until /quit or end of input).
+        prompt: Option<String>,
+        /// The model's OpenAI-compatible API, e.g. http://localhost:11434/v1.
+        #[arg(long, env = "MATTER_PEEK_LLM_URL", value_name = "URL")]
+        llm_url: String,
+        /// The model, as the API names it, e.g. qwen3.5:9b.
+        #[arg(long, env = "MATTER_PEEK_LLM_MODEL")]
+        model: String,
+        /// The environment variable holding the API key, if the API needs one.
+        #[arg(long, value_name = "VAR", default_value = "MATTER_PEEK_LLM_KEY")]
+        api_key_env: String,
+        /// Ask the model not to think first: faster, less careful.
+        #[arg(long)]
+        no_think: bool,
+        /// Show the model's thinking.
+        #[arg(long)]
+        show_thinking: bool,
+        /// Show the tools' results, and the model's timings and tokens.
+        #[arg(long)]
+        verbose: bool,
+        /// Also offer the tools that change devices or the stored state; each
+        /// call is asked for first.
+        #[arg(long)]
+        allow_mutate: bool,
+    },
 }
 
 /// A change to the networks a device knows, each committed under a fail-safe.
@@ -238,9 +269,11 @@ impl std::str::FromStr for Node {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    // Logs go to stderr: stdout is the output, or the MCP stream.
+    // Logs go to stderr: stdout is the output, or the MCP stream; a chat
+    // keeps to its conversation.
     let level = match cli.command {
         Command::Mcp { .. } => "info",
+        Command::Chat { .. } => "error",
         _ => "warn",
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
@@ -258,9 +291,37 @@ fn main() -> ExitCode {
 /// Run the command; `Ok(false)` when the API answered with an error.
 async fn run(cli: Cli) -> io::Result<bool> {
     // Its own connection, for as long as stdin is open.
-    if let Command::Mcp { allow_mutate } = cli.command {
-        mcp::serve(cli.server, allow_mutate).await?;
-        return Ok(true);
+    match cli.command {
+        Command::Mcp { allow_mutate } => {
+            mcp::serve(cli.server, allow_mutate).await?;
+            return Ok(true);
+        }
+        Command::Chat {
+            prompt,
+            llm_url,
+            model,
+            api_key_env,
+            no_think,
+            show_thinking,
+            verbose,
+            allow_mutate,
+        } => {
+            let args = chat::ChatArgs {
+                prompt,
+                llm_url,
+                model,
+                api_key: std::env::var(api_key_env)
+                    .ok()
+                    .filter(|key| !key.is_empty()),
+                think: if no_think { Think::Off } else { Think::Default },
+                show_thinking,
+                verbose,
+                allow_mutate,
+            };
+            chat::chat(cli.server, args).await?;
+            return Ok(true);
+        }
+        _ => {}
     }
 
     let conn = match &cli.server {
@@ -481,7 +542,7 @@ async fn run(cli: Cli) -> io::Result<bool> {
             call(&conn, &out, wire::Request::OtaDelete { name }).await?,
         ),
         Command::Ota(Ota::Update { node, name }) => update(&conn, &out, node.0, name).await,
-        Command::Mcp { .. } => unreachable!("served above"),
+        Command::Mcp { .. } | Command::Chat { .. } => unreachable!("served above"),
     }
 }
 

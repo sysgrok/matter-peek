@@ -100,6 +100,12 @@ The same methods serve every binding:
 - **MCP** (`api::mcp`): the methods as tools for AI agents (JSON-RPC envelope,
   tool catalog, tool → `Request` mapping, the `--allow-mutate` gate), run
   through an injected `Dispatch`; `matter-peek mcp` is the stdio shell.
+- **Agent** (`api::agent`): a conversation with a model behind an LLM
+  `Provider` (OpenAI-compatible today, over a platform `Http`), which runs the
+  MCP tools in process. A tool not annotated read-only runs only once the
+  user approves it (`AgentListener::approve`); a model that ends with an empty
+  reply is asked once more for its answer. `matter-peek chat` is the terminal
+  shell.
 
 How values are shown to people is shared too (`api::display`, also exported over
 UniFFI): IDs as `0x` + uppercase hex, vendors and products by name with the ID
@@ -143,6 +149,7 @@ of it is private to `core`.
 | Web UI (Yew/Wasm, Bulma) | `trunk serve` | WebSocket |
 | CLI | `matter-peek` | `--server <url>`, or a `WireSession` in process |
 | MCP server | `matter-peek mcp` | as the CLI (read-only unless `--allow-mutate`) |
+| Chat (AI agent) | `matter-peek chat` | as the CLI; the model over an OpenAI-compatible API |
 | Mobile apps | — | UniFFI, in process |
 
 
@@ -306,8 +313,13 @@ and changes to its networks; web UI, CLI and MCP on one API; the API in `core`
 **Platforms**: running operations concurrently (a long commission blocks the
 others today); macOS desktop; Android and iOS apps (above), commissioning
 through the platform's own commissioner (Google Play services, Apple) rather
-than over BLE, and maybe a built-in agent driving the controller through a
-cloud LLM, as MCP does on a PC.
+than over BLE, with the chat of `api::agent` built in.
+
+**AI agent**: the chat (`api::agent`, `matter-peek chat`) works with any
+OpenAI-compatible API; next are the Anthropic API, the GitHub Copilot SDK (a
+Copilot subscription, on the desktop), and the chat in the web UI. Users of
+Claude or ChatGPT apps get the tools through a remote MCP connector: a relay
+to a controller that is always on.
 
 **Later**: consent-gated upload of logs and crash dumps; per-vendor crash
 parsers.

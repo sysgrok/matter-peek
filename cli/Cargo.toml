@@ -17,7 +17,7 @@ path = "src/main.rs"
 matter-peek-core = { path = "../core" }
 # Their connection: to a running server, or to a controller in this process.
 matter-peek-server = { path = "../server" }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 serde_json = { workspace = true }
 # Logs and OTA images travel base64-encoded.
 base64 = "0.22"
@@ -26,3 +26,6 @@ env_logger = { workspace = true }
 # `mcp`: async stdin/stdout, via a thread pool (the smol-family way).
 blocking = "1"
 futures-lite = { workspace = true }
+# `chat`: the model's API over HTTP(S), and its Markdown in the terminal.
+ureq = "3.5"
+termimad = "0.35"
