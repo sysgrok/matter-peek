@@ -155,7 +155,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
                 && sess.get_peer_node_id() == Some(device_node_id)
         });
         if dropped > 0 {
-            info!("dropped {dropped} stale CASE session(s) for node 0x{device_node_id:016x}");
+            info!("dropped {dropped} stale CASE session(s) for node 0x{device_node_id:016X}");
         }
 
         // Reclaim any fabric slot we leaked on this device in a previous run
@@ -216,7 +216,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
         )
         .await?;
         info!(
-            "phase 1 ok: device_fabric_index={}, device_node_id=0x{:016x}",
+            "phase 1 ok: device_fabric_index={}, device_node_id=0x{:016X}",
             phase1.fabric_index, phase1.device_node_id,
         );
 
@@ -314,7 +314,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
                     match verdict {
                         FabricVerdict::NotOurs => {}
                         FabricVerdict::Live => info!(
-                            "orphaned-fabric sweep: keeping our live fabric for node 0x{device_node_id:016x} (not an orphan)"
+                            "orphaned-fabric sweep: keeping our live fabric for node 0x{device_node_id:016X} (not an orphan)"
                         ),
                         FabricVerdict::Orphan => {
                             if let Some(idx) = fabric.fabric_index()? {
@@ -568,7 +568,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
 
         if dropped > 0 {
             info!(
-                "dropped {dropped} stale session(s) for node 0x{:016x}",
+                "dropped {dropped} stale session(s) for node 0x{:016X}",
                 dev.node_id
             );
         }
@@ -595,7 +595,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
             .await?;
 
         info!(
-            "identify: device 0x{:016x} ep{endpoint} for {secs}s",
+            "identify: device 0x{:016X} ep{endpoint} for {secs}s",
             dev.node_id
         );
         Ok(())

@@ -46,7 +46,7 @@ impl PeekError {
 impl fmt::Display for PeekError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoDevice { node_id } => write!(f, "no device with node_id 0x{node_id:016x}"),
+            Self::NoDevice { node_id } => write!(f, "no device with node_id 0x{node_id:016X}"),
             Self::Cancelled {
                 decommissioned: true,
             } => f.write_str("cancelled; the device was decommissioned"),
@@ -177,7 +177,7 @@ pub struct DeviceList {
     pub notice: Option<String>,
 }
 
-/// A device on our fabric.
+/// A device on our fabric. See also its [`display`](super::display) helpers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DeviceInfo {
@@ -191,12 +191,6 @@ pub struct DeviceInfo {
     pub vendor_name: String,
     /// BasicInformation `ProductName` (empty if the device didn't serve it).
     pub product_name: String,
-    /// A ready-to-show vendor label: the device's `VendorName` when present,
-    /// else an offline VID→name lookup, else the raw hex `vid:0x…`.
-    pub vendor_display: String,
-    /// `true` when the vendor id is in the reserved **test** range
-    /// (`0xFFF1`–`0xFFF4`): a development / uncertified device.
-    pub is_test_vendor: bool,
     /// Per-model numeric fingerprint (vendor/product/hw/sw), for display and the
     /// re-match suggestion.
     pub fingerprint: Fingerprint,

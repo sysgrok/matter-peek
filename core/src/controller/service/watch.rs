@@ -143,7 +143,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             if let Some(watch) = subs.remove(&node_id) {
                 let _ = watch.stop.try_send(());
             }
-            info!("unsubscribed node 0x{node_id:016x}");
+            info!("unsubscribed node 0x{node_id:016X}");
         }
     }
 

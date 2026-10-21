@@ -18,7 +18,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
 
-use matter_peek_core::api::{self, wire};
+use matter_peek_core::api::{self, display, wire};
 use matter_peek_server::client::{self, Connection};
 
 mod mcp;
@@ -250,14 +250,18 @@ async fn run(cli: Cli) -> io::Result<bool> {
                     }
                     for d in devices {
                         println!(
-                            "{}  commissionable id {:#018x}",
-                            d.addr, d.commissionable_id
+                            "{}  commissionable id {}",
+                            d.addr,
+                            display::hex_u64(d.commissionable_id)
                         );
                     }
                     for d in ble_devices {
                         println!(
-                            "Bluetooth {}  discriminator {}  vendor {:#06x}  product {:#06x}",
-                            d.addr, d.discriminator, d.vendor_id, d.product_id
+                            "Bluetooth {}  discriminator {}  vendor {}  product {}",
+                            d.addr,
+                            d.discriminator,
+                            display::vendor_label(d.vendor_id, None),
+                            display::product_label(d.vendor_id, d.product_id, None)
                         );
                     }
                     true
@@ -310,10 +314,14 @@ async fn run(cli: Cli) -> io::Result<bool> {
 
             Ok(match call(&conn, &out, request).await? {
                 Some(wire::Response::Commissioned(result)) if !out.json => {
-                    println!("Commissioned as node {:#018x}.", result.handle.node_id);
+                    println!(
+                        "Commissioned as node {}.",
+                        display::hex_u64(result.handle.node_id)
+                    );
                     if let Some(node_id) = result.rematch_candidate {
                         println!(
-                            "Note: the same model as device {node_id:#018x}; maybe the same unit."
+                            "Note: the same model as device {}; maybe the same unit.",
+                            display::hex_u64(node_id)
                         );
                     }
                     true
@@ -496,12 +504,12 @@ fn devices(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
 
     for d in &devices {
         let mut line = format!(
-            "{:#018x}  {}  {}",
-            d.handle.node_id,
-            device_title(d),
-            d.vendor_display
+            "{}  {}  vendor {}",
+            display::hex_u64(d.handle.node_id),
+            d.title(),
+            d.vendor().unwrap_or_else(|| "unknown".into())
         );
-        if d.is_test_vendor {
+        if d.is_test_vendor() {
             line.push_str(" (test vendor)");
         }
         match d.online {
@@ -535,10 +543,10 @@ fn images(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
     }
     for image in images {
         println!(
-            "{}  {:04x}:{:04x}  version {} ({})  {} bytes",
+            "{}  vendor {}  product {}  version {} ({})  {} bytes",
             image.name,
-            image.vendor_id,
-            image.product_id,
+            display::vendor_label(image.vendor_id, None),
+            display::product_label(image.vendor_id, image.product_id, None),
             image.version_str,
             image.version,
             image.size
@@ -692,22 +700,6 @@ fn discover_filter(filter: Option<String>) -> (Option<u16>, Option<String>) {
     }
 }
 
-/// A human label for a device: the user-set NodeLabel, else the device's own
-/// ProductName, else the stable identifiers, else its node ID.
-fn device_title(d: &api::DeviceInfo) -> String {
-    if !d.node_label.is_empty() {
-        d.node_label.clone()
-    } else if !d.product_name.is_empty() {
-        d.product_name.clone()
-    } else if !d.unique_id.is_empty() {
-        format!("uid {}", d.unique_id)
-    } else if !d.serial_number.is_empty() {
-        format!("sn {}", d.serial_number)
-    } else {
-        format!("node {:#018x}", d.handle.node_id)
-    }
-}
-
 fn health_text(health: &api::DeviceHealth) -> String {
     fn opt<T: std::fmt::Display>(v: Option<T>) -> String {
         v.map(|v| v.to_string()).unwrap_or_else(|| "-".into())
@@ -716,8 +708,10 @@ fn health_text(health: &api::DeviceHealth) -> String {
     let mut parts = Vec::new();
     if let Some(g) = &health.general {
         parts.push(format!(
-            "uptime {} s, reboots {}, operational {} h",
-            opt(g.up_time_secs),
+            "uptime {}, reboots {}, operational {} h",
+            g.up_time_secs
+                .map(display::duration)
+                .unwrap_or_else(|| "-".into()),
             opt(g.reboot_count),
             opt(g.total_operational_hours)
         ));

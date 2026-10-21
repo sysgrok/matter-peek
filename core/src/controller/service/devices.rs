@@ -69,7 +69,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             .controller
             .read_health(dev.handle, DiagSet::ALL)
             .await
-            .map_err(|e| failed(&format!("device 0x{node_id:016x} did not answer"), e))?;
+            .map_err(|e| failed(&format!("device 0x{node_id:016X} did not answer"), e))?;
 
         // It answers, so an offline subscription of it can be re-established now.
         self.set_online(node_id, true);
@@ -124,7 +124,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         self.stop_watch(node_id);
 
         let removed = if force {
-            info!("decommission node 0x{node_id:016x}: forced - not contacting the device");
+            info!("decommission node 0x{node_id:016X}: forced - not contacting the device");
             false
         } else {
             let attempts = self.try_remove_fabric(dev.handle, node_id);
@@ -132,7 +132,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 Ok(result) => result.is_ok(),
                 Err(_) => {
                     warn!(
-                        "decommission node 0x{node_id:016x}: gave up after {DECOMMISSION_TIMEOUT_SECS}s"
+                        "decommission node 0x{node_id:016X}: gave up after {DECOMMISSION_TIMEOUT_SECS}s"
                     );
                     false
                 }
@@ -153,7 +153,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
 
         let notice = (!removed && !force).then(|| {
             format!(
-                "Device 0x{node_id:016x} could not be reached, so it was only removed from the \
+                "Device 0x{node_id:016X} could not be reached, so it was only removed from the \
                  list and still holds our fabric. Once it is back online, a sync lists it again \
                  and it can be decommissioned."
             )
@@ -174,13 +174,13 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             match self.controller.decommission(handle).await {
                 Ok(()) => {
                     info!(
-                        "decommissioned node 0x{node_id:016x} (RemoveFabric ok, attempt {attempt})"
+                        "decommissioned node 0x{node_id:016X} (RemoveFabric ok, attempt {attempt})"
                     );
                     return Ok(());
                 }
                 Err(e) => {
                     warn!(
-                        "decommission node 0x{node_id:016x}: attempt {attempt}/{DECOMMISSION_ATTEMPTS} failed: {e:?}"
+                        "decommission node 0x{node_id:016X}: attempt {attempt}/{DECOMMISSION_ATTEMPTS} failed: {e:?}"
                     );
                     if attempt == DECOMMISSION_ATTEMPTS {
                         return Err(e);
@@ -262,7 +262,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             if !ident.fingerprint.is_usable() {
                 if !listed {
                     warn!(
-                        "sync: node 0x{node_id:016x} is advertised on our fabric but does not answer"
+                        "sync: node 0x{node_id:016X} is advertised on our fabric but does not answer"
                     );
                 }
                 continue;
@@ -278,7 +278,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             match transient.iter_mut().find(|d| d.handle.node_id == node_id) {
                 Some(device) => refresh_identity(device, ident),
                 None => {
-                    info!("sync: listing node 0x{node_id:016x}, found on our fabric");
+                    info!("sync: listing node 0x{node_id:016X}, found on our fabric");
                     transient.push(new_record(handle, &ident));
                     found += 1;
                 }
@@ -330,7 +330,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             Ok(false) => {
                 self.lookup_device(node_id)?;
                 Err(PeekError::failed(format!(
-                    "device 0x{node_id:016x} is not remembered; remember it to tag it"
+                    "device 0x{node_id:016X} is not remembered; remember it to tag it"
                 )))
             }
             Err(e) => Err(failed("cannot set the tags", e)),

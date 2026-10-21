@@ -47,7 +47,6 @@ mod controller {
     pub mod service;
     pub mod setup_code;
     pub mod subscribe;
-    pub mod vendors;
 }
 
 #[cfg(feature = "uniffi")]

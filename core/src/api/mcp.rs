@@ -25,7 +25,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use crate::api::{self, wire};
+use crate::api::{self, display, wire};
 
 use jsonrpc::Response;
 
@@ -557,16 +557,58 @@ fn tool_result(response: &wire::Response) -> Value {
     let (text, is_error) = match response {
         wire::Response::Error { message } => (pretty(&json!({ "error": message })), true),
         wire::Response::Logs { intent, data, .. } => (log_text(*intent, data), false),
-        other => (
-            pretty(&serde_json::to_value(other).unwrap_or(json!({}))),
-            false,
-        ),
+        other => (pretty(&labelled(other)), false),
     };
 
     json!({
         "content": [ { "type": "text", "text": text } ],
         "isError": is_error
     })
+}
+
+/// `response` as JSON, with the IDs, vendors, products and uptimes also as the
+/// UI shows them (see [`display`]).
+fn labelled(response: &wire::Response) -> Value {
+    let mut value = serde_json::to_value(response).unwrap_or(json!({}));
+
+    match response {
+        wire::Response::Devices { devices, .. } => {
+            for (d, v) in devices.iter().zip(entries(&mut value, "devices")) {
+                v["node"] = json!(display::hex_u64(d.handle.node_id));
+                v["vendor"] = json!(d.vendor());
+                v["product"] = json!(d.product());
+            }
+        }
+        wire::Response::Discovered { ble_devices, .. } => {
+            for (d, v) in ble_devices.iter().zip(entries(&mut value, "ble_devices")) {
+                v["vendor"] = json!(display::vendor_label(d.vendor_id, None));
+                v["product"] = json!(display::product_label(d.vendor_id, d.product_id, None));
+            }
+        }
+        wire::Response::OtaImages { images } => {
+            for (i, v) in images.iter().zip(entries(&mut value, "images")) {
+                v["vendor"] = json!(display::vendor_label(i.vendor_id, None));
+                v["product"] = json!(display::product_label(i.vendor_id, i.product_id, None));
+            }
+        }
+        wire::Response::Peek { health, .. } => {
+            if let Some(secs) = health.general.and_then(|g| g.up_time_secs) {
+                value["health"]["general"]["up_time"] = json!(display::duration(secs));
+            }
+        }
+        _ => {}
+    }
+
+    value
+}
+
+/// The entries of array `key` of `value`.
+fn entries<'a>(value: &'a mut Value, key: &str) -> impl Iterator<Item = &'a mut Value> {
+    value
+        .get_mut(key)
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
 }
 
 fn pretty(payload: &Value) -> String {

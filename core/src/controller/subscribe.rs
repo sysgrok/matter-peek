@@ -167,7 +167,7 @@ impl ReportDataHandler for Reports {
             .and_then(|id| self.slot(sub.peer_node_id, id))
         else {
             debug!(
-                "report for no subscription of ours: sub_id={:?} peer=0x{:016x}",
+                "report for no subscription of ours: sub_id={:?} peer=0x{:016X}",
                 sub.subscription_id, sub.peer_node_id
             );
             return Err(IMStatusCode::InvalidSubscription);
@@ -176,7 +176,7 @@ impl ReportDataHandler for Reports {
         let health = parse_health(report, slot.which);
 
         debug!(
-            "subscription report: sub_id={:?} peer=0x{:016x} -> {health:?}",
+            "subscription report: sub_id={:?} peer=0x{:016X} -> {health:?}",
             sub.subscription_id, sub.peer_node_id
         );
 
@@ -307,7 +307,7 @@ where
                 // (capped-exponential) so a cold / unreachable device isn't hammered
                 // (which would exhaust its CASE session table).
                 warn!(
-                    "subscribe_health(0x{node_id:016x}): {e:?}; re-establishing in {}s",
+                    "subscribe_health(0x{node_id:016X}): {e:?}; re-establishing in {}s",
                     backoff.as_secs()
                 );
                 on_state(SubState::Offline);
@@ -399,7 +399,7 @@ where
     let window = Duration::from_secs(max_int as u64)
         + report_round_trip(matter, fab_idx, node_id) * ROUND_TRIPS;
     info!(
-        "subscription 0x{node_id:016x}: offline after {} ms without a report",
+        "subscription 0x{node_id:016X}: offline after {} ms without a report",
         window.as_millis()
     );
 
@@ -413,7 +413,7 @@ where
         let now = Instant::now();
         if now >= deadline {
             warn!(
-                "subscription 0x{node_id:016x} stale: no report in {}s (max_int={max_int}s); re-establishing",
+                "subscription 0x{node_id:016X} stale: no report in {}s (max_int={max_int}s); re-establishing",
                 (now - slot.last_report.get()).as_secs()
             );
             on_state(SubState::Offline);
@@ -471,7 +471,7 @@ where
     };
 
     info!(
-        "health subscription established: sub_id={} max_int={}s (peer 0x{node_id:016x})",
+        "health subscription established: sub_id={} max_int={}s (peer 0x{node_id:016X})",
         established.subscription_id, established.max_int
     );
 

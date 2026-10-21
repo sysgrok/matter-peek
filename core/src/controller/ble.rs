@@ -245,7 +245,7 @@ pub async fn commission_ble<C: Crypto>(
     };
 
     info!(
-        "BLE commission: phase A ok (device fabric {}, node 0x{:016x}); device is joining its network",
+        "BLE commission: phase A ok (device fabric {}, node 0x{:016X}); device is joining its network",
         phase1.fabric_index, phase1.device_node_id
     );
 

@@ -12,7 +12,7 @@ use gloo_net::websocket::{futures::WebSocket, Message};
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
-use matter_peek_core::api::{self, wire};
+use matter_peek_core::api::{self, display, wire};
 
 /// Where the server listens (see `matter-peek-server`'s default).
 const WS_URL: &str = "ws://127.0.0.1:8087";
@@ -522,7 +522,10 @@ impl Component for App {
             }
             Msg::Identify(node_id) => {
                 self.busy_stored = true;
-                self.stored_status = Some(format!("Identifying node 0x{node_id:016x} (blink 3s)…"));
+                self.stored_status = Some(format!(
+                    "Identifying node {} (blink 3s)…",
+                    display::hex_u64(node_id)
+                ));
                 self.error = None;
                 send_request(
                     ctx.link().clone(),
@@ -533,7 +536,8 @@ impl Component for App {
             Msg::Decommission(node_id) => {
                 self.busy_stored = true;
                 self.stored_status = Some(format!(
-                    "Decommissioning node 0x{node_id:016x} (RemoveFabric)…"
+                    "Decommissioning node {} (RemoveFabric)…",
+                    display::hex_u64(node_id)
                 ));
                 self.error = None;
                 // Clear any notice from a previous decommission, so what remains
@@ -638,7 +642,10 @@ impl Component for App {
                     })
                     .unwrap_or_default();
                 self.busy_stored = true;
-                self.stored_status = Some(format!("Saving tags for node 0x{node_id:016x}…"));
+                self.stored_status = Some(format!(
+                    "Saving tags for node {}…",
+                    display::hex_u64(node_id)
+                ));
                 self.error = None;
                 send_request(ctx.link().clone(), wire::Request::SetTags { node_id, tags });
                 true
@@ -1120,7 +1127,12 @@ impl App {
                 <h3 class="title is-6">{ "Over Bluetooth" }</h3>
                 <table class="table is-fullwidth is-hoverable">
                     <thead>
-                        <tr><th>{ "Bluetooth address" }</th><th>{ "Discriminator" }</th><th>{ "Vendor:product" }</th></tr>
+                        <tr>
+                            <th>{ "Bluetooth address" }</th>
+                            <th>{ "Discriminator" }</th>
+                            <th>{ "Vendor" }</th>
+                            <th>{ "Product" }</th>
+                        </tr>
                     </thead>
                     <tbody>
                         { for self.discovered_ble.iter().map(|d| {
@@ -1130,7 +1142,8 @@ impl App {
                                 <tr class="is-clickable" title="Commission this device over Bluetooth" {onclick}>
                                     <td class="mono">{ d.addr.clone() }</td>
                                     <td class="mono">{ d.discriminator }</td>
-                                    <td class="mono">{ format!("{:04x}:{:04x}", d.vendor_id, d.product_id) }</td>
+                                    <td>{ display::vendor_label(d.vendor_id, None) }</td>
+                                    <td>{ display::product_label(d.vendor_id, d.product_id, None) }</td>
                                 </tr>
                             }
                         }) }
@@ -1158,7 +1171,7 @@ impl App {
                         html! {
                             <tr class="is-clickable" title="Use this device" {onclick}>
                                 <td class="mono">{ d.addr.clone() }</td>
-                                <td class="mono">{ format!("{:#018x}", d.commissionable_id) }</td>
+                                <td class="mono">{ display::hex_u64(d.commissionable_id) }</td>
                             </tr>
                         }
                     }) }
@@ -1449,8 +1462,8 @@ impl App {
             Some(wire::Response::Commissioned(result)) => html! {
                 <div class="notification is-success is-light">
                     { format!(
-                        "Commissioned as node 0x{:016x} — see the Devices tab.",
-                        result.handle.node_id
+                        "Commissioned as node {} — see the Devices tab.",
+                        display::hex_u64(result.handle.node_id)
                     ) }
                 </div>
             },
@@ -1563,7 +1576,7 @@ impl App {
             _ => d.online == Some(false),
         };
 
-        let title = device_title(d);
+        let title = d.title();
 
         let tag_text = self
             .tag_inputs
@@ -1590,22 +1603,28 @@ impl App {
                                     { "offline" }</span> }
                               } else { html!{} } }
                             <span class="tag is-light mono">
-                                { format!("fab {} · 0x{:016x}", d.handle.fabric_index, node_id) }
+                                { format!("fab {} · {}", d.handle.fabric_index, display::hex_u64(node_id)) }
                             </span>
                         </div>
                     </div>
 
                     <div class="mb-3">
                         <p class="is-size-7 mb-0">
-                            <span class="has-text-weight-semibold">{ d.vendor_display.clone() }</span>
-                            { if d.is_test_vendor {
+                            <span class="has-text-grey">{ "Vendor " }</span>
+                            <span class="has-text-weight-semibold">
+                                { d.vendor().unwrap_or_else(|| "unknown".into()) }
+                            </span>
+                            { if d.is_test_vendor() {
                                 html!{ <span class="tag is-warning is-light is-rounded ml-2">{ "TEST" }</span> }
                               } else { html!{} } }
-                            { if !d.product_name.is_empty() {
-                                html!{ <span class="has-text-grey">{ format!(" · {}", d.product_name) }</span> }
-                              } else { html!{} } }
+                            { for d.product().map(|product| html! {
+                                <>
+                                    <span class="has-text-grey">{ " · Product " }</span>
+                                    { product }
+                                </>
+                            }) }
                         </p>
-                        <p class="is-size-7 has-text-grey mono">{ fingerprint_line(&d.fingerprint) }</p>
+                        <p class="is-size-7 has-text-grey">{ versions_line(&d.fingerprint) }</p>
                     </div>
 
                     {
@@ -1772,7 +1791,8 @@ impl App {
                     <thead>
                         <tr>
                             <th>{ "Image" }</th>
-                            <th>{ "Vendor / product" }</th>
+                            <th>{ "Vendor" }</th>
+                            <th>{ "Product" }</th>
                             <th>{ "Version" }</th>
                             <th>{ "Size" }</th>
                             <th></th>
@@ -1786,7 +1806,8 @@ impl App {
                             html! {
                                 <tr>
                                     <td>{ image.name.clone() }</td>
-                                    <td>{ format!("0x{:04X} / 0x{:04X}", image.vendor_id, image.product_id) }</td>
+                                    <td>{ display::vendor_label(image.vendor_id, None) }</td>
+                                    <td>{ display::product_label(image.vendor_id, image.product_id, None) }</td>
                                     <td>{ format!("{} ({})", image.version_str, image.version) }</td>
                                     <td>{ format!("{} KiB", image.size / 1024) }</td>
                                     <td>
@@ -1819,8 +1840,8 @@ impl App {
             .stored
             .iter()
             .find(|d| d.handle.node_id == logs.node_id)
-            .map(device_title)
-            .unwrap_or_else(|| format!("node 0x{:016x}", logs.node_id));
+            .map(api::DeviceInfo::title)
+            .unwrap_or_else(|| format!("node {}", display::hex_u64(logs.node_id)));
 
         let intent_button = |intent: api::LogIntent| {
             let active = logs.intent == Some(intent);
@@ -1961,7 +1982,7 @@ impl App {
                     </div>
                 </div>
                 <nav class="level is-mobile">
-                    { metric("Uptime (s)", opt_str(g.up_time_secs)) }
+                    { metric("Uptime", g.up_time_secs.map(display::duration).unwrap_or_else(|| "—".into())) }
                     { metric("Reboots", opt_str(g.reboot_count)) }
                     { metric("Op. hours", opt_str(g.total_operational_hours)) }
                     { metric("Heap free", opt_str(sw.current_heap_free)) }
@@ -1978,48 +1999,22 @@ fn opt_str<T: std::fmt::Display>(v: Option<T>) -> String {
     v.map(|x| x.to_string()).unwrap_or_else(|| "—".into())
 }
 
-/// Compact one-line fingerprint summary for a stored-device card.
-fn fingerprint_line(fp: &api::Fingerprint) -> String {
-    fn dec<T: core::fmt::Display>(v: Option<T>) -> String {
-        v.map(|x| x.to_string()).unwrap_or_else(|| "—".to_string())
-    }
-    // vid/pid in hex (how they're written in the CSA registry / on data sheets);
-    // hw/sw versions in decimal.
-    let hex16 = |v: Option<u16>| {
-        v.map(|x| format!("0x{x:04X}"))
-            .unwrap_or_else(|| "—".into())
-    };
+/// A device card's hardware and software versions.
+fn versions_line(fp: &api::Fingerprint) -> String {
     format!(
-        "vid:{} pid:{} hw:{} sw:{}",
-        hex16(fp.vendor_id),
-        hex16(fp.product_id),
-        dec(fp.hardware_version),
-        dec(fp.software_version),
+        "Hardware version {} · Software version {}",
+        opt_str(fp.hardware_version),
+        opt_str(fp.software_version),
     )
 }
 
 /// The notice for a just-remembered device that may be a unit already listed.
 fn rematch_notice(node_id: u64) -> String {
     format!(
-        "Possible match: the device is the same model as device 0x{node_id:016x} — \
-         check the Devices tab whether they are the same unit."
+        "Possible match: the device is the same model as device {} — \
+         check the Devices tab whether they are the same unit.",
+        display::hex_u64(node_id)
     )
-}
-
-/// A human label for a device: the user-set NodeLabel, else the device's own
-/// ProductName, else the stable identifiers, else the raw node id.
-fn device_title(d: &api::DeviceInfo) -> String {
-    if !d.node_label.is_empty() {
-        d.node_label.clone()
-    } else if !d.product_name.is_empty() {
-        d.product_name.clone()
-    } else if !d.unique_id.is_empty() {
-        format!("uid {}", d.unique_id)
-    } else if !d.serial_number.is_empty() {
-        format!("sn {}", d.serial_number)
-    } else {
-        format!("node 0x{:016x}", d.handle.node_id)
-    }
 }
 
 fn log_intent_name(intent: api::LogIntent) -> &'static str {
