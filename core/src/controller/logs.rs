@@ -14,7 +14,7 @@
 //!
 //! Both paths are awaited concurrently with the responder; we return whichever
 //! bytes arrive. The transport pump (`matter.run`) must already be running in a
-//! sibling task (the CLI / RPC host owns it).
+//! sibling task (the service runs it).
 //!
 //! Templates in rs-matter:
 //! - `tests/diag_logs.rs` — the client receiver end.

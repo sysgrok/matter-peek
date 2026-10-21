@@ -1,4 +1,4 @@
-//! Live health via **subscriptions** — the Phase 2 health-board primitive.
+//! Live health via **subscriptions**.
 //!
 //! Where [`diagnostics::read_health`](crate::diagnostics::read_health) takes a
 //! one-shot snapshot, this establishes an IM *subscription* to the diagnostic

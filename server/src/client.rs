@@ -1,37 +1,35 @@
 //! Connections to the matter-peek API, for its clients (the CLI, the MCP server).
 //!
-//! A [`Connection`] carries [`proto::ClientMsg`]s in and [`proto::ServerMsg`]s out,
-//! either over a WebSocket to a running `matter-peek-server` ([`connect`]) or to
-//! an actor in this process ([`connect_in_process`]). Either way, the requests
+//! A [`Connection`] carries [`ClientMsg`]s in and [`ServerMsg`]s out, either over
+//! a WebSocket to a running `matter-peek-server` ([`connect`]) or to a
+//! controller in this process ([`connect_in_process`]). Either way, the requests
 //! are serviced the same way.
 
 use core::cell::Cell;
 
 use std::io;
+use std::rc::Rc;
 
 use async_tungstenite::tungstenite::Message;
 use futures_util::{SinkExt, StreamExt};
 
 use log::{debug, warn};
 
-use matter_peek_proto as proto;
-
-use crate::actor::{self, CancelFlag, Command, Store};
-use crate::server;
+use matter_peek_core::api::wire::{
+    ClientMsg, Event, ReqId, Request, Response, ServerMsg, WireSession,
+};
+use matter_peek_core::api::{MatterPeek, PeekConfig};
 
 /// A connection to the API. Runs on the thread-local executor, so it must be
 /// driven by [`crate::block_on`].
 pub struct Connection {
-    tx: async_channel::Sender<proto::ClientMsg>,
-    rx: async_channel::Receiver<proto::ServerMsg>,
-    next_req_id: Cell<proto::ReqId>,
+    tx: async_channel::Sender<ClientMsg>,
+    rx: async_channel::Receiver<ServerMsg>,
+    next_req_id: Cell<ReqId>,
 }
 
 impl Connection {
-    fn new(
-        tx: async_channel::Sender<proto::ClientMsg>,
-        rx: async_channel::Receiver<proto::ServerMsg>,
-    ) -> Self {
+    fn new(tx: async_channel::Sender<ClientMsg>, rx: async_channel::Receiver<ServerMsg>) -> Self {
         Self {
             tx,
             rx,
@@ -40,12 +38,12 @@ impl Connection {
     }
 
     /// Send `request`, returning its ID.
-    pub async fn send(&self, request: proto::Request) -> io::Result<proto::ReqId> {
+    pub async fn send(&self, request: Request) -> io::Result<ReqId> {
         let req_id = self.next_req_id.get();
         self.next_req_id.set(req_id + 1);
 
         self.tx
-            .send(proto::ClientMsg { req_id, request })
+            .send(ClientMsg { req_id, request })
             .await
             .map_err(|_| closed())?;
 
@@ -53,7 +51,7 @@ impl Connection {
     }
 
     /// The next response or event; `None` once the connection is closed.
-    pub async fn recv(&self) -> Option<proto::ServerMsg> {
+    pub async fn recv(&self) -> Option<ServerMsg> {
         self.rx.recv().await.ok()
     }
 
@@ -61,19 +59,19 @@ impl Connection {
     /// that arrive in the meantime.
     pub async fn call(
         &self,
-        request: proto::Request,
-        mut on_event: impl FnMut(proto::Event),
-    ) -> io::Result<proto::Response> {
+        request: Request,
+        mut on_event: impl FnMut(Event),
+    ) -> io::Result<Response> {
         let req_id = self.send(request).await?;
 
         loop {
             match self.recv().await.ok_or_else(closed)? {
-                proto::ServerMsg::Response {
+                ServerMsg::Response {
                     req_id: id,
                     response,
                 } if id == req_id => return Ok(response),
-                proto::ServerMsg::Response { .. } => {}
-                proto::ServerMsg::Event { event } => on_event(event),
+                ServerMsg::Response { .. } => {}
+                ServerMsg::Event { event } => on_event(event),
             }
         }
     }
@@ -94,8 +92,8 @@ pub async fn connect(url: &str) -> io::Result<Connection> {
         .map_err(io::Error::other)?;
     let (mut write, mut read) = ws.split();
 
-    let (client_tx, client_rx) = async_channel::unbounded::<proto::ClientMsg>();
-    let (server_tx, server_rx) = async_channel::unbounded::<proto::ServerMsg>();
+    let (client_tx, client_rx) = async_channel::unbounded::<ClientMsg>();
+    let (server_tx, server_rx) = async_channel::unbounded::<ServerMsg>();
 
     crate::spawn(async move {
         while let Ok(msg) = client_rx.recv().await {
@@ -127,7 +125,7 @@ pub async fn connect(url: &str) -> io::Result<Connection> {
                         break;
                     }
                 }
-                Err(e) => warn!("client: bad ServerMsg: {e}"),
+                Err(e) => warn!("client: bad message: {e}"),
             }
         }
     });
@@ -135,23 +133,25 @@ pub async fn connect(url: &str) -> io::Result<Connection> {
     Ok(Connection::new(client_tx, server_rx))
 }
 
-/// Start an actor in this process and connect to it. Fails if another
+/// Start a controller in this process and connect to it. Fails if another
 /// matter-peek process (e.g. a running server) holds the store.
 pub fn connect_in_process() -> io::Result<Connection> {
-    let store = Store::lock()?;
-
-    let (cmd_tx, cmd_rx) = async_channel::unbounded::<Command>();
-    let cancel = CancelFlag::default();
-
     // Short-lived: no periodic sync, which the process could exit in the middle of.
-    crate::spawn(actor::run(cmd_rx, cancel.clone(), store, false));
+    let peek = MatterPeek::start(PeekConfig {
+        store_dir: None,
+        periodic_sync: false,
+    })
+    .map_err(io::Error::other)?;
 
-    let (client_tx, client_rx) = async_channel::unbounded::<proto::ClientMsg>();
-    let (server_tx, server_rx) = async_channel::unbounded::<proto::ServerMsg>();
+    let (client_tx, client_rx) = async_channel::unbounded::<ClientMsg>();
+    let (server_tx, server_rx) = async_channel::unbounded::<ServerMsg>();
+
+    let session = Rc::new(WireSession::new(peek, server_tx));
 
     crate::spawn(async move {
         while let Ok(msg) = client_rx.recv().await {
-            server::dispatch(msg, &cmd_tx, &server_tx, &cancel).await;
+            let session = session.clone();
+            crate::spawn(async move { session.handle(msg).await });
         }
     });
 

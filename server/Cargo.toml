@@ -1,0 +1,24 @@
+[package]
+name = "matter-peek-server"
+description = "The matter-peek API over WebSocket/JSON, and its clients' connection"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The controller, run on this host; `ble`: commissioning over Bluetooth LE
+# (Linux + BlueZ).
+matter-peek-core = { path = "../core", features = ["ble"] }
+
+serde_json = { workspace = true }
+async-net = { workspace = true }
+async-channel = { workspace = true }
+async-tungstenite = { workspace = true }
+async-executor = { workspace = true }
+futures-lite = { workspace = true }
+futures-util = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }

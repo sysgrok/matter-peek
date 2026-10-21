@@ -19,7 +19,7 @@ fn main() -> ExitCode {
         .unwrap_or_else(|| DEFAULT_ADDR.into());
     info!("matter-peek-server: starting on {addr}");
 
-    match matter_peek_rpc::run(&addr) {
+    match matter_peek_server::run(&addr) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             error!("matter-peek-server: {e}");

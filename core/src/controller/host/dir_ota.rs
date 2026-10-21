@@ -9,7 +9,10 @@ use log::warn;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::ota::OtaImageHeader;
 
-use matter_peek_core::ota::{OtaImage, OtaStore};
+use alloc::format;
+use alloc::vec::Vec;
+
+use crate::ota::{OtaImage, OtaImageStore, OtaStore};
 
 /// How much of a file to read for its header; any valid header fits.
 const MAX_HEADER_LEN: u64 = 1024;
@@ -51,49 +54,6 @@ impl DirOtaStore {
         Self { dir }
     }
 
-    /// Start receiving an image file, as upload `id`.
-    pub fn begin(&self, id: u32) -> Result<PartialImage, Error> {
-        let path = self.dir.join(format!("upload-{id}.partial"));
-
-        Ok(PartialImage {
-            file: File::create(&path)?,
-            path,
-        })
-    }
-
-    /// Store a received image file, as `image`. Replaces a stored image of the
-    /// same name: the same build.
-    pub fn finish(&self, partial: PartialImage, image: &OtaImage) -> Result<(), Error> {
-        let stored = self
-            .path(&image.name)
-            .ok_or(ErrorCode::InvalidData.into())
-            .and_then(|path| {
-                partial.file.sync_all()?;
-                fs::rename(&partial.path, path)?;
-
-                Ok(())
-            });
-
-        if stored.is_err() {
-            self.discard(partial);
-        }
-
-        stored
-    }
-
-    /// Drop a partially received image file.
-    pub fn discard(&self, partial: PartialImage) {
-        let _ = fs::remove_file(&partial.path);
-    }
-
-    /// Delete stored image `name`.
-    pub fn remove(&self, name: &str) -> Result<(), Error> {
-        let path = self.path(name).ok_or(ErrorCode::NotFound)?;
-        fs::remove_file(path)?;
-
-        Ok(())
-    }
-
     /// The path of image `name`; `None` for a name that is not an image file's.
     fn path(&self, name: &str) -> Option<PathBuf> {
         let valid = name.ends_with(".ota") && !name.starts_with('.') && !name.contains(['/', '\\']);
@@ -110,39 +70,10 @@ impl DirOtaStore {
     }
 }
 
-/// The image in the `.ota` file at `path`, as its header describes it.
-fn read_image(path: &Path) -> Option<OtaImage> {
-    if path.extension().is_none_or(|ext| ext != "ota") {
-        return None;
-    }
-
-    let mut file = File::open(path).ok()?;
-    let size = file.metadata().ok()?.len();
-
-    let mut head = Vec::new();
-    (&mut file)
-        .take(MAX_HEADER_LEN)
-        .read_to_end(&mut head)
-        .ok()?;
-
-    let (header, _) = OtaImageHeader::decode(&head).ok()?;
-
-    Some(OtaImage::new(&header, size))
-}
-
 /// An image file being received.
 pub struct PartialImage {
     file: File,
     path: PathBuf,
-}
-
-impl PartialImage {
-    /// Append the next bytes.
-    pub fn write(&mut self, data: &[u8]) -> Result<(), Error> {
-        self.file.write_all(data)?;
-
-        Ok(())
-    }
 }
 
 impl OtaStore for DirOtaStore {
@@ -169,4 +100,72 @@ impl OtaStore for DirOtaStore {
 
         Ok(file.read(buf)?)
     }
+}
+
+impl OtaImageStore for DirOtaStore {
+    type Partial = PartialImage;
+
+    fn begin(&self, id: u32) -> Result<PartialImage, Error> {
+        let path = self.dir.join(format!("upload-{id}.partial"));
+
+        Ok(PartialImage {
+            file: File::create(&path)?,
+            path,
+        })
+    }
+
+    fn write(&self, partial: &mut PartialImage, data: &[u8]) -> Result<(), Error> {
+        partial.file.write_all(data)?;
+
+        Ok(())
+    }
+
+    fn finish(&self, partial: PartialImage, image: &OtaImage) -> Result<(), Error> {
+        let stored = self
+            .path(&image.name)
+            .ok_or(ErrorCode::InvalidData.into())
+            .and_then(|path| {
+                partial.file.sync_all()?;
+                fs::rename(&partial.path, path)?;
+
+                Ok(())
+            });
+
+        if stored.is_err() {
+            let _ = fs::remove_file(&partial.path);
+        }
+
+        stored
+    }
+
+    fn discard(&self, partial: PartialImage) {
+        let _ = fs::remove_file(&partial.path);
+    }
+
+    fn remove(&self, name: &str) -> Result<(), Error> {
+        let path = self.path(name).ok_or(ErrorCode::NotFound)?;
+        fs::remove_file(path)?;
+
+        Ok(())
+    }
+}
+
+/// The image in the `.ota` file at `path`, as its header describes it.
+fn read_image(path: &Path) -> Option<OtaImage> {
+    if path.extension().is_none_or(|ext| ext != "ota") {
+        return None;
+    }
+
+    let mut file = File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+
+    let mut head = Vec::new();
+    (&mut file)
+        .take(MAX_HEADER_LEN)
+        .read_to_end(&mut head)
+        .ok()?;
+
+    let (header, _) = OtaImageHeader::decode(&head).ok()?;
+
+    Some(OtaImage::new(&header, size))
 }

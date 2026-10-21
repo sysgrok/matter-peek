@@ -22,9 +22,9 @@ use futures_lite::StreamExt;
 
 use log::{debug, error, info, warn};
 
+use matter_peek_core::api::wire;
 use matter_peek_mcp::{handle, Caps, Dispatch};
-use matter_peek_proto as proto;
-use matter_peek_rpc::client::{self, Connection};
+use matter_peek_server::client::{self, Connection};
 
 /// Where the matter-peek server listens by default.
 const DEFAULT_SERVER: &str = "ws://127.0.0.1:8087";
@@ -55,7 +55,7 @@ impl ServerDispatch {
 }
 
 impl Dispatch for ServerDispatch {
-    async fn dispatch(&self, request: proto::Request) -> Result<proto::Response, String> {
+    async fn dispatch(&self, request: wire::Request) -> Result<wire::Response, String> {
         // Events are not surfaced: a tool call is request/response.
         match self.connection().await?.call(request.clone(), |_| ()).await {
             Ok(response) => Ok(response),
@@ -120,7 +120,7 @@ fn main() -> ExitCode {
         conn: RefCell::new(None),
     };
 
-    match matter_peek_rpc::block_on(stdio_loop(dispatch, caps)) {
+    match matter_peek_server::block_on(stdio_loop(dispatch, caps)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             error!("matter-peek-mcp: {e}");

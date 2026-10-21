@@ -2,9 +2,9 @@
 //! (`tools/list`), and tool invocation (`tools/call`).
 //!
 //! Transport- and controller-agnostic (`no_std` + `alloc`). A tool call maps to
-//! a [`matter_peek_proto::Request`], which is run by an injected [`Dispatch`]
+//! a [`matter_peek_wire::Request`], which is run by an injected [`Dispatch`]
 //! (the desktop shell implements it over a connection to the matter-peek
-//! server). The single final [`matter_peek_proto::Response`] is rendered back as
+//! server). The single final [`matter_peek_wire::Response`] is rendered back as
 //! the tool result; streamed progress is not surfaced over MCP (a tool call is
 //! request/response), so neither are health subscriptions.
 //!
@@ -25,7 +25,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use matter_peek_proto as proto;
+use matter_peek_core::api::{self, wire};
 
 use crate::jsonrpc::{self, Response};
 
@@ -49,18 +49,18 @@ const MUTATING_TOOLS: &[&str] = &[
 /// How much of an OTA image goes in one upload request.
 const UPLOAD_CHUNK_LEN: usize = 256 * 1024;
 
-/// Runs one [`proto::Request`] against the controller and yields its single final
+/// Runs one [`wire::Request`] against the controller and yields its single final
 /// response. The protocol layer is agnostic to *how* — the desktop shell
 /// implements this over a connection to the matter-peek server; a future esp shell
 /// would implement it over its own in-process controller.
 pub trait Dispatch {
     /// `Err(message)` is for transport failures (becomes a JSON-RPC
     /// internal error); a controller-level failure is a normal
-    /// [`proto::Response::Error`] carried in `Ok`.
+    /// [`wire::Response::Error`] carried in `Ok`.
     fn dispatch(
         &self,
-        request: proto::Request,
-    ) -> impl Future<Output = Result<proto::Response, String>>;
+        request: wire::Request,
+    ) -> impl Future<Output = Result<wire::Response, String>>;
 
     /// Read a local file, for `ota_upload`. A shell without files keeps this.
     fn read_file(&self, path: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
@@ -336,7 +336,7 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// tools/call → proto::Request → Dispatch → proto::Response → tool result
+// tools/call → wire::Request → Dispatch → wire::Response → tool result
 // ---------------------------------------------------------------------------
 
 type ToolErr = (i64, String);
@@ -371,7 +371,7 @@ async fn tools_call<D: Dispatch>(
             .map_err(|e| (jsonrpc::INVALID_PARAMS, e))?;
 
         let image = BASE64.encode(image);
-        call(dispatch, proto::Request::ReadQrImage { image }).await?
+        call(dispatch, wire::Request::ReadQrImage { image }).await?
     } else {
         let request = build_request(name, &args)?;
         call(dispatch, request).await?
@@ -383,8 +383,8 @@ async fn tools_call<D: Dispatch>(
 /// Run one request through `dispatch`.
 async fn call<D: Dispatch>(
     dispatch: &D,
-    request: proto::Request,
-) -> Result<proto::Response, ToolErr> {
+    request: wire::Request,
+) -> Result<wire::Response, ToolErr> {
     dispatch
         .dispatch(request)
         .await
@@ -393,7 +393,7 @@ async fn call<D: Dispatch>(
 
 /// Upload the OTA image file at the `path` argument, chunk by chunk. Answers
 /// with the stored images, or with the first failure.
-async fn ota_upload<D: Dispatch>(args: &Value, dispatch: &D) -> Result<proto::Response, ToolErr> {
+async fn ota_upload<D: Dispatch>(args: &Value, dispatch: &D) -> Result<wire::Response, ToolErr> {
     let path = arg_str(args, "path")?;
     let image = dispatch
         .read_file(&path)
@@ -401,33 +401,33 @@ async fn ota_upload<D: Dispatch>(args: &Value, dispatch: &D) -> Result<proto::Re
         .map_err(|e| (jsonrpc::INVALID_PARAMS, e))?;
 
     let size = image.len() as u64;
-    let upload_id = match call(dispatch, proto::Request::OtaUploadBegin { size }).await? {
-        proto::Response::OtaUploadStarted { upload_id } => upload_id,
+    let upload_id = match call(dispatch, wire::Request::OtaUploadBegin { size }).await? {
+        wire::Response::OtaUploadStarted { upload_id } => upload_id,
         other => return Ok(other),
     };
 
     let mut offset = 0;
     for chunk in image.chunks(UPLOAD_CHUNK_LEN) {
         let data = BASE64.encode(chunk);
-        let request = proto::Request::OtaUploadChunk {
+        let request = wire::Request::OtaUploadChunk {
             upload_id,
             offset,
             data,
         };
 
         match call(dispatch, request).await? {
-            proto::Response::Ok => offset += chunk.len() as u64,
+            wire::Response::Ok => offset += chunk.len() as u64,
             other => return Ok(other),
         }
     }
 
-    call(dispatch, proto::Request::OtaUploadEnd { upload_id }).await
+    call(dispatch, wire::Request::OtaUploadEnd { upload_id }).await
 }
 
-/// Map a single-request tool name + arguments to a [`proto::Request`].
-fn build_request(name: &str, args: &Value) -> Result<proto::Request, ToolErr> {
+/// Map a single-request tool name + arguments to a [`wire::Request`].
+fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
     let req = match name {
-        "discover" => proto::Request::Discover {
+        "discover" => wire::Request::Discover {
             discriminator: args
                 .get("discriminator")
                 .and_then(Value::as_u64)
@@ -438,29 +438,29 @@ fn build_request(name: &str, args: &Value) -> Result<proto::Request, ToolErr> {
                 .map(str::to_string),
             max: args.get("max").and_then(Value::as_u64).unwrap_or(16) as u8,
         },
-        "list_devices" => proto::Request::ListDevices,
-        "sync" => proto::Request::Sync,
-        "decommission" => proto::Request::Decommission {
+        "list_devices" => wire::Request::ListDevices,
+        "sync" => wire::Request::Sync,
+        "decommission" => wire::Request::Decommission {
             node_id: arg_u64(args, "node_id")?,
             force: args.get("force").and_then(Value::as_bool).unwrap_or(false),
         },
-        "ota_images" => proto::Request::OtaImages,
-        "ota_delete" => proto::Request::OtaDelete {
+        "ota_images" => wire::Request::OtaImages,
+        "ota_delete" => wire::Request::OtaDelete {
             name: arg_str(args, "name")?,
         },
-        "ota_update" => proto::Request::OtaUpdate {
+        "ota_update" => wire::Request::OtaUpdate {
             node_id: arg_u64(args, "node_id")?,
             name: arg_str(args, "name")?,
         },
-        "peek_device" => proto::Request::PeekDevice {
+        "peek_device" => wire::Request::PeekDevice {
             node_id: arg_u64(args, "node_id")?,
         },
-        "retrieve_logs" => proto::Request::RetrieveLogs {
+        "retrieve_logs" => wire::Request::RetrieveLogs {
             node_id: arg_u64(args, "node_id")?,
             intent: match args.get("intent").and_then(Value::as_str) {
-                None | Some("crash_logs") => proto::LogIntent::CrashLogs,
-                Some("end_user_support") => proto::LogIntent::EndUserSupport,
-                Some("network_diag") => proto::LogIntent::NetworkDiag,
+                None | Some("crash_logs") => api::LogIntent::CrashLogs,
+                Some("end_user_support") => api::LogIntent::EndUserSupport,
+                Some("network_diag") => api::LogIntent::NetworkDiag,
                 Some(other) => {
                     return Err((
                         jsonrpc::INVALID_PARAMS,
@@ -469,14 +469,14 @@ fn build_request(name: &str, args: &Value) -> Result<proto::Request, ToolErr> {
                 }
             },
         },
-        "remember" => proto::Request::Remember {
+        "remember" => wire::Request::Remember {
             node_id: arg_u64(args, "node_id")?,
         },
-        "identify" => proto::Request::Identify {
+        "identify" => wire::Request::Identify {
             node_id: arg_u64(args, "node_id")?,
             secs: args.get("secs").and_then(Value::as_u64).unwrap_or(3) as u16,
         },
-        "commission" => proto::Request::Commission {
+        "commission" => wire::Request::Commission {
             via: commission_via(args)?,
             setup_code: args
                 .get("setup_code")
@@ -488,7 +488,7 @@ fn build_request(name: &str, args: &Value) -> Result<proto::Request, ToolErr> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         },
-        "set_tags" => proto::Request::SetTags {
+        "set_tags" => wire::Request::SetTags {
             node_id: arg_u64(args, "node_id")?,
             tags: args
                 .get("tags")
@@ -506,25 +506,25 @@ fn build_request(name: &str, args: &Value) -> Result<proto::Request, ToolErr> {
 }
 
 /// How `commission` reaches the device, from its arguments.
-fn commission_via(args: &Value) -> Result<proto::CommissionVia, ToolErr> {
+fn commission_via(args: &Value) -> Result<api::CommissionVia, ToolErr> {
     let opt_str = |key| args.get(key).and_then(Value::as_str).map(str::to_string);
 
     if !args.get("ble").and_then(Value::as_bool).unwrap_or(false) {
-        return Ok(proto::CommissionVia::Ip {
+        return Ok(api::CommissionVia::Ip {
             addr: arg_str(args, "peer_addr")?,
         });
     }
 
     let network = match (opt_str("wifi_ssid"), opt_str("thread_dataset")) {
-        (Some(ssid), _) => Some(proto::NetworkCredentials::Wifi {
+        (Some(ssid), _) => Some(api::NetworkCredentials::Wifi {
             ssid,
             password: opt_str("wifi_password").unwrap_or_default(),
         }),
-        (None, Some(dataset)) => Some(proto::NetworkCredentials::Thread { dataset }),
+        (None, Some(dataset)) => Some(api::NetworkCredentials::Thread { dataset }),
         (None, None) => None,
     };
 
-    Ok(proto::CommissionVia::Ble {
+    Ok(api::CommissionVia::Ble {
         addr: opt_str("ble_addr"),
         network,
     })
@@ -547,14 +547,14 @@ fn arg_str(args: &Value, key: &str) -> Result<String, ToolErr> {
         ))
 }
 
-/// Render a [`proto::Response`] as an MCP `tools/call` result. The structured
+/// Render a [`wire::Response`] as an MCP `tools/call` result. The structured
 /// payload goes into a single text content block as pretty JSON, a retrieved log
 /// as its text (and `isError` is set for the error variant) — what MCP clients
 /// render and feed to the model.
-fn tool_result(response: &proto::Response) -> Value {
+fn tool_result(response: &wire::Response) -> Value {
     let (text, is_error) = match response {
-        proto::Response::Error { message } => (pretty(&json!({ "error": message })), true),
-        proto::Response::Logs { intent, data, .. } => (log_text(*intent, data), false),
+        wire::Response::Error { message } => (pretty(&json!({ "error": message })), true),
+        wire::Response::Logs { intent, data, .. } => (log_text(*intent, data), false),
         other => (
             pretty(&serde_json::to_value(other).unwrap_or(json!({}))),
             false,
@@ -572,7 +572,7 @@ fn pretty(payload: &Value) -> String {
 }
 
 /// A retrieved log for the model: its text, or its size if it is binary.
-fn log_text(intent: proto::LogIntent, data: &str) -> String {
+fn log_text(intent: api::LogIntent, data: &str) -> String {
     match BASE64.decode(data) {
         Ok(log) if log.is_empty() => format!("The device has no {intent:?} log."),
         Ok(log) => String::from_utf8(log).unwrap_or_else(|e| {

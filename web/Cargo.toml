@@ -1,6 +1,6 @@
 [package]
 name = "matter-peek-web"
-description = "Yew/Wasm web UI for matter-peek (WS/JSON client over the RPC contract)"
+description = "Yew/Wasm web UI for matter-peek (a WebSocket/JSON client of the API)"
 version = "0.1.0"
 edition = "2021"
 authors = ["Ivan Markov <ivan.markov@gmail.com>"]
@@ -11,7 +11,8 @@ repository = "https://github.com/sysgrok/matter-peek"
 [workspace]
 
 [dependencies]
-matter-peek-proto = { path = "../proto" }
+# The API's types and messages only, without the controller.
+matter-peek-core = { path = "../core", default-features = false }
 
 yew = { version = "0.21", features = ["csr"] }
 gloo-net = { version = "0.6", features = ["websocket"] }

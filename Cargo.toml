@@ -2,11 +2,9 @@
 resolver = "2"
 members = [
     "core",
+    "server",
     "cli",
-    "proto",
-    "rpc",
     "mcp",
-    # "uniffi",  # Phase 3 — mobile bindings
     # "web" is a separate wasm crate, excluded from the native workspace build.
 ]
 exclude = ["web"]
@@ -34,7 +32,7 @@ futures-lite = "2"
 rand = { version = "0.10", features = ["std", "std_rng", "thread_rng"] }
 static_cell = "2"
 
-# Phase 1 — RPC server (smol/async-io family, to match the core's runtime).
+# The server, CLI and MCP shells (smol/async-io family, as the core's host).
 serde = { version = "1", default-features = false }
 serde_json = "1"
 async-net = "2"
@@ -51,5 +49,5 @@ nix = { version = "0.30", features = ["net"] }
 # `main`: `Transport::browse`, the OTA Provider changes and the Commissioner's
 # PASE session reuse.
 [patch.crates-io]
-rs-matter = { path = "../rs-matter/rs-matter" }
-#rs-matter = { git = "https://github.com/project-chip/rs-matter" }
+#rs-matter = { path = "../rs-matter/rs-matter" }
+rs-matter = { git = "https://github.com/project-chip/rs-matter" }

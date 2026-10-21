@@ -1,6 +1,6 @@
 //! matter-peek web UI (Yew/Wasm).
 //!
-//! A WS/JSON client over the [`matter_peek_proto`] contract: the devices on our
+//! A WebSocket/JSON client of the matter-peek API ([`matter_peek_core::api::wire`]): the devices on our
 //! fabric with their live health, logs and updates; commissioning (with mDNS
 //! discovery); and the OTA images.
 
@@ -12,22 +12,22 @@ use gloo_net::websocket::{futures::WebSocket, Message};
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
-use matter_peek_proto as proto;
+use matter_peek_core::api::{self, wire};
 
-/// Where the RPC server listens (see `matter-peek-rpc`'s default).
+/// Where the server listens (see `matter-peek-server`'s default).
 const WS_URL: &str = "ws://127.0.0.1:8087";
 
 #[derive(Clone, PartialEq)]
 struct StepLine {
-    step: proto::CommissionStep,
-    status: proto::StepStatus,
+    step: api::CommissionStep,
+    status: api::StepStatus,
 }
 
 /// UI state for one live health subscription (per device).
 #[derive(Clone, PartialEq)]
 struct LiveSub {
     /// The running, merged health view (successive report deltas merged in).
-    health: proto::DeviceHealth,
+    health: api::DeviceHealth,
     /// Connection state of this subscription (live / offline / …).
     conn: SubConn,
     /// How many reports the device's subscription has delivered.
@@ -37,7 +37,7 @@ struct LiveSub {
 impl Default for LiveSub {
     fn default() -> Self {
         Self {
-            health: proto::DeviceHealth::default(),
+            health: api::DeviceHealth::default(),
             conn: SubConn::Connecting,
             updates: 0,
         }
@@ -134,13 +134,13 @@ enum Msg {
     OpenLogs(u64),
     CloseLogs,
     /// Retrieve a log of the device whose logs popup is open.
-    FetchLogs(proto::LogIntent),
+    FetchLogs(api::LogIntent),
     /// A live health update arrived for a subscribed device (node_id, the
     /// subscription's report count, health). Deltas are merged into that
     /// device's running view.
-    HealthReport(u64, u64, proto::DeviceHealth),
+    HealthReport(u64, u64, api::DeviceHealth),
     /// A subscription's connection state changed (node_id, state).
-    SubState(u64, proto::SubscriptionState),
+    SubState(u64, api::SubscriptionState),
     /// The persistent subscription WS is open and ready; its writer sink is
     /// attached. Any subscriptions queued before it opened are (re)sent.
     SubWsReady(futures::channel::mpsc::UnboundedSender<String>),
@@ -168,9 +168,9 @@ enum Msg {
     /// Update a device (node_id) to its chosen image.
     OtaUpdate(u64),
     /// How a device's (node_id) update goes.
-    OtaProgress(u64, proto::OtaProgress),
+    OtaProgress(u64, api::OtaProgress),
     Step(StepLine),
-    Done(proto::Response),
+    Done(wire::Response),
     Error(String),
 }
 
@@ -202,17 +202,17 @@ struct App {
     busy_stored: bool,
     /// Which Refresh button's request that is, for its spinner.
     loading: Option<Loading>,
-    discovered: Vec<proto::DiscoveredDevice>,
-    discovered_ble: Vec<proto::BleDevice>,
+    discovered: Vec<api::DiscoveredDevice>,
+    discovered_ble: Vec<api::BleDevice>,
     /// The devices on our fabric.
-    stored: Vec<proto::DeviceInfo>,
+    stored: Vec<api::DeviceInfo>,
     /// Per-device tag-input text (node_id → comma-separated edit buffer). Seeded
     /// from the device's current tags when the list arrives.
     tag_inputs: HashMap<u64, String>,
     /// Filter the device list to devices whose tags contain this substring.
     tag_filter: String,
     steps: Vec<StepLine>,
-    result: Option<proto::Response>,
+    result: Option<wire::Response>,
     /// Transient status line for device ops (list size / identify ack).
     stored_status: Option<String>,
     /// Live health subscriptions, keyed by device `node_id`. Multiple devices can
@@ -234,7 +234,7 @@ struct App {
     /// confirmation, instead of immediately running.
     confirm_recommission: bool,
     /// The stored OTA images.
-    ota_images: Vec<proto::OtaImageInfo>,
+    ota_images: Vec<api::OtaImageInfo>,
     /// The image chosen to update each device to (node_id → image name).
     ota_choice: HashMap<u64, String>,
     /// How each device's update goes (node_id → status line).
@@ -248,7 +248,7 @@ struct App {
 struct LogsView {
     node_id: u64,
     /// The log being retrieved or shown.
-    intent: Option<proto::LogIntent>,
+    intent: Option<api::LogIntent>,
     loading: bool,
     /// The retrieved log, base64-encoded as it came.
     data: Option<String>,
@@ -307,16 +307,16 @@ impl Component for App {
                     self.busy_stored = true;
                     self.loading = Some(Loading::List);
                     self.stored_status = None;
-                    send_request(ctx.link().clone(), proto::Request::ListDevices);
+                    send_request(ctx.link().clone(), wire::Request::ListDevices);
                 }
                 // Devices offer updates to the images.
                 if matches!(tab, Tab::Devices | Tab::Updates) {
-                    send_request(ctx.link().clone(), proto::Request::OtaImages);
+                    send_request(ctx.link().clone(), wire::Request::OtaImages);
                 }
                 true
             }
             Msg::OtaImages => {
-                send_request(ctx.link().clone(), proto::Request::OtaImages);
+                send_request(ctx.link().clone(), wire::Request::OtaImages);
                 false
             }
             Msg::QrImage(file) => {
@@ -334,7 +334,7 @@ impl Component for App {
                 true
             }
             Msg::OtaDelete(name) => {
-                send_request(ctx.link().clone(), proto::Request::OtaDelete { name });
+                send_request(ctx.link().clone(), wire::Request::OtaDelete { name });
                 false
             }
             Msg::OtaChoose(node_id, name) => {
@@ -462,7 +462,7 @@ impl Component for App {
                 self.loading = Some(Loading::List);
                 self.stored_status = None;
                 self.error = None;
-                send_request(ctx.link().clone(), proto::Request::ListDevices);
+                send_request(ctx.link().clone(), wire::Request::ListDevices);
                 true
             }
             Msg::Sync => {
@@ -470,7 +470,7 @@ impl Component for App {
                 self.stored_status = Some("Syncing with the devices on our fabric…".into());
                 self.error = None;
                 self.notice = None;
-                send_request(ctx.link().clone(), proto::Request::Sync);
+                send_request(ctx.link().clone(), wire::Request::Sync);
                 true
             }
             Msg::Refresh(node_id) => {
@@ -480,13 +480,13 @@ impl Component for App {
                 self.busy_stored = true;
                 self.loading = Some(Loading::Device(node_id));
                 self.error = None;
-                send_request(ctx.link().clone(), proto::Request::PeekDevice { node_id });
+                send_request(ctx.link().clone(), wire::Request::PeekDevice { node_id });
                 true
             }
             Msg::Remember(node_id) => {
                 self.busy_stored = true;
                 self.error = None;
-                send_request(ctx.link().clone(), proto::Request::Remember { node_id });
+                send_request(ctx.link().clone(), wire::Request::Remember { node_id });
                 true
             }
             Msg::OpenLogs(node_id) => {
@@ -513,7 +513,7 @@ impl Component for App {
                 self.error = None;
                 send_request(
                     ctx.link().clone(),
-                    proto::Request::RetrieveLogs {
+                    wire::Request::RetrieveLogs {
                         node_id: logs.node_id,
                         intent,
                     },
@@ -526,7 +526,7 @@ impl Component for App {
                 self.error = None;
                 send_request(
                     ctx.link().clone(),
-                    proto::Request::Identify { node_id, secs: 3 },
+                    wire::Request::Identify { node_id, secs: 3 },
                 );
                 true
             }
@@ -548,7 +548,7 @@ impl Component for App {
                 self.subs.remove(&node_id);
                 send_request(
                     ctx.link().clone(),
-                    proto::Request::Decommission {
+                    wire::Request::Decommission {
                         node_id,
                         force: false,
                     },
@@ -567,12 +567,12 @@ impl Component for App {
             }
             Msg::SubState(node_id, state) => {
                 match state {
-                    proto::SubscriptionState::Live { max_int_secs } => {
+                    api::SubscriptionState::Live { max_int_secs } => {
                         if let Some(sub) = self.subs.get_mut(&node_id) {
                             sub.conn = SubConn::Live { max_int_secs };
                         }
                     }
-                    proto::SubscriptionState::Offline => {
+                    api::SubscriptionState::Offline => {
                         if let Some(sub) = self.subs.get_mut(&node_id) {
                             sub.conn = SubConn::Offline;
                         }
@@ -580,12 +580,12 @@ impl Component for App {
                     // Terminal. A device we still watch and still store gets
                     // re-subscribed; one we stopped watching (e.g. being
                     // decommissioned) or that is gone from the store is dropped.
-                    proto::SubscriptionState::Stopped => {
+                    api::SubscriptionState::Stopped => {
                         let still_stored = self.stored.iter().any(|d| d.handle.node_id == node_id);
                         match self.subs.get_mut(&node_id) {
                             Some(sub) if still_stored => {
                                 sub.conn = SubConn::Reconnecting;
-                                self.sub_send(&proto::Request::Subscribe { node_id });
+                                self.sub_send(&wire::Request::Subscribe { node_id });
                             }
                             _ => {
                                 self.subs.remove(&node_id);
@@ -601,7 +601,7 @@ impl Component for App {
                 // the initial open and any reconnect.
                 let nodes: Vec<u64> = self.subs.keys().copied().collect();
                 for node_id in nodes {
-                    self.sub_send(&proto::Request::Subscribe { node_id });
+                    self.sub_send(&wire::Request::Subscribe { node_id });
                 }
                 true
             }
@@ -640,10 +640,7 @@ impl Component for App {
                 self.busy_stored = true;
                 self.stored_status = Some(format!("Saving tags for node 0x{node_id:016x}…"));
                 self.error = None;
-                send_request(
-                    ctx.link().clone(),
-                    proto::Request::SetTags { node_id, tags },
-                );
+                send_request(ctx.link().clone(), wire::Request::SetTags { node_id, tags });
                 true
             }
             Msg::Step(line) => {
@@ -659,15 +656,15 @@ impl Component for App {
                     logs.loading = false;
                 }
                 match resp {
-                    proto::Response::Discovered {
+                    wire::Response::Discovered {
                         devices,
                         ble_devices,
                     } => {
                         self.discovered = devices;
                         self.discovered_ble = ble_devices;
                     }
-                    proto::Response::SetupCode { setup_code } => self.setup_code = setup_code,
-                    proto::Response::Devices { devices, notice } => {
+                    wire::Response::SetupCode { setup_code } => self.setup_code = setup_code,
+                    wire::Response::Devices { devices, notice } => {
                         self.stored_status = Some(format!("{} device(s)", devices.len()));
                         // A non-fatal remark about whatever produced this list —
                         // e.g. a decommission that dropped the record locally but
@@ -686,23 +683,19 @@ impl Component for App {
                         // listed device (and drop panels for any that vanished).
                         self.sync_subscriptions(ctx);
                     }
-                    proto::Response::Peek { handle, health, .. } => {
+                    wire::Response::Peek { node_id, health } => {
                         // A Refresh result: merge the fresh read into the device's
                         // card panel so its values (uptime, heap, …) update in place.
-                        self.subs
-                            .entry(handle.node_id)
-                            .or_default()
-                            .health
-                            .merge(health);
+                        self.subs.entry(node_id).or_default().health.merge(health);
                     }
-                    proto::Response::Ok => {
+                    wire::Response::Ok => {
                         self.stored_status =
                             Some("Identify acknowledged — device should blink.".into());
                     }
                     // `Subscribed` / streamed subscription frames arrive on the
                     // dedicated persistent subscription WS, not this one-shot path.
-                    proto::Response::Subscribed { .. } => {}
-                    proto::Response::OtaImages { images } => {
+                    wire::Response::Subscribed { .. } => {}
+                    wire::Response::OtaImages { images } => {
                         if self
                             .notice
                             .as_deref()
@@ -713,28 +706,28 @@ impl Component for App {
                         self.ota_images = images;
                     }
                     // Uploads run on their own connection (`send_ota_upload`).
-                    proto::Response::OtaUploadStarted { .. } => {}
-                    proto::Response::Cancelled { decommissioned } => {
+                    wire::Response::OtaUploadStarted { .. } => {}
+                    wire::Response::Cancelled { decommissioned } => {
                         self.notice = Some(if decommissioned {
                             "Commission cancelled — the device had been added to our fabric and was cleaned up (decommissioned).".into()
                         } else {
                             "Commission cancelled before the device was modified.".into()
                         });
                     }
-                    proto::Response::Logs { node_id, data, .. } => {
+                    wire::Response::Logs { node_id, data, .. } => {
                         if let Some(logs) = self.logs.as_mut().filter(|l| l.node_id == node_id) {
                             logs.data = Some(data);
                         }
                     }
                     // The device is listed now: refresh the list and surface it on
                     // the Devices tab.
-                    other @ proto::Response::Commissioned(_) => {
+                    other @ wire::Response::Commissioned(_) => {
                         // Its commissioning window is closed now — remember its
                         // address to guard a re-commission.
                         if !self.via_ble {
                             self.last_commissioned_addr = Some(self.peer_addr.trim().to_string());
                         }
-                        if let proto::Response::Commissioned(result) = &other {
+                        if let wire::Response::Commissioned(result) = &other {
                             if let Some(node_id) = result.rematch_candidate {
                                 self.notice = Some(rematch_notice(node_id));
                             }
@@ -742,10 +735,10 @@ impl Component for App {
                         self.result = Some(other);
                         self.busy_stored = true;
                         self.loading = Some(Loading::List);
-                        send_request(ctx.link().clone(), proto::Request::ListDevices);
+                        send_request(ctx.link().clone(), wire::Request::ListDevices);
                         self.tab = Tab::Devices;
                     }
-                    proto::Response::Error { message } => self.error = Some(message),
+                    wire::Response::Error { message } => self.error = Some(message),
                 }
                 true
             }
@@ -808,9 +801,9 @@ impl App {
     /// Send a request over the **persistent subscription WS** (Subscribe /
     /// Unsubscribe). No-op if the WS isn't open yet — `SubWsReady` re-sends the
     /// active subscriptions once it opens.
-    fn sub_send(&self, request: &proto::Request) {
+    fn sub_send(&self, request: &wire::Request) {
         if let Some(tx) = &self.sub_ws {
-            let msg = proto::ClientMsg {
+            let msg = wire::ClientMsg {
                 req_id: 0,
                 request: request.clone(),
             };
@@ -860,27 +853,27 @@ impl App {
                         Ok(Message::Bytes(_)) => continue,
                         Err(_) => break,
                     };
-                    let Ok(msg) = serde_json::from_str::<proto::ServerMsg>(&text) else {
+                    let Ok(msg) = serde_json::from_str::<wire::ServerMsg>(&text) else {
                         continue;
                     };
                     match msg {
-                        proto::ServerMsg::Event { event } => match event {
-                            proto::Event::HealthReport {
+                        wire::ServerMsg::Event { event } => match event {
+                            wire::Event::HealthReport {
                                 node_id,
                                 seq,
                                 health,
                             } => link.send_message(Msg::HealthReport(node_id, seq, health)),
-                            proto::Event::SubscriptionState { node_id, state } => {
+                            wire::Event::SubscriptionState { node_id, state } => {
                                 link.send_message(Msg::SubState(node_id, state))
                             }
-                            proto::Event::OtaProgress { node_id, progress } => {
+                            wire::Event::OtaProgress { node_id, progress } => {
                                 link.send_message(Msg::OtaProgress(node_id, progress))
                             }
-                            proto::Event::Step { .. } => {}
+                            wire::Event::Step { .. } => {}
                         },
                         // `Subscribed` acks arrive here; the panel already exists,
                         // so nothing to do — the streamed events drive the UI.
-                        proto::ServerMsg::Response { .. } => {}
+                        wire::ServerMsg::Response { .. } => {}
                     }
                 }
             };
@@ -907,7 +900,7 @@ impl App {
         for node_id in &stored_ids {
             if !self.subs.contains_key(node_id) {
                 self.subs.insert(*node_id, LiveSub::default());
-                self.sub_send(&proto::Request::Subscribe { node_id: *node_id });
+                self.sub_send(&wire::Request::Subscribe { node_id: *node_id });
             }
         }
         // Drop subscriptions for devices no longer in the store.
@@ -918,7 +911,7 @@ impl App {
             .filter(|id| !stored_ids.contains(id))
             .collect();
         for node_id in gone {
-            self.sub_send(&proto::Request::Unsubscribe { node_id });
+            self.sub_send(&wire::Request::Unsubscribe { node_id });
             self.subs.remove(&node_id);
         }
     }
@@ -942,7 +935,7 @@ impl App {
         self.error = None;
         send_request(
             ctx.link().clone(),
-            proto::Request::Discover {
+            wire::Request::Discover {
                 discriminator,
                 setup_code,
                 max: 16,
@@ -970,26 +963,26 @@ impl App {
     }
 
     /// How the commission reaches the device, from the form.
-    fn commission_via(&self) -> proto::CommissionVia {
+    fn commission_via(&self) -> api::CommissionVia {
         if !self.via_ble {
-            return proto::CommissionVia::Ip {
+            return api::CommissionVia::Ip {
                 addr: self.peer_addr.trim().to_string(),
             };
         }
 
         let addr = self.ble_addr.trim();
         let network = match self.network {
-            Network::Wifi => Some(proto::NetworkCredentials::Wifi {
+            Network::Wifi => Some(api::NetworkCredentials::Wifi {
                 ssid: self.wifi_ssid.clone(),
                 password: self.wifi_password.clone(),
             }),
-            Network::Thread => Some(proto::NetworkCredentials::Thread {
+            Network::Thread => Some(api::NetworkCredentials::Thread {
                 dataset: self.thread_dataset.split_whitespace().collect(),
             }),
             Network::None => None,
         };
 
-        proto::CommissionVia::Ble {
+        api::CommissionVia::Ble {
             addr: (!addr.is_empty()).then(|| addr.to_string()),
             network,
         }
@@ -1008,7 +1001,7 @@ impl App {
         self.notice = None;
         self.error = None;
 
-        let req = proto::Request::Commission {
+        let req = wire::Request::Commission {
             via: self.commission_via(),
             setup_code,
             remember: self.remember,
@@ -1429,7 +1422,7 @@ impl App {
 
         let phase = phase_name(last.step);
         let (label, bar_class) = match &last.status {
-            proto::StepStatus::Failed { message } => {
+            api::StepStatus::Failed { message } => {
                 (format!("{phase} failed: {message}"), "is-danger")
             }
             _ if self.running => (format!("{phase}…"), "is-primary"),
@@ -1453,7 +1446,7 @@ impl App {
 
     fn view_result(&self) -> Html {
         match &self.result {
-            Some(proto::Response::Commissioned(result)) => html! {
+            Some(wire::Response::Commissioned(result)) => html! {
                 <div class="notification is-success is-light">
                     { format!(
                         "Commissioned as node 0x{:016x} — see the Devices tab.",
@@ -1461,7 +1454,7 @@ impl App {
                     ) }
                 </div>
             },
-            Some(proto::Response::Error { message }) => html! {
+            Some(wire::Response::Error { message }) => html! {
                 <div class="notification is-danger is-light">{ format!("Server error: {message}") }</div>
             },
             // Device responses (Devices / Peek / Ok) and Discovered are routed to
@@ -1475,7 +1468,7 @@ impl App {
     /// The devices on our fabric, each with its live health and its actions.
     fn view_devices_tab(&self, link: &html::Scope<Self>) -> Html {
         let filter = self.tag_filter.trim().to_lowercase();
-        let visible: Vec<&proto::DeviceInfo> = self
+        let visible: Vec<&api::DeviceInfo> = self
             .stored
             .iter()
             .filter(|d| {
@@ -1549,7 +1542,7 @@ impl App {
         }
     }
 
-    fn view_device_card(&self, d: &proto::DeviceInfo, link: &html::Scope<Self>) -> Html {
+    fn view_device_card(&self, d: &api::DeviceInfo, link: &html::Scope<Self>) -> Html {
         let node_id = d.handle.node_id;
         let refresh = link.callback(move |_| Msg::Refresh(node_id));
         let identify = link.callback(move |_| Msg::Identify(node_id));
@@ -1689,8 +1682,8 @@ impl App {
     /// than what it runs.
     fn applicable<'a>(
         &'a self,
-        d: &'a proto::DeviceInfo,
-    ) -> impl Iterator<Item = &'a proto::OtaImageInfo> + 'a {
+        d: &'a api::DeviceInfo,
+    ) -> impl Iterator<Item = &'a api::OtaImageInfo> + 'a {
         let fp = &d.fingerprint;
 
         self.ota_images.iter().filter(move |image| {
@@ -1706,7 +1699,7 @@ impl App {
     /// A device card's OTA update controls, when there is an image for it.
     fn view_device_update(
         &self,
-        d: &proto::DeviceInfo,
+        d: &api::DeviceInfo,
         offline: bool,
         link: &html::Scope<Self>,
     ) -> Html {
@@ -1829,7 +1822,7 @@ impl App {
             .map(device_title)
             .unwrap_or_else(|| format!("node 0x{:016x}", logs.node_id));
 
-        let intent_button = |intent: proto::LogIntent| {
+        let intent_button = |intent: api::LogIntent| {
             let active = logs.intent == Some(intent);
             html! {
                 <button
@@ -1853,9 +1846,9 @@ impl App {
                     <section class="modal-card-body">
                         <div class="app container">
                             <div class="buttons">
-                                { intent_button(proto::LogIntent::EndUserSupport) }
-                                { intent_button(proto::LogIntent::NetworkDiag) }
-                                { intent_button(proto::LogIntent::CrashLogs) }
+                                { intent_button(api::LogIntent::EndUserSupport) }
+                                { intent_button(api::LogIntent::NetworkDiag) }
+                                { intent_button(api::LogIntent::CrashLogs) }
                             </div>
 
                             // The page's error banner is hidden behind the popup.
@@ -1986,7 +1979,7 @@ fn opt_str<T: std::fmt::Display>(v: Option<T>) -> String {
 }
 
 /// Compact one-line fingerprint summary for a stored-device card.
-fn fingerprint_line(fp: &proto::Fingerprint) -> String {
+fn fingerprint_line(fp: &api::Fingerprint) -> String {
     fn dec<T: core::fmt::Display>(v: Option<T>) -> String {
         v.map(|x| x.to_string()).unwrap_or_else(|| "—".to_string())
     }
@@ -2015,7 +2008,7 @@ fn rematch_notice(node_id: u64) -> String {
 
 /// A human label for a device: the user-set NodeLabel, else the device's own
 /// ProductName, else the stable identifiers, else the raw node id.
-fn device_title(d: &proto::DeviceInfo) -> String {
+fn device_title(d: &api::DeviceInfo) -> String {
     if !d.node_label.is_empty() {
         d.node_label.clone()
     } else if !d.product_name.is_empty() {
@@ -2029,25 +2022,25 @@ fn device_title(d: &proto::DeviceInfo) -> String {
     }
 }
 
-fn log_intent_name(intent: proto::LogIntent) -> &'static str {
+fn log_intent_name(intent: api::LogIntent) -> &'static str {
     match intent {
-        proto::LogIntent::EndUserSupport => "End-user support",
-        proto::LogIntent::NetworkDiag => "Network diagnostics",
-        proto::LogIntent::CrashLogs => "Crash",
+        api::LogIntent::EndUserSupport => "End-user support",
+        api::LogIntent::NetworkDiag => "Network diagnostics",
+        api::LogIntent::CrashLogs => "Crash",
     }
 }
 
-fn log_intent_file(intent: proto::LogIntent) -> &'static str {
+fn log_intent_file(intent: api::LogIntent) -> &'static str {
     match intent {
-        proto::LogIntent::EndUserSupport => "support",
-        proto::LogIntent::NetworkDiag => "network",
-        proto::LogIntent::CrashLogs => "crash",
+        api::LogIntent::EndUserSupport => "support",
+        api::LogIntent::NetworkDiag => "network",
+        api::LogIntent::CrashLogs => "crash",
     }
 }
 
 /// Open a WS, send the request, and pump server frames back as component
 /// messages (step events, then the final response) until it completes.
-fn send_request(link: html::Scope<App>, request: proto::Request) {
+fn send_request(link: html::Scope<App>, request: wire::Request) {
     spawn_local(async move {
         let ws = match WebSocket::open(WS_URL) {
             Ok(ws) => ws,
@@ -2058,8 +2051,8 @@ fn send_request(link: html::Scope<App>, request: proto::Request) {
         };
         let (mut write, mut read) = ws.split();
 
-        let req_id: proto::ReqId = 1;
-        let client_msg = proto::ClientMsg { req_id, request };
+        let req_id: wire::ReqId = 1;
+        let client_msg = wire::ClientMsg { req_id, request };
         let json = serde_json::to_string(&client_msg).unwrap();
         if let Err(e) = write.send(Message::Text(json)).await {
             link.send_message(Msg::Error(format!("send failed: {e}")));
@@ -2068,7 +2061,7 @@ fn send_request(link: html::Scope<App>, request: proto::Request) {
 
         // `req_id`-keyed routing is trivial here (one in-flight request) but kept
         // explicit to mirror the multi-request server contract.
-        let mut _pending: HashMap<proto::ReqId, ()> = HashMap::new();
+        let mut _pending: HashMap<wire::ReqId, ()> = HashMap::new();
         _pending.insert(req_id, ());
 
         while let Some(frame) = read.next().await {
@@ -2080,7 +2073,7 @@ fn send_request(link: html::Scope<App>, request: proto::Request) {
                     return;
                 }
             };
-            let server_msg: proto::ServerMsg = match serde_json::from_str(&text) {
+            let server_msg: wire::ServerMsg = match serde_json::from_str(&text) {
                 Ok(m) => m,
                 Err(e) => {
                     link.send_message(Msg::Error(format!("bad server msg: {e}")));
@@ -2088,17 +2081,17 @@ fn send_request(link: html::Scope<App>, request: proto::Request) {
                 }
             };
             match server_msg {
-                proto::ServerMsg::Event { event } => match event {
-                    proto::Event::Step { step, status, .. } => {
+                wire::ServerMsg::Event { event } => match event {
+                    wire::Event::Step { step, status, .. } => {
                         link.send_message(Msg::Step(StepLine { step, status }));
                     }
                     // Subscription events flow on the dedicated persistent WS, not
                     // this one-shot connection — ignore any that land here.
-                    proto::Event::HealthReport { .. }
-                    | proto::Event::SubscriptionState { .. }
-                    | proto::Event::OtaProgress { .. } => {}
+                    wire::Event::HealthReport { .. }
+                    | wire::Event::SubscriptionState { .. }
+                    | wire::Event::OtaProgress { .. } => {}
                 },
-                proto::ServerMsg::Response { response, .. } => {
+                wire::ServerMsg::Response { response, .. } => {
                     link.send_message(Msg::Done(response));
                     return;
                 }
@@ -2135,7 +2128,7 @@ fn send_qr_image(link: html::Scope<App>, file: web_sys::File) {
         match gloo_file::futures::read_as_bytes(&gloo_file::File::from(file)).await {
             Ok(image) => send_request(
                 link,
-                proto::Request::ReadQrImage {
+                wire::Request::ReadQrImage {
                     image: base64::engine::general_purpose::STANDARD.encode(image),
                 },
             ),
@@ -2161,9 +2154,9 @@ async fn ota_upload(link: &html::Scope<App>, file: gloo_file::File) -> Result<()
     let size = file.size();
     let mut req_id = 0;
 
-    let begin = proto::Request::OtaUploadBegin { size };
+    let begin = wire::Request::OtaUploadBegin { size };
     let upload_id = match call(&mut write, &mut read, &mut req_id, begin).await? {
-        proto::Response::OtaUploadStarted { upload_id } => upload_id,
+        wire::Response::OtaUploadStarted { upload_id } => upload_id,
         other => return Err(response_error(other)),
     };
 
@@ -2174,13 +2167,13 @@ async fn ota_upload(link: &html::Scope<App>, file: gloo_file::File) -> Result<()
             .await
             .map_err(|e| format!("cannot read the file: {e}"))?;
 
-        let request = proto::Request::OtaUploadChunk {
+        let request = wire::Request::OtaUploadChunk {
             upload_id,
             offset,
             data: base64::engine::general_purpose::STANDARD.encode(chunk),
         };
         match call(&mut write, &mut read, &mut req_id, request).await? {
-            proto::Response::Ok => (),
+            wire::Response::Ok => (),
             other => return Err(response_error(other)),
         }
 
@@ -2188,7 +2181,7 @@ async fn ota_upload(link: &html::Scope<App>, file: gloo_file::File) -> Result<()
         link.send_message(Msg::OtaUploading((offset * 100 / size.max(1)) as u8));
     }
 
-    let end = proto::Request::OtaUploadEnd { upload_id };
+    let end = wire::Request::OtaUploadEnd { upload_id };
     let images = call(&mut write, &mut read, &mut req_id, end).await?;
     link.send_message(Msg::Done(images));
 
@@ -2199,15 +2192,15 @@ async fn ota_upload(link: &html::Scope<App>, file: gloo_file::File) -> Result<()
 async fn call<W, R>(
     write: &mut W,
     read: &mut R,
-    req_id: &mut proto::ReqId,
-    request: proto::Request,
-) -> Result<proto::Response, String>
+    req_id: &mut wire::ReqId,
+    request: wire::Request,
+) -> Result<wire::Response, String>
 where
     W: futures::Sink<Message, Error = gloo_net::websocket::WebSocketError> + Unpin,
     R: futures::Stream<Item = Result<Message, gloo_net::websocket::WebSocketError>> + Unpin,
 {
     *req_id += 1;
-    let json = serde_json::to_string(&proto::ClientMsg {
+    let json = serde_json::to_string(&wire::ClientMsg {
         req_id: *req_id,
         request,
     })
@@ -2222,7 +2215,7 @@ where
             continue;
         };
 
-        if let Ok(proto::ServerMsg::Response {
+        if let Ok(wire::ServerMsg::Response {
             req_id: id,
             response,
         }) = serde_json::from_str(&text)
@@ -2236,9 +2229,9 @@ where
     Err("the connection closed".into())
 }
 
-fn response_error(response: proto::Response) -> String {
+fn response_error(response: wire::Response) -> String {
     match response {
-        proto::Response::Error { message } => message,
+        wire::Response::Error { message } => message,
         other => format!("unexpected response: {other:?}"),
     }
 }
@@ -2256,9 +2249,9 @@ fn send_ota_update(link: html::Scope<App>, node_id: u64, name: String) {
         };
         let (mut write, mut read) = ws.split();
 
-        let client_msg = proto::ClientMsg {
+        let client_msg = wire::ClientMsg {
             req_id: 1,
-            request: proto::Request::OtaUpdate { node_id, name },
+            request: wire::Request::OtaUpdate { node_id, name },
         };
         let json = serde_json::to_string(&client_msg).unwrap();
         if let Err(e) = write.send(Message::Text(json)).await {
@@ -2268,17 +2261,17 @@ fn send_ota_update(link: html::Scope<App>, node_id: u64, name: String) {
 
         while let Some(Ok(Message::Text(text))) = read.next().await {
             match serde_json::from_str(&text) {
-                Ok(proto::ServerMsg::Event {
-                    event: proto::Event::OtaProgress { node_id, progress },
+                Ok(wire::ServerMsg::Event {
+                    event: wire::Event::OtaProgress { node_id, progress },
                 }) => {
-                    let applied = matches!(progress, proto::OtaProgress::Applied { .. });
+                    let applied = matches!(progress, api::OtaProgress::Applied { .. });
                     link.send_message(Msg::OtaProgress(node_id, progress));
                     if applied {
                         return;
                     }
                 }
-                Ok(proto::ServerMsg::Response {
-                    response: proto::Response::Error { message },
+                Ok(wire::ServerMsg::Response {
+                    response: wire::Response::Error { message },
                     ..
                 }) => {
                     link.send_message(Msg::Error(message));
@@ -2291,15 +2284,15 @@ fn send_ota_update(link: html::Scope<App>, node_id: u64, name: String) {
 }
 
 /// A status line for a stage of an OTA update.
-fn ota_progress_text(progress: &proto::OtaProgress) -> String {
+fn ota_progress_text(progress: &api::OtaProgress) -> String {
     match progress {
-        proto::OtaProgress::Offered { name } => format!("The device asked; offered {name}"),
-        proto::OtaProgress::NotOffered => {
+        api::OtaProgress::Offered { name } => format!("The device asked; offered {name}"),
+        api::OtaProgress::NotOffered => {
             "The device asked, but the image is not an update for it".into()
         }
-        proto::OtaProgress::Downloading { percent } => format!("Downloading: {percent}%"),
-        proto::OtaProgress::Applying { version } => format!("Applying version {version}…"),
-        proto::OtaProgress::Applied { version } => format!("Updated: runs version {version}"),
+        api::OtaProgress::Downloading { percent } => format!("Downloading: {percent}%"),
+        api::OtaProgress::Applying { version } => format!("Applying version {version}…"),
+        api::OtaProgress::Applied { version } => format!("Updated: runs version {version}"),
     }
 }
 
@@ -2312,9 +2305,9 @@ fn send_cancel() {
             return;
         };
         let (mut write, _read) = ws.split();
-        let client_msg = proto::ClientMsg {
+        let client_msg = wire::ClientMsg {
             req_id: 1,
-            request: proto::Request::Cancel,
+            request: wire::Request::Cancel,
         };
         if let Ok(json) = serde_json::to_string(&client_msg) {
             let _ = write.send(Message::Text(json)).await;
@@ -2362,9 +2355,9 @@ fn valid_setup_code(code: &str) -> bool {
 }
 
 /// Human-readable name for a commission step.
-fn phase_name(step: proto::CommissionStep) -> &'static str {
+fn phase_name(step: api::CommissionStep) -> &'static str {
     match step {
-        proto::CommissionStep::Commission => "Commissioning",
+        api::CommissionStep::Commission => "Commissioning",
     }
 }
 

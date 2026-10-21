@@ -1,6 +1,6 @@
 [package]
 name = "matter-peek-mcp"
-description = "MCP (Model Context Protocol) server exposing matter-peek-core to AI agents"
+description = "MCP (Model Context Protocol) server exposing the matter-peek API to AI agents"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -18,10 +18,9 @@ required-features = ["std"]
 # feature adds the stdio binary that wires it to the matter-peek server.
 default = ["std"]
 std = [
-    "dep:matter-peek-rpc",
+    "dep:matter-peek-server",
     "dep:blocking",
     "dep:futures-lite",
-    "dep:embassy-time-queue-utils",
     "dep:env_logger",
     "serde_json/std",
     "serde/std",
@@ -31,9 +30,9 @@ std = [
 [dependencies]
 # --- Protocol-layer (no_std + alloc) deps: the MCP envelope + tool mapping. ---
 # The MCP *protocol* is transport- and runtime-agnostic and depends only on the
-# wire contract (`proto`) plus serde_json's `alloc` mode. No actor, no std — so
-# this layer is reusable by a future esp on-device shell.
-matter-peek-proto = { path = "../proto" }
+# API's messages (core without the controller) plus serde_json's `alloc` mode.
+# No std, so this layer is reusable by a future esp on-device shell.
+matter-peek-core = { path = "../core", default-features = false }
 # serde + serde_json in `alloc` (no_std) mode; the `std` feature flips them on.
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
@@ -43,14 +42,13 @@ base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 
 # --- std binary glue (behind the `std` feature). ---
 # MCP-over-stdio is just JSON-RPC 2.0 over newline-delimited stdin/stdout; the
-# binary talks to the matter-peek server through `matter-peek-rpc`'s client, on
+# binary talks to the matter-peek server through `matter-peek-server`'s client, on
 # its smol/async-io runtime. (No tokio-based MCP SDK: it is `Send`-bound, which
 # clashes with that single-threaded executor.)
-matter-peek-rpc = { path = "../rpc", optional = true }
+matter-peek-server = { path = "../server", optional = true }
 # `blocking::Unblock` async-wraps stdin/stdout via a thread pool — the smol-family
 # way to do async stdio (a direct `async_io::Async` over stdin can fail to
 # register a pipe/tty fd with epoll).
 blocking = { version = "1", optional = true }
 futures-lite = { workspace = true, optional = true }
-embassy-time-queue-utils = { workspace = true, optional = true }
 env_logger = { workspace = true, optional = true }

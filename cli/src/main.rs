@@ -17,8 +17,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
 
-use matter_peek_proto as proto;
-use matter_peek_rpc::client::{self, Connection};
+use matter_peek_core::api::{self, wire};
+use matter_peek_server::client::{self, Connection};
 
 /// How much of an OTA image goes in one upload request.
 const UPLOAD_CHUNK_LEN: usize = 256 * 1024;
@@ -151,7 +151,7 @@ enum LogKind {
     Crash,
 }
 
-impl From<LogKind> for proto::LogIntent {
+impl From<LogKind> for api::LogIntent {
     fn from(kind: LogKind) -> Self {
         match kind {
             LogKind::Support => Self::EndUserSupport,
@@ -183,7 +183,7 @@ fn main() -> ExitCode {
 
     let cli = Cli::parse();
 
-    match matter_peek_rpc::block_on(run(cli)) {
+    match matter_peek_server::block_on(run(cli)) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(e) => {
@@ -203,18 +203,18 @@ async fn run(cli: Cli) -> io::Result<bool> {
     let out = Out { json: cli.json };
 
     match cli.command {
-        Command::List => devices(&out, call(&conn, &out, proto::Request::ListDevices).await?),
-        Command::Sync => devices(&out, call(&conn, &out, proto::Request::Sync).await?),
+        Command::List => devices(&out, call(&conn, &out, wire::Request::ListDevices).await?),
+        Command::Sync => devices(&out, call(&conn, &out, wire::Request::Sync).await?),
         Command::Discover { filter, max } => {
             let (discriminator, setup_code) = discover_filter(filter);
-            let request = proto::Request::Discover {
+            let request = wire::Request::Discover {
                 discriminator,
                 setup_code,
                 max,
             };
 
             Ok(match call(&conn, &out, request).await? {
-                Some(proto::Response::Discovered {
+                Some(wire::Response::Discovered {
                     devices,
                     ble_devices,
                 }) if !out.json => {
@@ -239,12 +239,12 @@ async fn run(cli: Cli) -> io::Result<bool> {
             })
         }
         Command::Qr { image } => {
-            let request = proto::Request::ReadQrImage {
+            let request = wire::Request::ReadQrImage {
                 image: BASE64.encode(std::fs::read(image)?),
             };
 
             Ok(match call(&conn, &out, request).await? {
-                Some(proto::Response::SetupCode { setup_code }) if !out.json => {
+                Some(wire::Response::SetupCode { setup_code }) if !out.json => {
                     println!("{setup_code}");
                     true
                 }
@@ -262,29 +262,27 @@ async fn run(cli: Cli) -> io::Result<bool> {
             remember,
         } => {
             let via = match ip {
-                Some(addr) => proto::CommissionVia::Ip { addr },
-                None => proto::CommissionVia::Ble {
+                Some(addr) => api::CommissionVia::Ip { addr },
+                None => api::CommissionVia::Ble {
                     addr: ble_addr,
                     network: match (wifi, thread_dataset) {
-                        (Some(ssid), _) => Some(proto::NetworkCredentials::Wifi {
+                        (Some(ssid), _) => Some(api::NetworkCredentials::Wifi {
                             ssid,
                             password: wifi_password.unwrap_or_default(),
                         }),
-                        (None, Some(dataset)) => {
-                            Some(proto::NetworkCredentials::Thread { dataset })
-                        }
+                        (None, Some(dataset)) => Some(api::NetworkCredentials::Thread { dataset }),
                         (None, None) => None,
                     },
                 },
             };
-            let request = proto::Request::Commission {
+            let request = wire::Request::Commission {
                 via,
                 setup_code,
                 remember,
             };
 
             Ok(match call(&conn, &out, request).await? {
-                Some(proto::Response::Commissioned(result)) if !out.json => {
+                Some(wire::Response::Commissioned(result)) if !out.json => {
                     println!("Commissioned as node {:#018x}.", result.handle.node_id);
                     if let Some(node_id) = result.rematch_candidate {
                         println!(
@@ -298,12 +296,12 @@ async fn run(cli: Cli) -> io::Result<bool> {
         }
         Command::Cancel => ok(
             &out,
-            call(&conn, &out, proto::Request::Cancel).await?,
+            call(&conn, &out, wire::Request::Cancel).await?,
             "Cancel requested.",
         ),
         Command::Remember { node } => devices(
             &out,
-            call(&conn, &out, proto::Request::Remember { node_id: node.0 }).await?,
+            call(&conn, &out, wire::Request::Remember { node_id: node.0 }).await?,
         ),
         Command::Tag { node, tags } => {
             let tags = tags
@@ -312,7 +310,7 @@ async fn run(cli: Cli) -> io::Result<bool> {
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty())
                 .collect();
-            let request = proto::Request::SetTags {
+            let request = wire::Request::SetTags {
                 node_id: node.0,
                 tags,
             };
@@ -320,8 +318,8 @@ async fn run(cli: Cli) -> io::Result<bool> {
             devices(&out, call(&conn, &out, request).await?)
         }
         Command::Peek { node } => Ok(
-            match call(&conn, &out, proto::Request::PeekDevice { node_id: node.0 }).await? {
-                Some(proto::Response::Peek { health, .. }) if !out.json => {
+            match call(&conn, &out, wire::Request::PeekDevice { node_id: node.0 }).await? {
+                Some(wire::Response::Peek { health, .. }) if !out.json => {
                     println!("{}", health_text(&health));
                     true
                 }
@@ -330,20 +328,20 @@ async fn run(cli: Cli) -> io::Result<bool> {
         ),
         Command::Watch { node } => watch(&conn, &out, node.0).await,
         Command::Logs { node, kind, output } => {
-            let request = proto::Request::RetrieveLogs {
+            let request = wire::Request::RetrieveLogs {
                 node_id: node.0,
                 intent: kind.into(),
             };
 
             match call(&conn, &out, request).await? {
-                Some(proto::Response::Logs { intent, data, .. }) if !out.json => {
+                Some(wire::Response::Logs { intent, data, .. }) if !out.json => {
                     log(intent, &data, output)
                 }
                 response => Ok(response.is_some()),
             }
         }
         Command::Identify { node, secs } => {
-            let request = proto::Request::Identify {
+            let request = wire::Request::Identify {
                 node_id: node.0,
                 secs,
             };
@@ -355,7 +353,7 @@ async fn run(cli: Cli) -> io::Result<bool> {
             )
         }
         Command::Decommission { node, force } => {
-            let request = proto::Request::Decommission {
+            let request = wire::Request::Decommission {
                 node_id: node.0,
                 force,
             };
@@ -363,12 +361,12 @@ async fn run(cli: Cli) -> io::Result<bool> {
             devices(&out, call(&conn, &out, request).await?)
         }
         Command::Ota(Ota::Images) => {
-            images(&out, call(&conn, &out, proto::Request::OtaImages).await?)
+            images(&out, call(&conn, &out, wire::Request::OtaImages).await?)
         }
         Command::Ota(Ota::Upload { file }) => upload(&conn, &out, &file).await,
         Command::Ota(Ota::Delete { name }) => images(
             &out,
-            call(&conn, &out, proto::Request::OtaDelete { name }).await?,
+            call(&conn, &out, wire::Request::OtaDelete { name }).await?,
         ),
         Command::Ota(Ota::Update { node, name }) => update(&conn, &out, node.0, name).await,
     }
@@ -380,37 +378,37 @@ struct Out {
 }
 
 impl Out {
-    fn event(&self, event: &proto::Event) {
+    fn event(&self, event: &wire::Event) {
         if self.json {
             println!("{}", serde_json::to_string(event).unwrap_or_default());
             return;
         }
 
         match event {
-            proto::Event::Step { step, status, .. } => {
+            wire::Event::Step { step, status, .. } => {
                 let step = match step {
-                    proto::CommissionStep::Commission => "Commissioning",
+                    api::CommissionStep::Commission => "Commissioning",
                 };
                 match status {
-                    proto::StepStatus::Started => println!("{step}..."),
-                    proto::StepStatus::Done => println!("{step}: done"),
-                    proto::StepStatus::Failed { message } => println!("{step}: failed: {message}"),
+                    api::StepStatus::Started => println!("{step}..."),
+                    api::StepStatus::Done => println!("{step}: done"),
+                    api::StepStatus::Failed { message } => println!("{step}: failed: {message}"),
                 }
             }
             // A delta of attributes not shown here prints nothing.
-            proto::Event::HealthReport { health, .. } => {
+            wire::Event::HealthReport { health, .. } => {
                 if health.general.is_some() || health.software.is_some() {
                     println!("{}", health_text(health));
                 }
             }
-            proto::Event::SubscriptionState { state, .. } => match state {
-                proto::SubscriptionState::Live { max_int_secs } => {
+            wire::Event::SubscriptionState { state, .. } => match state {
+                api::SubscriptionState::Live { max_int_secs } => {
                     println!("(live, reporting at least every {max_int_secs} s)")
                 }
-                proto::SubscriptionState::Offline => println!("(offline, retrying...)"),
-                proto::SubscriptionState::Stopped => println!("(stopped)"),
+                api::SubscriptionState::Offline => println!("(offline, retrying...)"),
+                api::SubscriptionState::Stopped => println!("(stopped)"),
             },
-            proto::Event::OtaProgress { progress, .. } => {
+            wire::Event::OtaProgress { progress, .. } => {
                 println!("{}", ota_progress_text(progress))
             }
         }
@@ -423,8 +421,8 @@ impl Out {
 async fn call(
     conn: &Connection,
     out: &Out,
-    request: proto::Request,
-) -> io::Result<Option<proto::Response>> {
+    request: wire::Request,
+) -> io::Result<Option<wire::Response>> {
     let response = conn.call(request, |event| out.event(&event)).await?;
 
     if out.json {
@@ -434,7 +432,7 @@ async fn call(
         );
     }
 
-    if let proto::Response::Error { message } = &response {
+    if let wire::Response::Error { message } = &response {
         if !out.json {
             eprintln!("error: {message}");
         }
@@ -444,7 +442,7 @@ async fn call(
     Ok(Some(response))
 }
 
-fn ok(out: &Out, response: Option<proto::Response>, text: &str) -> io::Result<bool> {
+fn ok(out: &Out, response: Option<wire::Response>, text: &str) -> io::Result<bool> {
     if response.is_some() && !out.json {
         println!("{text}");
     }
@@ -452,8 +450,8 @@ fn ok(out: &Out, response: Option<proto::Response>, text: &str) -> io::Result<bo
     Ok(response.is_some())
 }
 
-fn devices(out: &Out, response: Option<proto::Response>) -> io::Result<bool> {
-    let Some(proto::Response::Devices { devices, notice }) = response else {
+fn devices(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
+    let Some(wire::Response::Devices { devices, notice }) = response else {
         return Ok(response.is_some());
     };
 
@@ -495,8 +493,8 @@ fn devices(out: &Out, response: Option<proto::Response>) -> io::Result<bool> {
     Ok(true)
 }
 
-fn images(out: &Out, response: Option<proto::Response>) -> io::Result<bool> {
-    let Some(proto::Response::OtaImages { images }) = response else {
+fn images(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
+    let Some(wire::Response::OtaImages { images }) = response else {
         return Ok(response.is_some());
     };
 
@@ -525,7 +523,7 @@ fn images(out: &Out, response: Option<proto::Response>) -> io::Result<bool> {
 /// Follow a device's health until the subscription stops or the process is
 /// interrupted.
 async fn watch(conn: &Connection, out: &Out, node_id: u64) -> io::Result<bool> {
-    if call(conn, out, proto::Request::Subscribe { node_id })
+    if call(conn, out, wire::Request::Subscribe { node_id })
         .await?
         .is_none()
     {
@@ -533,14 +531,14 @@ async fn watch(conn: &Connection, out: &Out, node_id: u64) -> io::Result<bool> {
     }
 
     while let Some(msg) = conn.recv().await {
-        let proto::ServerMsg::Event { event } = msg else {
+        let wire::ServerMsg::Event { event } = msg else {
             continue;
         };
 
         let stopped = matches!(
             event,
-            proto::Event::SubscriptionState {
-                state: proto::SubscriptionState::Stopped,
+            wire::Event::SubscriptionState {
+                state: api::SubscriptionState::Stopped,
                 ..
             }
         );
@@ -555,7 +553,7 @@ async fn watch(conn: &Connection, out: &Out, node_id: u64) -> io::Result<bool> {
 }
 
 /// Print a retrieved log, or write it to `output`.
-fn log(intent: proto::LogIntent, data: &str, output: Option<PathBuf>) -> io::Result<bool> {
+fn log(intent: api::LogIntent, data: &str, output: Option<PathBuf>) -> io::Result<bool> {
     let log = BASE64.decode(data).map_err(io::Error::other)?;
 
     if let Some(path) = output {
@@ -587,17 +585,17 @@ fn log(intent: proto::LogIntent, data: &str, output: Option<PathBuf>) -> io::Res
 async fn upload(conn: &Connection, out: &Out, file: &PathBuf) -> io::Result<bool> {
     let image = std::fs::read(file)?;
 
-    let request = proto::Request::OtaUploadBegin {
+    let request = wire::Request::OtaUploadBegin {
         size: image.len() as u64,
     };
     let upload_id = match call(conn, out, request).await? {
-        Some(proto::Response::OtaUploadStarted { upload_id }) => upload_id,
+        Some(wire::Response::OtaUploadStarted { upload_id }) => upload_id,
         response => return Ok(response.is_some()),
     };
 
     let mut offset = 0;
     for chunk in image.chunks(UPLOAD_CHUNK_LEN) {
-        let request = proto::Request::OtaUploadChunk {
+        let request = wire::Request::OtaUploadChunk {
             upload_id,
             offset,
             data: BASE64.encode(chunk),
@@ -618,14 +616,14 @@ async fn upload(conn: &Connection, out: &Out, file: &PathBuf) -> io::Result<bool
 
     images(
         out,
-        call(conn, out, proto::Request::OtaUploadEnd { upload_id }).await?,
+        call(conn, out, wire::Request::OtaUploadEnd { upload_id }).await?,
     )
 }
 
 /// Update a device to an image, following the update until it is applied or
 /// the device declines it.
 async fn update(conn: &Connection, out: &Out, node_id: u64, name: String) -> io::Result<bool> {
-    if call(conn, out, proto::Request::OtaUpdate { node_id, name })
+    if call(conn, out, wire::Request::OtaUpdate { node_id, name })
         .await?
         .is_none()
     {
@@ -636,15 +634,15 @@ async fn update(conn: &Connection, out: &Out, node_id: u64, name: String) -> io:
     }
 
     while let Some(msg) = conn.recv().await {
-        let proto::ServerMsg::Event { event } = msg else {
+        let wire::ServerMsg::Event { event } = msg else {
             continue;
         };
 
         let done = matches!(
             &event,
-            proto::Event::OtaProgress {
+            wire::Event::OtaProgress {
                 node_id: id,
-                progress: proto::OtaProgress::Applied { .. } | proto::OtaProgress::NotOffered,
+                progress: api::OtaProgress::Applied { .. } | api::OtaProgress::NotOffered,
             } if *id == node_id
         );
         out.event(&event);
@@ -668,7 +666,7 @@ fn discover_filter(filter: Option<String>) -> (Option<u16>, Option<String>) {
 
 /// A human label for a device: the user-set NodeLabel, else the device's own
 /// ProductName, else the stable identifiers, else its node ID.
-fn device_title(d: &proto::DeviceInfo) -> String {
+fn device_title(d: &api::DeviceInfo) -> String {
     if !d.node_label.is_empty() {
         d.node_label.clone()
     } else if !d.product_name.is_empty() {
@@ -682,7 +680,7 @@ fn device_title(d: &proto::DeviceInfo) -> String {
     }
 }
 
-fn health_text(health: &proto::DeviceHealth) -> String {
+fn health_text(health: &api::DeviceHealth) -> String {
     fn opt<T: std::fmt::Display>(v: Option<T>) -> String {
         v.map(|v| v.to_string()).unwrap_or_else(|| "-".into())
     }
@@ -712,12 +710,12 @@ fn health_text(health: &proto::DeviceHealth) -> String {
     }
 }
 
-fn ota_progress_text(progress: &proto::OtaProgress) -> String {
+fn ota_progress_text(progress: &api::OtaProgress) -> String {
     match progress {
-        proto::OtaProgress::Offered { name } => format!("Offered {name}"),
-        proto::OtaProgress::NotOffered => "No update for the device".into(),
-        proto::OtaProgress::Downloading { percent } => format!("Downloading: {percent}%"),
-        proto::OtaProgress::Applying { version } => format!("Applying version {version}..."),
-        proto::OtaProgress::Applied { version } => format!("Updated: runs version {version}"),
+        api::OtaProgress::Offered { name } => format!("Offered {name}"),
+        api::OtaProgress::NotOffered => "No update for the device".into(),
+        api::OtaProgress::Downloading { percent } => format!("Downloading: {percent}%"),
+        api::OtaProgress::Applying { version } => format!("Applying version {version}..."),
+        api::OtaProgress::Applied { version } => format!("Updated: runs version {version}"),
     }
 }

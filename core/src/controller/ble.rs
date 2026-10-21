@@ -1,6 +1,6 @@
 //! BLE (BTP) commissioning — the Commissioner over a GATT **Central**.
 //!
-//! This is the counterpart to the IP commissioning path in [`crate::controller`]
+//! This is the counterpart to the IP commissioning path in [`crate::matter`]
 //! for devices that are only reachable over Bluetooth Low Energy until they have
 //! joined their operational (Thread / Wi-Fi) network. It drives rs-matter's
 //! GATT-Central BTP transport (`rs_matter::transport::network::btp::gatt::bluez`)
@@ -64,7 +64,7 @@ use rs_matter::utils::zbus::Connection;
 use rs_matter::Matter;
 
 use crate::ca::ControllerCa;
-use crate::controller::remove_sessions;
+use crate::matter::remove_sessions;
 use crate::model::{CommissionOutcome, DeviceHandle};
 
 /// Fail-safe duration armed for the whole BLE→Thread flow.
@@ -133,23 +133,6 @@ pub async fn scan_ble(filter: &CommissionableFilter, secs: u16) -> Result<Vec<Bl
     Ok(found)
 }
 
-/// Parse a Bluetooth address (`AA:BB:CC:DD:EE:FF`).
-pub fn parse_bt_addr(s: &str) -> Result<BtAddr, Error> {
-    let mut addr = [0; 6];
-    let mut parts = s.split(':');
-
-    for byte in &mut addr {
-        let part = parts.next().ok_or(ErrorCode::InvalidData)?;
-        *byte = u8::from_str_radix(part, 16).map_err(|_| ErrorCode::InvalidData)?;
-    }
-
-    if parts.next().is_some() {
-        return Err(ErrorCode::InvalidData.into());
-    }
-
-    Ok(BtAddr(addr))
-}
-
 /// Commission a device that is currently only reachable over BLE, provisioning it
 /// with the given operational-network credentials so it joins its network and
 /// finishes commissioning over IP.
@@ -161,7 +144,7 @@ pub fn parse_bt_addr(s: &str) -> Result<BtAddr, Error> {
 ///
 /// # Arguments
 /// - `matter` / `crypto`: the borrowed rs-matter stack and crypto backend (as held
-///   by [`crate::Controller`]).
+///   by [`crate::matter::Controller`]).
 /// - `ca` / `controller_fab_idx`: the controller CA and its local fabric index
 ///   (from [`ControllerCa::bootstrap`](crate::ca::ControllerCa::bootstrap)).
 /// - `btp`: the BTP side of `matter`'s transport.

@@ -29,7 +29,7 @@ use rs_matter::error::Error;
 use rs_matter::onboard::cac::{IcacGenerator, RcacGenerator};
 use rs_matter::onboard::noc::NocGenerator;
 
-use crate::controller::FabricIdentity;
+use crate::matter::FabricIdentity;
 
 /// Which CA tier to use when generating the controller's identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

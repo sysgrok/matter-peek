@@ -21,16 +21,13 @@
 //!
 //! \* the `resolve` path shares rs-matter's `zbus` feature; wiring is a TODO.
 //!
-//! Exactly one backend feature should be enabled per build; the binary crate
-//! (`rpc`/`cli`) picks the platform-appropriate one.
+//! Exactly one backend feature should be enabled per build; the build
+//! (of `core`) picks the platform-appropriate one.
 
 extern crate alloc;
 use alloc::vec::Vec;
 
-use core::future::Future;
 use core::num::NonZeroU8;
-
-use embassy_futures::select::{select, Either};
 
 use log::{info, warn};
 
@@ -53,51 +50,9 @@ pub struct DiscoveredDevice {
     pub commissionable_id: u64,
 }
 
-/// Discover a commissionable device matching `filter` (use
-/// [`CommissionableFilter::default`] — all `None` — to match any), running the
-/// compiled-in mDNS backend concurrently with the browse.
-///
-/// `crypto` is only needed by the builtin backend (randomized send delays); it
-/// is accepted uniformly so the signature is backend-independent.
-pub async fn discover_commissionable<C: Crypto>(
-    matter: &Matter<'_>,
-    crypto: C,
-    filter: &CommissionableFilter,
-    window_ms: Option<u32>,
-) -> Result<DiscoveredDevice, Error> {
-    with_backend(
-        matter,
-        crypto,
-        discover_all_with_running_backend(matter, filter, 1, window_ms),
-    )
-    .await?
-    .into_iter()
-    .next()
-    .ok_or_else(|| ErrorCode::NotFound.into())
-}
-
-/// Discover *up to* `max` commissionable devices matching `filter`, for a UI
-/// pick-list, running the compiled-in mDNS backend concurrently.
-pub async fn discover_all<C: Crypto>(
-    matter: &Matter<'_>,
-    crypto: C,
-    filter: &CommissionableFilter,
-    max: u8,
-    window_ms: Option<u32>,
-) -> Vec<DiscoveredDevice> {
-    with_backend(
-        matter,
-        crypto,
-        discover_all_with_running_backend(matter, filter, max, window_ms),
-    )
-    .await
-    .unwrap_or_default()
-}
-
-/// Like [`discover_all`], but for a host that **already runs the mDNS backend**
-/// (via [`run_mdns_backend`]) as a permanent task — this places the browse
-/// requests without starting a second backend (which would contend on the shared
-/// resolve/browse rendezvous).
+/// Up to `max` commissionable devices matching `filter`. Assumes the mDNS
+/// backend runs (see [`run_mdns_backend`]): this only places the browse
+/// requests.
 pub async fn discover_all_with_running_backend(
     matter: &Matter<'_>,
     filter: &CommissionableFilter,
@@ -182,25 +137,6 @@ pub async fn browse_fabric_with_running_backend(
     Ok(nodes)
 }
 
-/// Run `fut` with the mDNS backend alongside.
-async fn with_backend<C, F>(matter: &Matter<'_>, crypto: C, fut: F) -> Result<F::Output, Error>
-where
-    C: Crypto,
-    F: Future,
-{
-    let mut fut = core::pin::pin!(fut);
-    let mut backend = core::pin::pin!(run_backend(matter, crypto));
-
-    match select(&mut fut, &mut backend).await {
-        Either::First(output) => Ok(output),
-        Either::Second(r) => {
-            // Backend exited first — always an error (it otherwise runs forever).
-            r?;
-            Err(ErrorCode::NoNetworkInterface.into())
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Backend wiring (one of these compiles, per feature)
 // ---------------------------------------------------------------------------
@@ -210,15 +146,12 @@ where
 /// This services *both* browse requests (commissionable discovery) and
 /// **operational resolve** requests — the latter is what `Exchange::initiate`
 /// needs to re-address a persisted device over CASE (subscribe / peek /
-/// decommission on a device whose secure session has lapsed). A long-lived host
-/// (the RPC actor) must run this as a permanent concurrent arm; without it, every
-/// operational resolve times out with `NotFound`. Short-lived hosts (the CLI's
-/// one-shot discover) can instead rely on [`discover_commissionable`], which runs
-/// the backend for the duration of the browse.
+/// decommission on a device whose secure session has lapsed), so the service
+/// runs it for its whole lifetime; without it, every operational resolve times
+/// out with `NotFound`.
 ///
 /// Do **not** run two of these against the same `Matter` stack — they'd both poll
-/// the single resolve/browse rendezvous. When this is running, use the
-/// `*_with_running_backend` functions rather than [`discover_commissionable`].
+/// the single resolve/browse rendezvous.
 pub async fn run_mdns_backend<C: Crypto>(matter: &Matter<'_>, crypto: C) -> Result<(), Error> {
     run_backend(matter, crypto).await
 }

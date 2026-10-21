@@ -1,49 +1,56 @@
-//! matter-peek-core — a Matter diagnostic controller.
+//! matter-peek-core — a Matter controller, and its API.
 //!
-//! **`no_std` + `alloc`.** The core carries no `std` dependency so it can run on
-//! embedded targets (e.g. esp32 with PSRAM) as well as desktop/mobile; only the
-//! optional `mdns-builtin` backend pulls in `std` (raw sockets) and is
-//! feature-gated. Socket creation and the concrete KV backend are injected by
-//! the binary, never created in `core`.
+//! [`api::MatterPeek`] is the controller: it commissions devices onto its
+//! fabric, lists them, reads and follows their health, retrieves their logs,
+//! updates them and decommissions them. Its methods are the API for Rust, for
+//! the mobile apps (UniFFI, `uniffi` feature) and, as messages, for the
+//! WebSocket server (see [`api::wire`]). Everything else is private.
 //!
-//! This crate wraps [`rs_matter`]'s controller-side primitives
-//! ([`Commissioner`](rs_matter::onboard::Commissioner), the IM client, and the
-//! Diagnostic Logs / BDX receiver) behind a small, UI-facing API. The same API
-//! is projected onto two transports:
+//! **`no_std` + `alloc`.** Without `std`, the crate carries the API types, and
+//! with `controller` the controller too. `std` runs the controller on this host:
+//! its thread, UDP socket, store directory and OTA image files.
 //!
-//! - a local WebSocket/JSON RPC server (desktop / web UI), and
-//! - UniFFI bindings (mobile — later).
-//!
-//! See `DESIGN.md` at the workspace root for the full architecture.
+//! The controller wraps [`rs_matter`]'s controller side: its `Commissioner`,
+//! the IM client, the Diagnostic Logs / BDX receiver, the OTA Provider. See
+//! `DESIGN.md` at the workspace root for the architecture.
 
 #![no_std]
+// Without `std`, the controller is built (so that it stays `no_std`) but cannot
+// be started yet: its entry point for an embedded host is still to come.
+#![cfg_attr(all(feature = "controller", not(feature = "std")), allow(dead_code))]
 
 extern crate alloc;
 
-// The `std` feature (which every hosted mDNS backend turns on) is what lets the
-// backends that need real sockets — `mdns-builtin` — name `std::` paths. The
-// crate body stays `no_std`; this only makes the facade reachable when a hosted
-// build has already opted in.
 #[cfg(feature = "std")]
 extern crate std;
 
-pub mod basic_info;
-#[cfg(feature = "ble")]
-pub mod ble;
-pub mod ca;
-pub mod controller;
-pub mod diagnostics;
-pub mod discovery;
-pub mod logs;
-pub mod model;
-pub mod node;
-pub mod ota;
-pub mod persist;
-pub mod setup_code;
-pub mod subscribe;
-pub mod vendors;
+#[cfg(feature = "controller")]
+use controller::*;
 
-pub use controller::Controller;
-pub use discovery::DiscoveredDevice;
-pub use model::*;
-pub use persist::ControllerStore;
+pub mod api;
+
+/// The controller behind the API; private.
+#[cfg(feature = "controller")]
+mod controller {
+    pub mod basic_info;
+    #[cfg(feature = "ble")]
+    pub mod ble;
+    pub mod ca;
+    pub mod diagnostics;
+    pub mod discovery;
+    #[cfg(feature = "std")]
+    pub mod host;
+    pub mod logs;
+    pub mod matter;
+    pub mod model;
+    pub mod node;
+    pub mod ota;
+    pub mod persist;
+    pub mod service;
+    pub mod setup_code;
+    pub mod subscribe;
+    pub mod vendors;
+}
+
+#[cfg(feature = "uniffi")]
+uniffi::setup_scaffolding!();

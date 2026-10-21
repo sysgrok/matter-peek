@@ -1,11 +1,6 @@
-//! The controller facade — the single API every transport (RPC, UniFFI, CLI)
-//! drives.
-//!
-//! Phase 0 implements [`Controller::commission`] end-to-end against an
-//! externally-running Matter accessory, lifted from rs-matter's
-//! `commissioner_tests` example and generalized. `decommission`, `read_health`,
-//! and `retrieve_logs` are stubbed against the real rs-matter APIs and filled
-//! in next.
+//! [`Controller`]: the Matter operations the service builds on (commission,
+//! discover, read and follow health, retrieve logs, identify, decommission, OTA),
+//! over a borrowed rs-matter stack.
 
 use core::net::SocketAddr;
 use core::num::NonZeroU8;
@@ -42,18 +37,15 @@ use alloc::vec::Vec;
 
 /// Per-phase (PASE / CASE) timeout for a commission. Kept short so a commission
 /// against an unreachable device fails — and thus becomes retryable / the UI
-/// recovers — promptly, rather than hanging the actor for a minute. A reachable
-/// device commissions in well under a second; even a slow LAN is comfortably
-/// inside this. (Cancellation proper is cooperative at phase boundaries; this
-/// bounds the one phase a cancel can't reach into — see `commission_flow` in
-/// `matter-peek-rpc`.)
+/// recovers — promptly, rather than holding the service for a minute. A
+/// reachable device commissions in well under a second; even a slow LAN is
+/// comfortably inside this. (Cancellation proper is cooperative at phase
+/// boundaries; this bounds the one phase a cancel can't reach into.)
 const COMMISSION_TIMEOUT_SECS: u64 = 20;
 
 /// Per-fabric identity the controller installs on a device.
 ///
-/// In Phase 0 these are fixed to the conventional chip-tool admin values so the
-/// spike commissions against `chip-all-clusters-app`. The persistent-fabric
-/// path (later) draws these from the local store / a stable controller CA.
+/// The conventional chip-tool admin values by default.
 #[derive(Debug, Clone, Copy)]
 pub struct FabricIdentity {
     pub fabric_id: u64,
@@ -101,35 +93,8 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// over mDNS — so an mDNS backend must be running concurrently (see
     /// [`run_mdns_backend`](crate::discovery::run_mdns_backend)), even when
     /// `peer_addr` was supplied by hand and no discovery was needed.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn commission(
-        &self,
-        ca: &crate::ca::ControllerCa,
-        controller_fab_idx: NonZeroU8,
-        peer_addr: SocketAddr,
-        passcode: u32,
-        device_node_id: u64,
-        live_node_ids: &[u64],
-    ) -> Result<CommissionOutcome, Error> {
-        match self
-            .commission_cancellable(
-                ca,
-                controller_fab_idx,
-                peer_addr,
-                passcode,
-                device_node_id,
-                live_node_ids,
-                || false,
-            )
-            .await?
-        {
-            CommissionFlow::Done(o) => Ok(o),
-            // The no-cancel caller can never observe this.
-            CommissionFlow::Cancelled => unreachable!("cancel closure never returns true"),
-        }
-    }
-
-    /// Like [`Self::commission`], but cooperatively cancellable up to the point of
+    ///
+    /// Cancellable up to the point of
     /// no return (AddNOC). `cancel()` is polled at the safe pre-AddNOC boundaries
     /// (before the orphan sweep, after it, before phase 1) and the orphan sweep —
     /// the step most prone to hang when re-commissioning a device whose window is
@@ -140,7 +105,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// Returns [`CommissionFlow::Cancelled`] when cancellation took effect
     /// before any device fabric was installed (nothing to clean up).
     #[allow(clippy::too_many_arguments)]
-    pub async fn commission_cancellable(
+    pub async fn commission(
         &self,
         ca: &crate::ca::ControllerCa,
         controller_fab_idx: NonZeroU8,
@@ -399,37 +364,10 @@ impl<'a, C: Crypto> Controller<'a, C> {
         Ok(removed)
     }
 
-    /// Discover a commissionable device on the local network matching `filter`
-    /// (default = any), via the compiled-in mDNS backend. Returns its address,
-    /// which can be fed straight into [`Self::commission`].
-    ///
-    /// Runs the mDNS backend concurrently with the browse; the transport pump
-    /// need not be running for this (mDNS is a separate socket / DBus path).
-    /// `window_ms` is how long each mDNS browse window lasts.
-    pub async fn discover(
-        &self,
-        filter: &CommissionableFilter,
-        window_ms: Option<u32>,
-    ) -> Result<crate::discovery::DiscoveredDevice, Error> {
-        crate::discovery::discover_commissionable(self.matter, self.crypto, filter, window_ms).await
-    }
-
-    /// Discover up to `max` commissionable devices matching `filter`, for a UI
-    /// pick-list. Returns whatever was found (possibly empty).
+    /// Discover up to `max` commissionable devices matching `filter`, for a
+    /// pick-list. Assumes the caller runs the mDNS backend (via
+    /// [`Self::run_mdns_backend`]), so it only places browse requests.
     pub async fn discover_all(
-        &self,
-        filter: &CommissionableFilter,
-        max: u8,
-        window_ms: Option<u32>,
-    ) -> Vec<crate::discovery::DiscoveredDevice> {
-        crate::discovery::discover_all(self.matter, self.crypto, filter, max, window_ms).await
-    }
-
-    /// Like [`Self::discover_all`], but assumes the caller already runs the mDNS
-    /// backend continuously (via [`Self::run_mdns_backend`]) — so it only places
-    /// browse requests without starting a competing backend. Use this from a
-    /// long-lived host that keeps the backend up for operational resolves.
-    pub async fn discover_all_bg(
         &self,
         filter: &CommissionableFilter,
         max: u8,
@@ -441,7 +379,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
 
     /// The devices advertising on our fabric `fab_idx`: those holding it that
     /// are reachable, by node ID. Assumes the caller runs the mDNS backend (see
-    /// [`Self::discover_all_bg`]).
+    /// [`Self::discover_all`]).
     pub async fn browse_fabric(&self, fab_idx: NonZeroU8) -> Result<Vec<u64>, Error> {
         crate::discovery::browse_fabric_with_running_backend(self.matter, fab_idx, None).await
     }
@@ -690,7 +628,7 @@ where
     }
 }
 
-/// Outcome of [`Controller::commission_cancellable`].
+/// Outcome of [`Controller::commission`].
 #[derive(Debug)]
 pub enum CommissionFlow {
     /// Commissioning completed.
@@ -745,11 +683,6 @@ where
         }
     }
 }
-
-// Re-export so callers don't reach into rs-matter for the obvious scalar type.
-pub use rs_matter::onboard::CommissionResult;
-#[allow(unused_imports)]
-use NonZeroU8 as _; // documented in model::DeviceHandle::fabric_index
 
 /// What a fabric found on a device means to the orphaned-fabric sweep.
 ///

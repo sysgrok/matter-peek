@@ -13,9 +13,10 @@ name = "matter-peek"
 path = "src/main.rs"
 
 [dependencies]
-matter-peek-proto = { path = "../proto" }
-# The API: a connection to a running server, or to an actor in this process.
-matter-peek-rpc = { path = "../rpc" }
+# The API's messages.
+matter-peek-core = { path = "../core" }
+# Their connection: to a running server, or to a controller in this process.
+matter-peek-server = { path = "../server" }
 clap = { version = "4", features = ["derive"] }
 serde_json = { workspace = true }
 # Logs and OTA images travel base64-encoded.

@@ -78,6 +78,28 @@ impl OtaStore for () {
     }
 }
 
+/// An [`OtaStore`] that takes new images, and deletes them.
+pub trait OtaImageStore: OtaStore {
+    /// An image file being received.
+    type Partial;
+
+    /// Start receiving an image file, as upload `id`.
+    fn begin(&self, id: u32) -> Result<Self::Partial, Error>;
+
+    /// Append the next bytes of a file being received.
+    fn write(&self, partial: &mut Self::Partial, data: &[u8]) -> Result<(), Error>;
+
+    /// Store a received file, as `image`; replaces a stored image of the same
+    /// name.
+    fn finish(&self, partial: Self::Partial, image: &OtaImage) -> Result<(), Error>;
+
+    /// Drop a partially received file.
+    fn discard(&self, partial: Self::Partial);
+
+    /// Delete stored image `name`.
+    fn remove(&self, name: &str) -> Result<(), Error>;
+}
+
 /// A stored OTA image, as its header describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OtaImage {
@@ -386,11 +408,6 @@ where
         }
     }
 
-    /// The image, once its header is in.
-    pub fn image(&self) -> Option<&OtaImage> {
-        self.expected.as_ref().map(|expected| &expected.image)
-    }
-
     /// Take the next bytes of the file.
     pub fn update(&mut self, mut data: &[u8]) -> Result<(), Error> {
         if self.expected.is_none() {
@@ -472,6 +489,7 @@ where
 
 /// Check a whole OTA image file: a valid header, and a payload matching its size
 /// and SHA-256 digest.
+#[cfg(test)]
 pub fn verify(crypto: impl Crypto, file: &[u8]) -> Result<OtaImage, Error> {
     let mut verifier = OtaVerifier::new(crypto.hash()?);
     verifier.update(file)?;

@@ -6,7 +6,7 @@ via the standard diagnostic clusters, and pull **Diagnostic Logs** (crash dumps
 / logs) over BDX.
 
 Built as a native Rust core over [`rs-matter`](https://github.com/project-chip/rs-matter),
-with a web UI, a CLI and an MCP server on one API, and (later) mobile apps via UniFFI.
+with a web UI, a CLI and an MCP server on one API, and mobile bindings via UniFFI.
 
 See [`DESIGN.md`](DESIGN.md) for the full architecture and roadmap.
 
@@ -19,14 +19,13 @@ a web UI, a command line, or an AI agent over MCP, all through one API.
 ## Layout
 
 ```
-core/   matter-peek-core — the reusable controller library (wraps rs-matter)
-proto/  matter-peek-proto — the API: requests, responses, events (serde)
-rpc/    matter-peek-rpc — the API over the core: the actor, the WS server
-        (binary: matter-peek-server) and its client connections
-cli/    the command line, over the API (binary: matter-peek)
-mcp/    the MCP server for AI agents, over the API (binary: matter-peek-mcp)
-web/    matter-peek-web — Yew/Wasm web UI (WS/JSON client; separate wasm crate)
-uniffi/ mobile bindings over the API            (later)
+core/    matter-peek-core — the API (`MatterPeek`, its types and wire messages)
+         and the controller behind it (wraps rs-matter); also the UniFFI bindings
+server/  matter-peek-server — the API over WebSocket/JSON, and its clients'
+         connection (binary: matter-peek-server)
+cli/     the command line (binary: matter-peek)
+mcp/     the MCP server for AI agents (binary: matter-peek-mcp)
+web/     matter-peek-web — Yew/Wasm web UI (WebSocket client; separate wasm crate)
 ```
 
 Everything goes through the API. The web UI and the MCP server talk to a
@@ -51,6 +50,18 @@ cargo run --bin matter-peek -- --help
 
 # The MCP server (stdio), for an AI agent; mutating tools need --allow-mutate
 cargo run --bin matter-peek-mcp -- --allow-mutate
+```
+
+### Mobile bindings
+
+`core` exports `MatterPeek` over [UniFFI](https://mozilla.github.io/uniffi-rs/)
+with its `uniffi` feature. Build it as a library, then generate the bindings:
+
+```sh
+cargo rustc -p matter-peek-core --lib --features uniffi --crate-type cdylib
+cargo run -p matter-peek-core --features uniffi-cli --bin uniffi-bindgen -- \
+    generate --library target/debug/libmatter_peek_core.so --language kotlin --out-dir out
+# --language swift for iOS / macOS
 ```
 
 For local co-development against working clones, uncomment the `[patch.crates-io]`

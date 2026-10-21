@@ -1,6 +1,6 @@
 [package]
 name = "matter-peek-core"
-description = "Vendor-agnostic Matter diagnostic controller core (wraps rs-matter)"
+description = "The matter-peek API (MatterPeek) and the Matter controller behind it (wraps rs-matter)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,42 +8,88 @@ publish = false
 repository.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+# Generates the Swift / Kotlin bindings from the built library (UniFFI library
+# mode): `cargo run -p matter-peek-core --features uniffi-cli --bin uniffi-bindgen`.
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["uniffi-cli"]
+
 [features]
-# Default is the hosted/desktop build (Avahi backend → `std`). An embedded
-# target builds with `--no-default-features` and selects an embedded-appropriate
-# backend (BuiltinMdns, or a future esp one) + `rs-matter`'s no-os crypto/rng.
+# The desktop build: the controller, run on this host, with the Avahi backend.
+# Without default features, `core` is `no_std`: only the API types, unless
+# `controller` is on.
 default = ["mdns-avahi"]
 
-# `std`: enable rs-matter's hosted (`os`) path. Pulled in by every std mDNS
-# backend below; an embedded build leaves it off so `core` stays `no_std`.
-std = ["rs-matter/os"]
+# The controller: the Matter stack and the service behind `api::MatterPeek`.
+controller = [
+    "dep:rs-matter",
+    "dep:embassy-futures",
+    "dep:embassy-time",
+    "dep:async-channel",
+    "dep:futures-util",
+    "dep:base64",
+]
 
-# mDNS backend selection. Pick exactly one. OS-native daemons (preferred) need
-# `std`; `mdns-builtin` is a same-host-test/fallback responder (also `std`).
-mdns-avahi = ["std", "rs-matter/zbus"]                                # Linux + Avahi
-mdns-resolve = ["std", "rs-matter/zbus"]                              # Linux + systemd-resolved
-mdns-astro = ["std", "rs-matter/astro-dnssd"]                         # macOS / iOS (Bonjour)
-mdns-builtin = ["std", "dep:socket2", "dep:nix", "dep:async-io"]     # fallback / Windows / same-host tests
+# Run the controller on this host (`MatterPeek::start`): its thread, UDP socket,
+# store directory and OTA image files. Every hosted mDNS backend and `ble` pull
+# it in.
+std = [
+    "controller",
+    "rs-matter/os",
+    "rs-matter/qr-scan",
+    "async-channel/std",
+    "embassy-time/std",
+    "dep:embassy-time-queue-utils",
+    "dep:async-io",
+    "dep:rand",
+    "dep:directories",
+    "dep:image",
+]
+
+# mDNS backend selection. Pick exactly one. OS-native daemons (preferred);
+# `mdns-builtin` is a same-host-test/fallback responder.
+mdns-avahi = ["std", "rs-matter/zbus"]                         # Linux + Avahi
+mdns-resolve = ["std", "rs-matter/zbus"]                       # Linux + systemd-resolved
+mdns-astro = ["std", "rs-matter/astro-dnssd"]                  # macOS / iOS (Bonjour)
+mdns-builtin = ["std", "dep:socket2", "dep:nix"]               # fallback / Windows / same-host tests
 
 # BLE commissioning (Commissioner over BTP/GATT Central). Linux + BlueZ over
-# D-Bus, via rs-matter's `zbus` feature (the same one Avahi uses, so no new
-# heavy dependency). Enables the `commission_ble` flow.
+# D-Bus, via rs-matter's `zbus` feature (the same one Avahi uses).
 ble = ["std", "rs-matter/zbus"]
 
+# Mobile bindings: `MatterPeek` and the API types, exported over UniFFI.
+uniffi = ["std", "dep:uniffi"]
+# The `uniffi-bindgen` binary.
+uniffi-cli = ["uniffi", "uniffi/cli", "uniffi/cargo-metadata"]
+
 [dependencies]
-# `core` is `no_std` + `alloc` (portable to esp32 etc.). It depends on rs-matter
-# with NO default features (rs-matter's `os` ⇒ `std`); the hosted `os` path is
-# re-enabled only via this crate's `std` feature. mDNS backends and raw sockets
-# are likewise feature-gated.
-# Depend on the released crates.io version (default-features off). Keeping it a
-# plain registry dep — rather than a git/path dep here — is what lets a
-# `[patch.crates-io]` in the workspace root redirect every crate uniformly to a
-# local clone during co-development with rs-matter.
-rs-matter = { version = "0.4", default-features = false, features = ["alloc", "rustcrypto", "log"] }
+# The API types, for every build (the web UI's too).
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 log = { workspace = true }
-embassy-futures = { workspace = true }
-embassy-time = { version = "0.5", default-features = false }
-# mDNS builtin backend only (std): raw multicast socket + interface enum + async-io.
+
+# --- The controller (`controller`), `no_std` + `alloc`. ---
+# rs-matter without default features (its `os` implies `std`); `std` turns `os`
+# on. A plain registry dep, so the workspace `[patch.crates-io]` applies.
+rs-matter = { version = "0.4", optional = true, default-features = false, features = ["alloc", "rustcrypto", "log"] }
+embassy-futures = { workspace = true, optional = true }
+embassy-time = { version = "0.5", optional = true, default-features = false }
+async-channel = { version = "2", optional = true, default-features = false }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["alloc"] }
+# Binary payloads (logs, images) travel base64-encoded on the wire.
+base64 = { version = "0.22", optional = true, default-features = false, features = ["alloc"] }
+
+# --- This host (`std`). ---
+embassy-time-queue-utils = { workspace = true, optional = true }
 async-io = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+# The platform-standard data dir for the store.
+directories = { version = "6", optional = true }
+# Picture -> pixels, for reading QR codes; rs-matter does the recognition.
+image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg"] }
+# mDNS builtin backend: raw multicast socket + interface enum.
 socket2 = { workspace = true, optional = true }
 nix = { workspace = true, optional = true }
+
+# --- Mobile bindings (`uniffi`). ---
+uniffi = { version = "0.32", optional = true, default-features = false }
