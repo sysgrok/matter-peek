@@ -23,8 +23,9 @@ pub struct MatterPeek {
 }
 
 impl MatterPeek {
-    /// A handle, and the service end it talks to.
-    pub(crate) fn channel() -> (Self, Service) {
+    /// A controller whose service the host runs itself (see [`Service::run`]),
+    /// e.g. without `std`. With `std`, [`MatterPeek::start`] does that.
+    pub fn new() -> (Self, Service) {
         let (ops, ops_rx) = async_channel::unbounded();
         let cancel = Arc::new(AtomicBool::new(false));
 
@@ -362,8 +363,9 @@ pub trait OtaListener: Send + Sync {
     fn on_progress(&self, node_id: u64, progress: OtaProgress);
 }
 
-/// The service end of a [`MatterPeek`]: the operations to run.
-pub(crate) struct Service {
+/// The controller behind a [`MatterPeek`] made with [`MatterPeek::new`]: run it
+/// with [`Service::run`].
+pub struct Service {
     pub(crate) ops: async_channel::Receiver<Op>,
     pub(crate) cancel: Arc<AtomicBool>,
 }

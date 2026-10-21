@@ -15,9 +15,6 @@
 //! `DESIGN.md` at the workspace root for the architecture.
 
 #![no_std]
-// Without `std`, the controller is built (so that it stays `no_std`) but cannot
-// be started yet: its entry point for an embedded host is still to come.
-#![cfg_attr(all(feature = "controller", not(feature = "std")), allow(dead_code))]
 
 extern crate alloc;
 
@@ -42,6 +39,7 @@ mod controller {
     pub mod host;
     pub mod logs;
     pub mod matter;
+    pub mod mdns;
     pub mod model;
     pub mod node;
     pub mod ota;

@@ -1713,6 +1713,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "blocking",
+ "clap",
  "env_logger",
  "futures-lite",
  "log",

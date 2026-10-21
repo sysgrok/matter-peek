@@ -1,9 +1,10 @@
 //! The matter-peek API.
 //!
 //! [`MatterPeek`] is the controller: start one on this host with
-//! [`MatterPeek::start`] (`std`), and call its methods from any thread. The same
-//! methods are the native Rust API, the UniFFI one (`uniffi` feature, for the
-//! mobile apps), and, as [`wire`] messages, the WebSocket one.
+//! [`MatterPeek::start`] (`std`), or run one on what a host provides with
+//! [`MatterPeek::new`] (see [`platform`]); call its methods from any thread.
+//! The same methods are the native Rust API, the UniFFI one (`uniffi` feature,
+//! for the mobile apps), and, as [`wire`] messages, the WebSocket one.
 //!
 //! The types are always available, also without `controller` (e.g. for the web
 //! UI, which only speaks the [`wire`] messages).
@@ -18,6 +19,8 @@ pub use peek::{
 #[cfg(feature = "controller")]
 pub(crate) use peek::{Op, Reply, Service};
 
+#[cfg(feature = "controller")]
+pub mod platform;
 pub mod wire;
 
 #[cfg(feature = "controller")]

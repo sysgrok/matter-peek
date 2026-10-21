@@ -24,6 +24,7 @@ use rs_matter::utils::init::InitMaybeUninit;
 use rs_matter::Matter;
 
 use crate::api::{MatterPeek, PeekConfig, PeekError, Service};
+use crate::mdns::HostMdns;
 use crate::persist::kv_buf;
 use crate::service::{self, Platform};
 
@@ -42,7 +43,7 @@ impl MatterPeek {
     #[cfg_attr(feature = "uniffi", uniffi::constructor)]
     pub fn start(config: PeekConfig) -> Result<Arc<Self>, PeekError> {
         let store = Store::lock(config.store_dir.as_deref())?;
-        let (peek, service) = MatterPeek::channel();
+        let (peek, service) = MatterPeek::new();
 
         std::thread::Builder::new()
             .name("matter-peek".into())
@@ -124,9 +125,10 @@ async fn run(service: Service, store: Store, config: PeekConfig) {
         kv_buf,
         ota: DirOtaStore::new(store.dir.join("ota")),
         network: &socket,
+        mdns: HostMdns::default(),
     };
 
-    service::run(service, platform, &config).await;
+    service.run(platform, &config).await;
 }
 
 /// An ephemeral dual-stack IPv6 UDP socket: rs-matter canonicalizes

@@ -37,6 +37,7 @@ use rs_matter::Matter;
 use crate::api::{Op, PeekConfig, PeekError, Service};
 use crate::ca::{CaTier, ControllerCa};
 use crate::matter::{Controller, FabricIdentity};
+use crate::mdns::Mdns;
 use crate::model::StoredDevice;
 use crate::node;
 use crate::ota::{OtaEvent, OtaImageStore, OtaProvider};
@@ -62,17 +63,21 @@ const FIRST_SYNC_DELAY_SECS: u64 = 5;
 const SYNC_PERIOD_SECS: u64 = 300;
 
 /// What the service runs on, provided by the host.
-pub(crate) struct Platform<'a, C, S, O, N> {
-    /// The stack, not started yet.
+pub struct Platform<'a, C, S, O, N, M> {
+    /// The stack, not started yet: the controller's device details are the
+    /// host's to choose.
     pub matter: &'a mut Matter<'a>,
     pub crypto: C,
     /// The KV store of the controller's fabric and device records.
     pub kv: S,
+    /// Its scratch buffer (see [`kv_buf`](crate::persist::kv_buf)).
     pub kv_buf: &'a KvBuf,
     /// The OTA images.
     pub ota: O,
-    /// The UDP network.
+    /// The UDP network, for Matter.
     pub network: N,
+    /// The mDNS backend.
+    pub mdns: M,
 }
 
 /// The state every operation works on.
@@ -285,16 +290,34 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     }
 }
 
-/// Run the service of `service` on `platform` until every handle is dropped.
-pub(crate) async fn run<'a, C, S, O, N>(
+impl Service {
+    /// Run the controller on `platform`, until every handle to it is dropped.
+    pub async fn run<'a, C, S, O, N, M>(
+        self,
+        platform: Platform<'a, C, S, O, N, M>,
+        config: &PeekConfig,
+    ) where
+        C: Crypto,
+        S: KvBlobStore,
+        O: OtaImageStore,
+        N: NetworkSend + NetworkReceive + Copy,
+        M: Mdns,
+    {
+        run(self, platform, config).await
+    }
+}
+
+/// See [`Service::run`].
+async fn run<'a, C, S, O, N, M>(
     service: Service,
-    platform: Platform<'a, C, S, O, N>,
+    platform: Platform<'a, C, S, O, N, M>,
     config: &PeekConfig,
 ) where
     C: Crypto,
     S: KvBlobStore,
     O: OtaImageStore,
     N: NetworkSend + NetworkReceive + Copy,
+    M: Mdns,
 {
     let Platform {
         matter,
@@ -303,6 +326,7 @@ pub(crate) async fn run<'a, C, S, O, N>(
         kv_buf,
         ota,
         network,
+        mut mdns,
     } = platform;
 
     let store = ControllerStore::new(kv, kv_buf);
@@ -382,8 +406,14 @@ pub(crate) async fn run<'a, C, S, O, N>(
     let mut pump = pin!(matter.run(&crypto, send, recv, NoNetwork));
     let mut ops = pin!(ctx.run_ops(service, config.periodic_sync));
     let mut subs = pin!(ctx.run_subscriptions(sub_jobs_rx));
-    // Operational resolves (re-addressing a listed device over CASE) need it.
-    let mut mdns = pin!(ctx.controller.run_mdns_backend());
+    // Operational resolves (re-addressing a listed device over CASE) need it;
+    // without it the rest still works.
+    let mut mdns = pin!(async {
+        if let Err(e) = mdns.run(matter, &crypto).await {
+            error!("service: mDNS backend exited: {e:?}");
+        }
+        core::future::pending::<()>().await
+    });
     // What devices reach on us: our OTA Provider and the subscription reports.
     let mut node = pin!(ctx.controller.run_node(&ctx.reports, &ctx.ota));
 
@@ -391,7 +421,7 @@ pub(crate) async fn run<'a, C, S, O, N>(
         Either4::First(r) => error!("service: transport pump exited: {r:?}"),
         Either4::Second(()) => info!("service: every handle dropped, exiting"),
         Either4::Third(()) => info!("service: subscription driver exited"),
-        Either4::Fourth(Either::First(r)) => error!("service: mDNS backend exited: {r:?}"),
+        Either4::Fourth(Either::First(())) => {}
         Either4::Fourth(Either::Second(r)) => error!("service: controller node exited: {r:?}"),
     }
 }

@@ -5,9 +5,9 @@ agent frameworks, …) the matter-peek API as tools: discover and commission
 devices, list them, read their health and logs, identify, update and
 decommission them.
 
-It is a client of a running `matter-peek-server`, like the web UI: each tool
-call is one request of the API (`matter_peek_core::api::wire`). It speaks MCP
-over **stdio**.
+Like the CLI, it runs a controller in its own process, or with `--server` uses
+a running `matter-peek-server`: each tool call is one request of the API
+(`matter_peek_core::api::wire`). It speaks MCP over **stdio**.
 
 ## Tools
 
@@ -38,11 +38,15 @@ error `-32602`). The human operator decides; the agent cannot enable them.
 ## Running it
 
 ```sh
-cargo run --bin matter-peek-server          # the server it talks to
 cargo build -p matter-peek-mcp --release    # → target/release/matter-peek-mcp
 
 matter-peek-mcp [--server ws://127.0.0.1:8087] [--allow-mutate]
 ```
+
+Without `--server`, it holds the controller's store for as long as it runs (it
+syncs the device list periodically, as the server does), so no server, CLI or
+other MCP server can use that store meanwhile; to share it with the web UI, run
+`matter-peek-server` and pass `--server`.
 
 It speaks newline-delimited **JSON-RPC 2.0** on stdin/stdout (the MCP stdio
 transport), advertising protocol version `2024-11-05`. Logs go to **stderr**, so
@@ -82,7 +86,8 @@ A `tools/call` result is one text content block with the response as JSON
   catalog, tool ⇄ request mapping, the `--allow-mutate` gate) depends only on the
   API's types (`matter-peek-core` without the controller) and cross-compiles for
   bare-metal targets. It runs a tool through an injected `Dispatch`; the desktop
-  binary (`std` feature) implements it over a connection to the server.
+  binary (`std` feature) implements it over a connection to the API, in process
+  or to a server.
 - **No tokio MCP SDK.** It is `Send`-bound; the shells run on a single-threaded
   smol executor. MCP over stdio is just JSON-RPC 2.0 over lines, so the framing
   is hand-rolled.

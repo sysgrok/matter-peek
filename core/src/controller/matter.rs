@@ -91,7 +91,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// `peer_addr` addresses phase 1 only. Phase 2 reaches the device through its
     /// *operational* identity, which rs-matter resolves from `(fabric, node-id)`
     /// over mDNS — so an mDNS backend must be running concurrently (see
-    /// [`run_mdns_backend`](crate::discovery::run_mdns_backend)), even when
+    /// [`crate::mdns`]), even when
     /// `peer_addr` was supplied by hand and no discovery was needed.
     ///
     /// Cancellable up to the point of
@@ -365,8 +365,8 @@ impl<'a, C: Crypto> Controller<'a, C> {
     }
 
     /// Discover up to `max` commissionable devices matching `filter`, for a
-    /// pick-list. Assumes the caller runs the mDNS backend (via
-    /// [`Self::run_mdns_backend`]), so it only places browse requests.
+    /// pick-list. Assumes the caller runs the mDNS backend (see
+    /// [`crate::mdns`]), so it only places browse requests.
     pub async fn discover_all(
         &self,
         filter: &CommissionableFilter,
@@ -382,16 +382,6 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// [`Self::discover_all`]).
     pub async fn browse_fabric(&self, fab_idx: NonZeroU8) -> Result<Vec<u64>, Error> {
         crate::discovery::browse_fabric_with_running_backend(self.matter, fab_idx, None).await
-    }
-
-    /// Run the mDNS backend **forever** (returns only on error). A long-lived host
-    /// must run this as a permanent concurrent task so that **operational
-    /// resolves** — needed by `Exchange::initiate` to re-address a persisted
-    /// device over CASE (subscribe / peek / decommission after the secure session
-    /// has lapsed) — are serviced. Without it, those resolves time out with
-    /// `NotFound`. See [`run_mdns_backend`](crate::discovery::run_mdns_backend).
-    pub async fn run_mdns_backend(&self) -> Result<(), Error> {
-        crate::discovery::run_mdns_backend(self.matter, self.crypto).await
     }
 
     /// Read a diagnostic health snapshot from a previously-commissioned device

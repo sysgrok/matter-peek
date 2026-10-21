@@ -28,9 +28,10 @@ mcp/     the MCP server for AI agents (binary: matter-peek-mcp)
 web/     matter-peek-web — Yew/Wasm web UI (WebSocket client; separate wasm crate)
 ```
 
-Everything goes through the API. The web UI and the MCP server talk to a
-running `matter-peek-server`; the CLI does too with `--server`, else it runs a
-controller in its own process. Only one process at a time can hold the store.
+Everything goes through the API. The web UI talks to a running
+`matter-peek-server`; the CLI and the MCP server do too with `--server`, else
+they run a controller in their own process. Only one process at a time can hold
+the store.
 
 ## Run
 
@@ -48,8 +49,9 @@ cargo run --bin matter-peek-server
 cargo run --bin matter-peek -- --server ws://127.0.0.1:8087 discover
 cargo run --bin matter-peek -- --help
 
-# The MCP server (stdio), for an AI agent; mutating tools need --allow-mutate
-cargo run --bin matter-peek-mcp -- --allow-mutate
+# The MCP server (stdio), for an AI agent: through the server, or on its own;
+# mutating tools need --allow-mutate
+cargo run --bin matter-peek-mcp -- --server ws://127.0.0.1:8087 --allow-mutate
 ```
 
 ### Mobile bindings

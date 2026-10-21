@@ -51,10 +51,10 @@ controller serves the CLI, the MCP server and mobile apps.
 
 ```
   Web UI (Yew/Wasm) ──── WebSocket/JSON ───┐
-  MCP server (stdio) ─── WebSocket/JSON ───┤      matter-peek-server
-  CLI --server ───────── WebSocket/JSON ───┤ ──►  (WireSession per connection)
+  MCP / CLI --server ─── WebSocket/JSON ───┤      matter-peek-server
+                                           │ ──►  (WireSession per connection)
                                            │              │
-  CLI (no --server) ── in process ─────────┼──► WireSession┤
+  MCP / CLI (no --server) ── in process ───┼──► WireSession┤
   mobile apps ──────── UniFFI ─────────────┤              ▼
   Rust ─────────────── Rust ───────────────┴──►  ┌────────────────────────────────┐
                                                   │ matter-peek-core               │
@@ -110,11 +110,15 @@ which is what the web UI and the MCP protocol layer depend on.
 - the operations (one at a time, plus a periodic sync),
 - the subscriptions (detached, so they never block operations).
 
-The service is `no_std` and generic over what the host provides: the stack, the
-crypto, the KV store, the OTA image store and the UDP network.
-`MatterPeek::start` (`std`) is this host's: it locks the store directory (one
-controller per store), binds the socket and runs the service on its own thread,
-which ends once every handle is dropped.
+The service is `no_std` and generic over what the host provides (`api::platform`):
+the stack, the crypto, the KV store (`KvBlobStore`), the OTA image store
+(`OtaImageStore`), the UDP network (`NetworkSend + NetworkReceive`) and the mDNS
+backend (`Mdns`). A host gets a handle and the service with `MatterPeek::new()`
+and runs it with `Service::run(Platform { … })`. `MatterPeek::start` (`std`) does
+that for this host: it locks the store directory (one controller per store),
+binds the socket, picks the mDNS backend by cargo feature (Avahi,
+systemd-resolved, Bonjour or rs-matter's own) and runs the service on its own
+thread, which ends once every handle is dropped.
 
 Below the service, `matter` (`Controller`), `ble`, `discovery`, `subscribe`,
 `logs`, `ota`, `node`, `ca` and `persist` wrap rs-matter's controller side. All
@@ -127,7 +131,7 @@ of it is private to `core`.
 | Server | `matter-peek-server` | starts one; serves `ws://127.0.0.1:8087` |
 | Web UI (Yew/Wasm, Bulma) | `trunk serve` | WebSocket |
 | CLI | `matter-peek` | `--server <url>`, or a `WireSession` in process |
-| MCP server | `matter-peek-mcp` | WebSocket (read-only unless `--allow-mutate`) |
+| MCP server | `matter-peek-mcp` | `--server <url>`, or in process (read-only unless `--allow-mutate`) |
 | Mobile apps | — | UniFFI, in process |
 
 The MCP protocol layer (JSON-RPC, tool catalog, tool ⇄ request mapping) is
@@ -210,8 +214,8 @@ controller too), and `mcp`'s protocol layer. The rules that keep it so:
   collections.
 - `core` depends on rs-matter without default features; its `std` feature (pulled
   in by the hosted mDNS backends, `ble` and `uniffi`) re-enables rs-matter's `os`.
-- Only `host` (`std`) creates sockets, threads and files; the service takes them
-  from the host.
+- Only `host` (`std`) creates sockets, threads and files; the service takes
+  them, and the mDNS backend, from the host (`api::platform`).
 
 ### Desktop
 
@@ -239,11 +243,9 @@ directory. Still to do for a real app:
 
 ### Embedded (later)
 
-An esp32 could run the service (it is `no_std`) with an `edge-http`/`edge-ws`
-shell for the wire. What is missing is a public no_std way to start it: one that
-takes the stack, crypto, KV store, OTA store and network from the host, as
-`MatterPeek::start` does internally. Deferred until there is hardware to
-validate against.
+An esp32 could run the controller: `MatterPeek::new()` and `Service::run` with
+its own platform pieces (e.g. `Builtin` mDNS over its multicast socket), plus an
+`edge-http`/`edge-ws` shell for the wire. Not tried on hardware yet.
 
 ---
 

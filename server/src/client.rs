@@ -133,15 +133,10 @@ pub async fn connect(url: &str) -> io::Result<Connection> {
     Ok(Connection::new(client_tx, server_rx))
 }
 
-/// Start a controller in this process and connect to it. Fails if another
-/// matter-peek process (e.g. a running server) holds the store.
-pub fn connect_in_process() -> io::Result<Connection> {
-    // Short-lived: no periodic sync, which the process could exit in the middle of.
-    let peek = MatterPeek::start(PeekConfig {
-        store_dir: None,
-        periodic_sync: false,
-    })
-    .map_err(io::Error::other)?;
+/// Start a controller in this process, as `config` says, and connect to it.
+/// Fails if another matter-peek process (e.g. a running server) holds the store.
+pub fn connect_in_process(config: PeekConfig) -> io::Result<Connection> {
+    let peek = MatterPeek::start(config).map_err(io::Error::other)?;
 
     let (client_tx, client_rx) = async_channel::unbounded::<ClientMsg>();
     let (server_tx, server_rx) = async_channel::unbounded::<ServerMsg>();

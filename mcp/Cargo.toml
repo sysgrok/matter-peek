@@ -15,10 +15,12 @@ required-features = ["std"]
 
 [features]
 # The library (protocol layer) is `no_std` + `alloc` by default. The `std`
-# feature adds the stdio binary that wires it to the matter-peek server.
+# feature adds the stdio binary that wires it to a controller: in this process,
+# or a matter-peek server.
 default = ["std"]
 std = [
     "dep:matter-peek-server",
+    "dep:clap",
     "dep:blocking",
     "dep:futures-lite",
     "dep:env_logger",
@@ -42,8 +44,8 @@ base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 
 # --- std binary glue (behind the `std` feature). ---
 # MCP-over-stdio is just JSON-RPC 2.0 over newline-delimited stdin/stdout; the
-# binary talks to the matter-peek server through `matter-peek-server`'s client, on
-# its smol/async-io runtime. (No tokio-based MCP SDK: it is `Send`-bound, which
+# binary reaches a controller (in this process, or a matter-peek server) through
+# `matter-peek-server`'s connection, on its smol/async-io runtime. (No tokio-based MCP SDK: it is `Send`-bound, which
 # clashes with that single-threaded executor.)
 matter-peek-server = { path = "../server", optional = true }
 # `blocking::Unblock` async-wraps stdin/stdout via a thread pool — the smol-family
@@ -52,3 +54,4 @@ matter-peek-server = { path = "../server", optional = true }
 blocking = { version = "1", optional = true }
 futures-lite = { workspace = true, optional = true }
 env_logger = { workspace = true, optional = true }
+clap = { version = "4", features = ["derive"], optional = true }

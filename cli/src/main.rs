@@ -197,7 +197,12 @@ fn main() -> ExitCode {
 async fn run(cli: Cli) -> io::Result<bool> {
     let conn = match &cli.server {
         Some(url) => client::connect(url).await?,
-        None => client::connect_in_process()?,
+        // Short-lived: no periodic sync, which the process could exit in the
+        // middle of.
+        None => client::connect_in_process(api::PeekConfig {
+            store_dir: None,
+            periodic_sync: false,
+        })?,
     };
 
     let out = Out { json: cli.json };

@@ -5,9 +5,10 @@
 //! ```
 //!
 //! Speaks newline-delimited JSON-RPC 2.0 (the MCP stdio transport) on
-//! stdin/stdout. Each `tools/call` becomes a request to the matter-peek server
-//! (`matter-peek-server`), the same API the web UI and the CLI use. Logs go to
-//! **stderr** so they never corrupt the stdout JSON stream.
+//! stdin/stdout. Each `tools/call` becomes a request of the matter-peek API: to a
+//! running `matter-peek-server` with `--server`, else to a controller started in
+//! this process (which needs the store to itself, so not while a server runs).
+//! Logs go to **stderr** so they never corrupt the stdout JSON stream.
 //!
 //! Read-only tools are always available; the mutating ones require
 //! `--allow-mutate`.
@@ -17,49 +18,64 @@ use core::cell::RefCell;
 use std::process::ExitCode;
 use std::rc::Rc;
 
+use clap::Parser;
 use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use futures_lite::StreamExt;
 
 use log::{debug, error, info, warn};
 
-use matter_peek_core::api::wire;
+use matter_peek_core::api::{wire, PeekConfig};
 use matter_peek_mcp::{handle, Caps, Dispatch};
 use matter_peek_server::client::{self, Connection};
 
-/// Where the matter-peek server listens by default.
-const DEFAULT_SERVER: &str = "ws://127.0.0.1:8087";
+#[derive(Parser)]
+#[command(
+    name = "matter-peek-mcp",
+    version,
+    about = "The matter-peek API as MCP tools, over stdio"
+)]
+struct Cli {
+    /// Use the matter-peek server at this URL (e.g. ws://127.0.0.1:8087),
+    /// instead of a controller in this process.
+    #[arg(long, value_name = "URL")]
+    server: Option<String>,
+    /// Also offer the tools that change devices or the stored state.
+    #[arg(long)]
+    allow_mutate: bool,
+}
 
-/// A [`Dispatch`] over a connection to the matter-peek server, opened on the
-/// first call and reopened once if it was closed (e.g. the server restarted).
-/// One connection serves the whole session: an upload in progress belongs to it.
-struct ServerDispatch {
-    url: String,
+/// A [`Dispatch`] over a connection to the API: to a controller in this
+/// process, or to the server at `url`, connected on the first call and
+/// reconnected once if it was closed (e.g. the server restarted). One connection
+/// serves the whole session: an upload in progress belongs to it.
+struct ApiDispatch {
+    url: Option<String>,
     conn: RefCell<Option<Rc<Connection>>>,
 }
 
-impl ServerDispatch {
+impl ApiDispatch {
     async fn connection(&self) -> Result<Rc<Connection>, String> {
         if let Some(conn) = self.conn.borrow().clone() {
             return Ok(conn);
         }
 
-        let conn = Rc::new(
-            client::connect(&self.url)
-                .await
-                .map_err(|e| e.to_string())?,
-        );
+        let Some(url) = &self.url else {
+            return Err("the controller stopped".into());
+        };
+
+        let conn = Rc::new(client::connect(url).await.map_err(|e| e.to_string())?);
         *self.conn.borrow_mut() = Some(conn.clone());
 
         Ok(conn)
     }
 }
 
-impl Dispatch for ServerDispatch {
+impl Dispatch for ApiDispatch {
     async fn dispatch(&self, request: wire::Request) -> Result<wire::Response, String> {
         // Events are not surfaced: a tool call is request/response.
         match self.connection().await?.call(request.clone(), |_| ()).await {
             Ok(response) => Ok(response),
-            Err(e) => {
+            Err(e) if self.url.is_some() => {
                 warn!("matter-peek-mcp: {e}; reconnecting");
                 self.conn.borrow_mut().take();
 
@@ -69,6 +85,7 @@ impl Dispatch for ServerDispatch {
                     .await
                     .map_err(|e| e.to_string())
             }
+            Err(e) => Err(e.to_string()),
         }
     }
 
@@ -88,36 +105,44 @@ fn main() -> ExitCode {
         .target(env_logger::Target::Stderr)
         .init();
 
-    let mut allow_mutate = false;
-    let mut url = DEFAULT_SERVER.to_string();
-
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--allow-mutate" => allow_mutate = true,
-            "--server" => match args.next() {
-                Some(server) => url = server,
-                None => {
-                    error!("matter-peek-mcp: --server needs a URL");
-                    return ExitCode::FAILURE;
-                }
-            },
-            other => {
-                error!("matter-peek-mcp: unknown argument {other}");
-                return ExitCode::FAILURE;
-            }
-        }
-    }
+    let cli = Cli::parse();
 
     info!(
-        "matter-peek-mcp: starting, server {url} (mutating tools {})",
-        if allow_mutate { "ENABLED" } else { "disabled" }
+        "matter-peek-mcp: starting, {} (mutating tools {})",
+        match &cli.server {
+            Some(url) => format!("server {url}"),
+            None => "controller in this process".into(),
+        },
+        if cli.allow_mutate {
+            "ENABLED"
+        } else {
+            "disabled"
+        }
     );
 
-    let caps = Caps { allow_mutate };
-    let dispatch = ServerDispatch {
-        url,
-        conn: RefCell::new(None),
+    // Started at once, so that a store held by another process fails here, and
+    // the device list is synced before the first tool call.
+    let conn = match &cli.server {
+        Some(_) => None,
+        // Long-lived, like a server: keep the device list in sync.
+        None => match client::connect_in_process(PeekConfig {
+            store_dir: None,
+            periodic_sync: true,
+        }) {
+            Ok(conn) => Some(Rc::new(conn)),
+            Err(e) => {
+                error!("matter-peek-mcp: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    let caps = Caps {
+        allow_mutate: cli.allow_mutate,
+    };
+    let dispatch = ApiDispatch {
+        url: cli.server,
+        conn: RefCell::new(conn),
     };
 
     match matter_peek_server::block_on(stdio_loop(dispatch, caps)) {
