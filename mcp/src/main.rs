@@ -1,72 +1,73 @@
 //! matter-peek-mcp binary — the MCP stdio server.
 //!
 //! ```text
-//! matter-peek-mcp [--allow-mutate]
+//! matter-peek-mcp [--server ws://127.0.0.1:8087] [--allow-mutate]
 //! ```
 //!
 //! Speaks newline-delimited JSON-RPC 2.0 (the MCP stdio transport) on
-//! stdin/stdout. Each `tools/call` is run by the **same actor** the WS server
-//! (`matter-peek-rpc`) uses — one `Command` per call. Logs go to **stderr** so
-//! they never corrupt the stdout JSON stream.
+//! stdin/stdout. Each `tools/call` becomes a request to the matter-peek server
+//! (`matter-peek-server`), the same API the web UI and the CLI use. Logs go to
+//! **stderr** so they never corrupt the stdout JSON stream.
 //!
-//! Read-only tools are always available; mutating tools (commission / set_tags)
-//! require `--allow-mutate`.
+//! Read-only tools are always available; the mutating ones require
+//! `--allow-mutate`.
+
+use core::cell::RefCell;
 
 use std::process::ExitCode;
+use std::rc::Rc;
 
 use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use futures_lite::StreamExt;
 
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 
 use matter_peek_mcp::{handle, Caps, Dispatch};
 use matter_peek_proto as proto;
-use matter_peek_rpc::actor::{self, Command};
+use matter_peek_rpc::client::{self, Connection};
 
-/// A [`Dispatch`] over the `matter-peek-rpc` actor channel: build one `Command`,
-/// send it, await the single reply (events are drained + ignored — a tool call
-/// is request/response).
-struct ActorDispatch {
-    tx: async_channel::Sender<Command>,
-    /// The session's outbound sink, drained unread: an upload in progress
-    /// belongs to it, and OTA update progress lands in it.
-    out: async_channel::Sender<proto::ServerMsg>,
+/// Where the matter-peek server listens by default.
+const DEFAULT_SERVER: &str = "ws://127.0.0.1:8087";
+
+/// A [`Dispatch`] over a connection to the matter-peek server, opened on the
+/// first call and reopened once if it was closed (e.g. the server restarted).
+/// One connection serves the whole session: an upload in progress belongs to it.
+struct ServerDispatch {
+    url: String,
+    conn: RefCell<Option<Rc<Connection>>>,
 }
 
-impl Dispatch for ActorDispatch {
+impl ServerDispatch {
+    async fn connection(&self) -> Result<Rc<Connection>, String> {
+        if let Some(conn) = self.conn.borrow().clone() {
+            return Ok(conn);
+        }
+
+        let conn = Rc::new(
+            client::connect(&self.url)
+                .await
+                .map_err(|e| e.to_string())?,
+        );
+        *self.conn.borrow_mut() = Some(conn.clone());
+
+        Ok(conn)
+    }
+}
+
+impl Dispatch for ServerDispatch {
     async fn dispatch(&self, request: proto::Request) -> Result<proto::Response, String> {
-        let (ev_tx, ev_rx) = async_channel::unbounded::<proto::Event>();
-        let (rep_tx, rep_rx) = async_channel::bounded::<proto::Response>(1);
+        // Events are not surfaced: a tool call is request/response.
+        match self.connection().await?.call(request.clone(), |_| ()).await {
+            Ok(response) => Ok(response),
+            Err(e) => {
+                warn!("matter-peek-mcp: {e}; reconnecting");
+                self.conn.borrow_mut().take();
 
-        let cmd = Command {
-            req_id: 1,
-            request,
-            events: ev_tx,
-            reply: rep_tx,
-            out: Some(self.out.clone()),
-        };
-        self.tx
-            .send(cmd)
-            .await
-            .map_err(|_| "controller actor unavailable".to_string())?;
-
-        // Drain events so the actor never blocks on a full event channel, while
-        // waiting for the single reply.
-        loop {
-            match futures_lite::future::or(async { Sel::Event(ev_rx.recv().await.ok()) }, async {
-                Sel::Reply(rep_rx.recv().await.ok())
-            })
-            .await
-            {
-                Sel::Event(Some(_)) => continue,
-                Sel::Event(None) => {
-                    return rep_rx
-                        .recv()
-                        .await
-                        .map_err(|_| "actor dropped without reply".to_string());
-                }
-                Sel::Reply(Some(resp)) => return Ok(resp),
-                Sel::Reply(None) => return Err("actor dropped without reply".to_string()),
+                self.connection()
+                    .await?
+                    .call(request, |_| ())
+                    .await
+                    .map_err(|e| e.to_string())
             }
         }
     }
@@ -81,40 +82,42 @@ impl Dispatch for ActorDispatch {
     }
 }
 
-enum Sel {
-    Event(Option<proto::Event>),
-    Reply(Option<proto::Response>),
-}
-
 fn main() -> ExitCode {
     // Logs to STDERR — stdout is the JSON-RPC channel and must stay clean.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .target(env_logger::Target::Stderr)
         .init();
 
-    let allow_mutate = std::env::args().any(|a| a == "--allow-mutate");
+    let mut allow_mutate = false;
+    let mut url = DEFAULT_SERVER.to_string();
+
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--allow-mutate" => allow_mutate = true,
+            "--server" => match args.next() {
+                Some(server) => url = server,
+                None => {
+                    error!("matter-peek-mcp: --server needs a URL");
+                    return ExitCode::FAILURE;
+                }
+            },
+            other => {
+                error!("matter-peek-mcp: unknown argument {other}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
     info!(
-        "matter-peek-mcp: starting (mutating tools {})",
+        "matter-peek-mcp: starting, server {url} (mutating tools {})",
         if allow_mutate { "ENABLED" } else { "disabled" }
     );
 
     let caps = Caps { allow_mutate };
-
-    // One actor + the stdio loop, both on the single-threaded executor (the
-    // Matter stack is !Send). `matter_peek_rpc::spawn` puts the actor on the same
-    // thread-local executor the loop is driven by.
-    let (cmd_tx, cmd_rx) = async_channel::unbounded::<Command>();
-    // MCP tool calls are request/response (no streaming, no cancel), so the
-    // actor's cancel flag is supplied but never set here.
-    let cancel: actor::CancelFlag = std::rc::Rc::new(std::cell::Cell::new(false));
-    matter_peek_rpc::spawn(actor::run(cmd_rx, cancel));
-
-    let (out_tx, out_rx) = async_channel::unbounded::<proto::ServerMsg>();
-    matter_peek_rpc::spawn(async move { while out_rx.recv().await.is_ok() {} });
-
-    let dispatch = ActorDispatch {
-        tx: cmd_tx,
-        out: out_tx,
+    let dispatch = ServerDispatch {
+        url,
+        conn: RefCell::new(None),
     };
 
     match matter_peek_rpc::block_on(stdio_loop(dispatch, caps)) {

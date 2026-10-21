@@ -9,13 +9,14 @@ repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "matter-peek-rpc"
+name = "matter-peek-server"
 path = "src/main.rs"
 
 [dependencies]
-matter-peek-core = { path = "../core" }
+# `ble`: commissioning over Bluetooth LE (Linux + BlueZ).
+matter-peek-core = { path = "../core", features = ["ble"] }
 matter-peek-proto = { path = "../proto" }
-rs-matter = { workspace = true }
+rs-matter = { workspace = true, features = ["qr-scan"] }
 
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -38,3 +39,5 @@ env_logger = { workspace = true }
 directories = "6"
 # OTA image uploads arrive base64-encoded over the WebSocket.
 base64 = "0.22"
+# Picture -> pixels, for reading QR codes; rs-matter does the recognition.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

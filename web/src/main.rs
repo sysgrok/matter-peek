@@ -30,7 +30,7 @@ struct LiveSub {
     health: proto::DeviceHealth,
     /// Connection state of this subscription (live / reconnecting).
     conn: SubConn,
-    /// How many health updates have arrived over this subscription's lifetime.
+    /// How many reports the device's subscription has delivered.
     updates: u64,
 }
 
@@ -38,8 +38,7 @@ impl Default for LiveSub {
     fn default() -> Self {
         Self {
             health: proto::DeviceHealth::default(),
-            // Optimistic until the server confirms `Live`; shows "connecting…".
-            conn: SubConn::Reconnecting,
+            conn: SubConn::Connecting,
             updates: 0,
         }
     }
@@ -48,7 +47,11 @@ impl Default for LiveSub {
 /// Connection state of a live subscription, mirrored from the wire.
 #[derive(Clone, Copy, PartialEq)]
 enum SubConn {
-    Live { max_int_secs: u16 },
+    /// Until the server reports the subscription live.
+    Connecting,
+    Live {
+        max_int_secs: u16,
+    },
     Reconnecting,
 }
 
@@ -62,6 +65,18 @@ enum Tab {
 
 /// How long a commission may run before the UI auto-cancels it.
 const COMMISSION_TIMEOUT_SECS: u32 = 90;
+/// Likewise over Bluetooth: scanning for the device, and its joining its
+/// network, add to it.
+const BLE_COMMISSION_TIMEOUT_SECS: u32 = 300;
+
+/// The network a device commissioned over Bluetooth joins.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Network {
+    Wifi,
+    Thread,
+    /// Already on its network (Ethernet).
+    None,
+}
 
 enum Msg {
     SelectTab(Tab),
@@ -83,6 +98,15 @@ enum Msg {
     CloseDiscover,
     Discover,
     PickDevice(String),
+    /// Commission the device at this Bluetooth address.
+    PickBleDevice(String),
+    /// Commission over Bluetooth (else over the network).
+    SetViaBle(bool),
+    BleAddr(String),
+    SetNetwork(Network),
+    WifiSsid(String),
+    WifiPassword(String),
+    ThreadDataset(String),
     ListDevices,
     /// Re-sync the device list with the devices on our fabric.
     Sync,
@@ -98,9 +122,10 @@ enum Msg {
     CloseLogs,
     /// Retrieve a log of the device whose logs popup is open.
     FetchLogs(proto::LogIntent),
-    /// A live health update arrived for a subscribed device (node_id, health).
-    /// Deltas are merged into that device's running view.
-    HealthReport(u64, proto::DeviceHealth),
+    /// A live health update arrived for a subscribed device (node_id, the
+    /// subscription's report count, health). Deltas are merged into that
+    /// device's running view.
+    HealthReport(u64, u64, proto::DeviceHealth),
     /// A subscription's connection state changed (node_id, state).
     SubState(u64, proto::SubscriptionState),
     /// The persistent subscription WS is open and ready; its writer sink is
@@ -119,6 +144,8 @@ enum Msg {
     OtaImages,
     /// The user picked an OTA image file to upload.
     OtaFile(web_sys::File),
+    /// The user picked a picture of a QR code, to read the setup code from.
+    QrImage(web_sys::File),
     /// How an OTA image upload goes (percent).
     OtaUploading(u8),
     /// Delete stored OTA image `name`.
@@ -143,6 +170,17 @@ struct App {
     discover_filter: String,
     /// Remember the device being commissioned (keep a record of it).
     remember: bool,
+    /// Commission over Bluetooth LE, rather than over the network.
+    via_ble: bool,
+    /// The Bluetooth address of the device to commission; empty for the one
+    /// matching the setup code.
+    ble_addr: String,
+    /// The network a device commissioned over Bluetooth joins.
+    network: Network,
+    wifi_ssid: String,
+    wifi_password: String,
+    /// The Thread operational dataset, hex.
+    thread_dataset: String,
     running: bool,
     /// The discovery popup is showing.
     discover_open: bool,
@@ -150,6 +188,7 @@ struct App {
     /// A device op (list / peek / identify / …) is in flight.
     busy_stored: bool,
     discovered: Vec<proto::DiscoveredDevice>,
+    discovered_ble: Vec<proto::BleDevice>,
     /// The devices on our fabric.
     stored: Vec<proto::DeviceInfo>,
     /// Per-device tag-input text (node_id → comma-separated edit buffer). Seeded
@@ -211,11 +250,18 @@ impl Component for App {
             setup_code: "20202021".into(),
             discover_filter: String::new(),
             remember: false,
+            via_ble: false,
+            ble_addr: String::new(),
+            network: Network::Wifi,
+            wifi_ssid: String::new(),
+            wifi_password: String::new(),
+            thread_dataset: String::new(),
             running: false,
             discover_open: false,
             discovering: false,
             busy_stored: false,
             discovered: Vec::new(),
+            discovered_ble: Vec::new(),
             stored: Vec::new(),
             tag_inputs: HashMap::new(),
             tag_filter: String::new(),
@@ -254,6 +300,11 @@ impl Component for App {
             }
             Msg::OtaImages => {
                 send_request(ctx.link().clone(), proto::Request::OtaImages);
+                false
+            }
+            Msg::QrImage(file) => {
+                self.error = None;
+                send_qr_image(ctx.link().clone(), file);
                 false
             }
             Msg::OtaFile(file) => {
@@ -325,8 +376,39 @@ impl Component for App {
                 true
             }
             Msg::PickDevice(addr) => {
+                self.via_ble = false;
                 self.peer_addr = addr;
                 self.discover_open = false;
+                true
+            }
+            Msg::PickBleDevice(addr) => {
+                self.via_ble = true;
+                self.ble_addr = addr;
+                self.discover_open = false;
+                true
+            }
+            Msg::SetViaBle(v) => {
+                self.via_ble = v;
+                true
+            }
+            Msg::BleAddr(v) => {
+                self.ble_addr = v;
+                true
+            }
+            Msg::SetNetwork(v) => {
+                self.network = v;
+                true
+            }
+            Msg::WifiSsid(v) => {
+                self.wifi_ssid = v;
+                true
+            }
+            Msg::WifiPassword(v) => {
+                self.wifi_password = v;
+                true
+            }
+            Msg::ThreadDataset(v) => {
+                self.thread_dataset = v;
                 true
             }
             Msg::Commission => {
@@ -334,7 +416,7 @@ impl Component for App {
                 // almost always a mistake — its commissioning window has closed,
                 // so PASE will hang. Warn + require confirmation instead.
                 let addr = self.peer_addr.trim().to_string();
-                if self.last_commissioned_addr.as_deref() == Some(addr.as_str()) {
+                if !self.via_ble && self.last_commissioned_addr.as_deref() == Some(addr.as_str()) {
                     self.confirm_recommission = true;
                     return true;
                 }
@@ -454,12 +536,11 @@ impl Component for App {
                 );
                 true
             }
-            Msg::HealthReport(node_id, health) => {
+            Msg::HealthReport(node_id, seq, health) => {
                 // Merge into that device's running view (ignore if not watching).
                 if let Some(sub) = self.subs.get_mut(&node_id) {
-                    sub.updates += 1;
-                    let prev = core::mem::take(&mut sub.health);
-                    sub.health = merge_health(prev, health);
+                    sub.updates = seq;
+                    sub.health.merge(health);
                     true
                 } else {
                     false
@@ -558,7 +639,14 @@ impl Component for App {
                     logs.loading = false;
                 }
                 match resp {
-                    proto::Response::Discovered { devices } => self.discovered = devices,
+                    proto::Response::Discovered {
+                        devices,
+                        ble_devices,
+                    } => {
+                        self.discovered = devices;
+                        self.discovered_ble = ble_devices;
+                    }
+                    proto::Response::SetupCode { setup_code } => self.setup_code = setup_code,
                     proto::Response::Devices { devices, notice } => {
                         self.stored_status = Some(format!("{} device(s)", devices.len()));
                         // A non-fatal remark about whatever produced this list —
@@ -581,10 +669,11 @@ impl Component for App {
                     proto::Response::Peek { handle, health, .. } => {
                         // A Refresh result: merge the fresh read into the device's
                         // card panel so its values (uptime, heap, …) update in place.
-                        let sub = self.subs.entry(handle.node_id).or_default();
-                        let prev = core::mem::take(&mut sub.health);
-                        sub.health = merge_health(prev, health);
-                        sub.updates += 1;
+                        self.subs
+                            .entry(handle.node_id)
+                            .or_default()
+                            .health
+                            .merge(health);
                     }
                     proto::Response::Ok => {
                         self.stored_status =
@@ -622,7 +711,9 @@ impl Component for App {
                     other @ proto::Response::Commissioned(_) => {
                         // Its commissioning window is closed now — remember its
                         // address to guard a re-commission.
-                        self.last_commissioned_addr = Some(self.peer_addr.trim().to_string());
+                        if !self.via_ble {
+                            self.last_commissioned_addr = Some(self.peer_addr.trim().to_string());
+                        }
                         if let proto::Response::Commissioned(result) = &other {
                             if let Some(node_id) = result.rematch_candidate {
                                 self.notice = Some(rematch_notice(node_id));
@@ -753,8 +844,10 @@ impl App {
                     match msg {
                         proto::ServerMsg::Event { event } => match event {
                             proto::Event::HealthReport {
-                                node_id, health, ..
-                            } => link.send_message(Msg::HealthReport(node_id, health)),
+                                node_id,
+                                seq,
+                                health,
+                            } => link.send_message(Msg::HealthReport(node_id, seq, health)),
                             proto::Event::SubscriptionState { node_id, state } => {
                                 link.send_message(Msg::SubState(node_id, state))
                             }
@@ -823,6 +916,7 @@ impl App {
         };
         self.discovering = true;
         self.discovered.clear();
+        self.discovered_ble.clear();
         self.error = None;
         send_request(
             ctx.link().clone(),
@@ -834,9 +928,49 @@ impl App {
         );
     }
 
-    /// Whether the commission form holds a usable peer address and setup code.
+    /// Whether the commission form is filled in usably: how to reach the device,
+    /// and its setup code.
     fn can_commission(&self) -> bool {
-        self.peer_addr.trim().parse::<SocketAddr>().is_ok() && valid_setup_code(&self.setup_code)
+        let reach = if self.via_ble {
+            let addr = self.ble_addr.trim();
+            let network = match self.network {
+                Network::Wifi => !self.wifi_ssid.is_empty(),
+                Network::Thread => valid_hex(&self.thread_dataset),
+                Network::None => true,
+            };
+
+            (addr.is_empty() || valid_bt_addr(addr)) && network
+        } else {
+            self.peer_addr.trim().parse::<SocketAddr>().is_ok()
+        };
+
+        reach && valid_setup_code(&self.setup_code)
+    }
+
+    /// How the commission reaches the device, from the form.
+    fn commission_via(&self) -> proto::CommissionVia {
+        if !self.via_ble {
+            return proto::CommissionVia::Ip {
+                addr: self.peer_addr.trim().to_string(),
+            };
+        }
+
+        let addr = self.ble_addr.trim();
+        let network = match self.network {
+            Network::Wifi => Some(proto::NetworkCredentials::Wifi {
+                ssid: self.wifi_ssid.clone(),
+                password: self.wifi_password.clone(),
+            }),
+            Network::Thread => Some(proto::NetworkCredentials::Thread {
+                dataset: self.thread_dataset.split_whitespace().collect(),
+            }),
+            Network::None => None,
+        };
+
+        proto::CommissionVia::Ble {
+            addr: (!addr.is_empty()).then(|| addr.to_string()),
+            network,
+        }
     }
 
     /// Kick off a commission (shared by `Commission` and `CommissionAnyway`).
@@ -853,7 +987,7 @@ impl App {
         self.error = None;
 
         let req = proto::Request::Commission {
-            peer_addr: self.peer_addr.trim().to_string(),
+            via: self.commission_via(),
             setup_code,
             remember: self.remember,
         };
@@ -861,9 +995,14 @@ impl App {
 
         // Safety net: auto-cancel if the commission runs too long. When the timer
         // fires we only act if still `running` (a completed run cleared it).
+        let timeout_secs = if self.via_ble {
+            BLE_COMMISSION_TIMEOUT_SECS
+        } else {
+            COMMISSION_TIMEOUT_SECS
+        };
         let link = ctx.link().clone();
         spawn_local(async move {
-            gloo_timers::future::TimeoutFuture::new(COMMISSION_TIMEOUT_SECS * 1000).await;
+            gloo_timers::future::TimeoutFuture::new(timeout_secs * 1000).await;
             link.send_message(Msg::Cancel);
         });
         true
@@ -893,8 +1032,8 @@ impl App {
 
     // --- Discover popup ---------------------------------------------------
 
-    /// Full-screen list of the commissionable devices; picking one fills the
-    /// peer address.
+    /// Full-screen list of the commissionable devices: picking one on the
+    /// network fills the peer address, one over Bluetooth the Bluetooth device.
     fn view_discover_modal(&self, link: &html::Scope<Self>) -> Html {
         if !self.discover_open {
             return html! {};
@@ -940,15 +1079,59 @@ impl App {
     }
 
     fn view_discovered(&self, link: &html::Scope<Self>) -> Html {
-        if self.discovered.is_empty() {
+        if self.discovered.is_empty() && self.discovered_ble.is_empty() {
             let text = if self.discovering {
-                "Scanning the local network…"
+                "Scanning the network and Bluetooth…"
             } else {
                 "No commissionable devices found."
             };
             return html! { <p class="has-text-grey">{ text }</p> };
         }
+
         html! {
+            <>
+                { self.view_discovered_ip(link) }
+                { self.view_discovered_ble(link) }
+            </>
+        }
+    }
+
+    fn view_discovered_ble(&self, link: &html::Scope<Self>) -> Html {
+        if self.discovered_ble.is_empty() {
+            return html! {};
+        }
+        html! {
+            <>
+                <h3 class="title is-6">{ "Over Bluetooth" }</h3>
+                <table class="table is-fullwidth is-hoverable">
+                    <thead>
+                        <tr><th>{ "Bluetooth address" }</th><th>{ "Discriminator" }</th><th>{ "Vendor:product" }</th></tr>
+                    </thead>
+                    <tbody>
+                        { for self.discovered_ble.iter().map(|d| {
+                            let addr = d.addr.clone();
+                            let onclick = link.callback(move |_| Msg::PickBleDevice(addr.clone()));
+                            html! {
+                                <tr class="is-clickable" title="Commission this device over Bluetooth" {onclick}>
+                                    <td class="mono">{ d.addr.clone() }</td>
+                                    <td class="mono">{ d.discriminator }</td>
+                                    <td class="mono">{ format!("{:04x}:{:04x}", d.vendor_id, d.product_id) }</td>
+                                </tr>
+                            }
+                        }) }
+                    </tbody>
+                </table>
+            </>
+        }
+    }
+
+    fn view_discovered_ip(&self, link: &html::Scope<Self>) -> Html {
+        if self.discovered.is_empty() {
+            return html! {};
+        }
+        html! {
+            <>
+            <h3 class="title is-6">{ "On the network" }</h3>
             <table class="table is-fullwidth is-hoverable">
                 <thead>
                     <tr><th>{ "Address" }</th><th>{ "Commissionable id" }</th></tr>
@@ -966,6 +1149,7 @@ impl App {
                     }) }
                 </tbody>
             </table>
+            </>
         }
     }
 
@@ -986,39 +1170,60 @@ impl App {
                     <h2 class="title is-5">{ "Commission a device" }</h2>
 
                     <div class="field">
-                        <label class="label">{ "Peer address" }</label>
-                        <div class="field has-addons">
-                            <div class="control is-expanded">
-                                <input class={classes!("input", "mono", addr_invalid.then_some("is-danger"))}
-                                    placeholder="[IPv6]:port or IPv4:port"
-                                    value={self.peer_addr.clone()}
-                                    oninput={link.callback(|e: InputEvent| Msg::PeerAddr(input_value(e)))} />
-                            </div>
-                            <div class="control">
-                                <button class="button is-link"
-                                    title="Find commissionable devices on the local network"
-                                    disabled={self.running}
-                                    onclick={link.callback(|_| Msg::OpenDiscover)}>
-                                    <span class="icon">
-                                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
-                                            width="18" height="18" fill="none" stroke="currentColor"
-                                            stroke-width="2.5" stroke-linecap="round">
-                                            <circle cx="10.5" cy="10.5" r="6.5" />
-                                            <line x1="15.5" y1="15.5" x2="21" y2="21" />
-                                        </svg>
-                                    </span>
-                                    <span>{ "Discover" }</span>
-                                </button>
-                            </div>
+                        <label class="label">{ "Reach the device" }</label>
+                        <div class="buttons has-addons">
+                            <button class={classes!("button", (!self.via_ble).then_some("is-link"), (!self.via_ble).then_some("is-selected"))}
+                                onclick={link.callback(|_| Msg::SetViaBle(false))}>
+                                { "Over the network" }
+                            </button>
+                            <button class={classes!("button", self.via_ble.then_some("is-link"), self.via_ble.then_some("is-selected"))}
+                                onclick={link.callback(|_| Msg::SetViaBle(true))}>
+                                { "Over Bluetooth" }
+                            </button>
                         </div>
                     </div>
 
+                    {
+                        if self.via_ble {
+                            self.view_ble_fields(link)
+                        } else {
+                            html! {
+                                <div class="field">
+                                    <label class="label">{ "Peer address" }</label>
+                                    <div class="field has-addons">
+                                        <div class="control is-expanded">
+                                            <input class={classes!("input", "mono", addr_invalid.then_some("is-danger"))}
+                                                placeholder="[IPv6]:port or IPv4:port"
+                                                value={self.peer_addr.clone()}
+                                                oninput={link.callback(|e: InputEvent| Msg::PeerAddr(input_value(e)))} />
+                                        </div>
+                                        <div class="control">{ self.discover_button(link) }</div>
+                                    </div>
+                                </div>
+                            }
+                        }
+                    }
+
                     <div class="field">
                         <label class="label">{ "Setup code" }</label>
-                        <div class="control">
-                            <input class={classes!("input", "mono", code_invalid.then_some("is-danger"))}
-                                value={self.setup_code.clone()}
-                                oninput={link.callback(|e: InputEvent| Msg::SetupCode(input_value(e)))} />
+                        <div class="field has-addons">
+                            <div class="control is-expanded">
+                                <input class={classes!("input", "mono", code_invalid.then_some("is-danger"))}
+                                    value={self.setup_code.clone()}
+                                    oninput={link.callback(|e: InputEvent| Msg::SetupCode(input_value(e)))} />
+                            </div>
+                            <div class="control">
+                                <div class="file">
+                                    <label class="file-label"
+                                        title="Read the setup code from a picture of the device's QR code">
+                                        <input class="file-input" type="file" accept="image/png,image/jpeg"
+                                            onchange={link.batch_callback(|e: Event| picked_file(e).map(Msg::QrImage))} />
+                                        <span class="file-cta">
+                                            <span class="file-label">{ "From QR image" }</span>
+                                        </span>
+                                    </label>
+                                </div>
+                            </div>
                         </div>
                         <p class="help">{ "Passcode, manual pairing code or MT: QR code payload." }</p>
                     </div>
@@ -1061,6 +1266,100 @@ impl App {
 
                 { self.view_progress() }
                 { self.view_result() }
+            </>
+        }
+    }
+
+    /// The Discover button, opening the popup of commissionable devices.
+    fn discover_button(&self, link: &html::Scope<Self>) -> Html {
+        html! {
+            <button class="button is-link"
+                title="Find commissionable devices, on the network and over Bluetooth"
+                disabled={self.running}
+                onclick={link.callback(|_| Msg::OpenDiscover)}>
+                <span class="icon">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+                        width="18" height="18" fill="none" stroke="currentColor"
+                        stroke-width="2.5" stroke-linecap="round">
+                        <circle cx="10.5" cy="10.5" r="6.5" />
+                        <line x1="15.5" y1="15.5" x2="21" y2="21" />
+                    </svg>
+                </span>
+                <span>{ "Discover" }</span>
+            </button>
+        }
+    }
+
+    /// Commissioning over Bluetooth: which device, and the network it joins.
+    fn view_ble_fields(&self, link: &html::Scope<Self>) -> Html {
+        let addr = self.ble_addr.trim();
+        let addr_invalid = !addr.is_empty() && !valid_bt_addr(addr);
+        let dataset_invalid =
+            !self.thread_dataset.trim().is_empty() && !valid_hex(&self.thread_dataset);
+
+        let network = |network: Network, label: &str| {
+            html! {
+                <label class="radio mr-4">
+                    <input type="radio" name="network" checked={self.network == network}
+                        onchange={link.callback(move |_| Msg::SetNetwork(network))} />
+                    { format!(" {label}") }
+                </label>
+            }
+        };
+
+        html! {
+            <>
+                <div class="field">
+                    <label class="label">{ "Bluetooth device" }</label>
+                    <div class="field has-addons">
+                        <div class="control is-expanded">
+                            <input class={classes!("input", "mono", addr_invalid.then_some("is-danger"))}
+                                placeholder="any device matching the setup code"
+                                value={self.ble_addr.clone()}
+                                oninput={link.callback(|e: InputEvent| Msg::BleAddr(input_value(e)))} />
+                        </div>
+                        <div class="control">{ self.discover_button(link) }</div>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <label class="label">{ "Network to join" }</label>
+                    <div class="control">
+                        { network(Network::Wifi, "Wi-Fi") }
+                        { network(Network::Thread, "Thread") }
+                        { network(Network::None, "None (already on its network)") }
+                    </div>
+                </div>
+
+                {
+                    match self.network {
+                        Network::Wifi => html! {
+                            <div class="field is-grouped">
+                                <div class="control is-expanded">
+                                    <input class="input" placeholder="Wi-Fi network (SSID)"
+                                        value={self.wifi_ssid.clone()}
+                                        oninput={link.callback(|e: InputEvent| Msg::WifiSsid(input_value(e)))} />
+                                </div>
+                                <div class="control is-expanded">
+                                    <input class="input" type="password" placeholder="password"
+                                        value={self.wifi_password.clone()}
+                                        oninput={link.callback(|e: InputEvent| Msg::WifiPassword(input_value(e)))} />
+                                </div>
+                            </div>
+                        },
+                        Network::Thread => html! {
+                            <div class="field">
+                                <div class="control">
+                                    <textarea class={classes!("textarea", "mono", dataset_invalid.then_some("is-danger"))} rows="2"
+                                        placeholder="Thread operational dataset (hex)"
+                                        value={self.thread_dataset.clone()}
+                                        oninput={link.callback(|e: InputEvent| Msg::ThreadDataset(textarea_value(e)))} />
+                                </div>
+                            </div>
+                        },
+                        Network::None => html! {},
+                    }
+                }
             </>
         }
     }
@@ -1422,15 +1721,7 @@ impl App {
 
     /// The Updates tab: upload, list and delete OTA images.
     fn view_updates_tab(&self, link: &html::Scope<Self>) -> Html {
-        let on_file = link.batch_callback(|e: Event| {
-            use wasm_bindgen::JsCast;
-
-            e.target()
-                .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
-                .and_then(|input| input.files())
-                .and_then(|files| files.get(0))
-                .map(Msg::OtaFile)
-        });
+        let on_file = link.batch_callback(|e: Event| picked_file(e).map(Msg::OtaFile));
         let refresh = link.callback(|_| Msg::OtaImages);
 
         html! {
@@ -1609,12 +1900,16 @@ impl App {
         let sw = sub.health.software.unwrap_or_default();
 
         let (status, status_class) = match sub.conn {
+            SubConn::Connecting => ("◌ connecting…".to_string(), "tag is-light"),
             SubConn::Live { max_int_secs } => (
-                format!("● live · {} update(s) · ≤{max_int_secs}s", sub.updates),
+                format!(
+                    "● subscribed · reports at least every {max_int_secs} s · {} report(s)",
+                    sub.updates
+                ),
                 "tag is-success is-light",
             ),
             SubConn::Reconnecting => (
-                format!("◌ reconnecting… · {} update(s)", sub.updates),
+                format!("◌ reconnecting… · {} report(s)", sub.updates),
                 "tag is-warning is-light",
             ),
         };
@@ -1645,37 +1940,6 @@ impl App {
 /// A metric value or an em-dash placeholder when the device doesn't report it.
 fn opt_str<T: std::fmt::Display>(v: Option<T>) -> String {
     v.map(|x| x.to_string()).unwrap_or_else(|| "—".into())
-}
-
-/// Merge a live health delta into the running view: a subscription report may
-/// carry only the attributes that changed, so we overlay the new report's
-/// present fields onto the previous snapshot rather than replacing it wholesale.
-fn merge_health(mut prev: proto::DeviceHealth, delta: proto::DeviceHealth) -> proto::DeviceHealth {
-    if let Some(g) = delta.general {
-        let base = prev.general.get_or_insert_with(Default::default);
-        if g.up_time_secs.is_some() {
-            base.up_time_secs = g.up_time_secs;
-        }
-        if g.reboot_count.is_some() {
-            base.reboot_count = g.reboot_count;
-        }
-        if g.total_operational_hours.is_some() {
-            base.total_operational_hours = g.total_operational_hours;
-        }
-    }
-    if let Some(s) = delta.software {
-        let base = prev.software.get_or_insert_with(Default::default);
-        if s.current_heap_free.is_some() {
-            base.current_heap_free = s.current_heap_free;
-        }
-        if s.current_heap_used.is_some() {
-            base.current_heap_used = s.current_heap_used;
-        }
-        if s.current_heap_high_watermark.is_some() {
-            base.current_heap_high_watermark = s.current_heap_high_watermark;
-        }
-    }
-    prev
 }
 
 /// Compact one-line fingerprint summary for a stored-device card.
@@ -1810,6 +2074,33 @@ fn upload_notice(percent: u8) -> String {
 }
 
 /// Upload an OTA image file in chunks, on its own connection.
+/// The file picked in a file input.
+fn picked_file(e: Event) -> Option<web_sys::File> {
+    use wasm_bindgen::JsCast;
+
+    e.target()
+        .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+        .and_then(|input| input.files())
+        .and_then(|files| files.get(0))
+}
+
+/// Read a picture of a QR code and have the server read the setup code from it.
+fn send_qr_image(link: html::Scope<App>, file: web_sys::File) {
+    use base64::Engine as _;
+
+    spawn_local(async move {
+        match gloo_file::futures::read_as_bytes(&gloo_file::File::from(file)).await {
+            Ok(image) => send_request(
+                link,
+                proto::Request::ReadQrImage {
+                    image: base64::engine::general_purpose::STANDARD.encode(image),
+                },
+            ),
+            Err(e) => link.send_message(Msg::Error(format!("cannot read the image: {e}"))),
+        }
+    });
+}
+
 fn send_ota_upload(link: html::Scope<App>, file: web_sys::File) {
     spawn_local(async move {
         if let Err(e) = ota_upload(&link, gloo_file::File::from(file)).await {
@@ -2032,6 +2323,32 @@ fn phase_name(step: proto::CommissionStep) -> &'static str {
     match step {
         proto::CommissionStep::Commission => "Commissioning",
     }
+}
+
+/// Whether `addr` is a Bluetooth address (`AA:BB:CC:DD:EE:FF`).
+fn valid_bt_addr(addr: &str) -> bool {
+    let parts: Vec<&str> = addr.split(':').collect();
+
+    parts.len() == 6
+        && parts
+            .iter()
+            .all(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Whether `hex` is a non-empty hex byte string (whitespace allowed).
+fn valid_hex(hex: &str) -> bool {
+    let digits: Vec<u8> = hex.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+
+    !digits.is_empty() && digits.len().is_multiple_of(2) && digits.iter().all(u8::is_ascii_hexdigit)
+}
+
+fn textarea_value(e: InputEvent) -> String {
+    use wasm_bindgen::JsCast;
+
+    e.target()
+        .and_then(|t| t.dyn_into::<web_sys::HtmlTextAreaElement>().ok())
+        .map(|t| t.value())
+        .unwrap_or_default()
 }
 
 fn input_value(e: InputEvent) -> String {

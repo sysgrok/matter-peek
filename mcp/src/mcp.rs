@@ -3,13 +3,13 @@
 //!
 //! Transport- and controller-agnostic (`no_std` + `alloc`). A tool call maps to
 //! a [`matter_peek_proto::Request`], which is run by an injected [`Dispatch`]
-//! (the desktop shell implements it over the `matter-peek-rpc` actor). The
-//! single final [`matter_peek_proto::Response`] is rendered back as the tool
-//! result; streamed progress is not surfaced over MCP (a tool call is
+//! (the desktop shell implements it over a connection to the matter-peek
+//! server). The single final [`matter_peek_proto::Response`] is rendered back as
+//! the tool result; streamed progress is not surfaced over MCP (a tool call is
 //! request/response), so neither are health subscriptions.
 //!
-//! **Safety:** read-only tools (discover / list / peek / logs / identify / OTA
-//! images) are always registered. Mutating tools (commission / decommission /
+//! **Safety:** read-only tools (discover / list / peek / logs / identify / QR
+//! images / OTA images) are always registered. Mutating tools (commission / decommission /
 //! remember / set_tags / sync / OTA upload, delete and update) are registered
 //! only when
 //! [`Caps::allow_mutate`] is set — so an agent cannot commission or alter devices
@@ -51,10 +51,10 @@ const UPLOAD_CHUNK_LEN: usize = 256 * 1024;
 
 /// Runs one [`proto::Request`] against the controller and yields its single final
 /// response. The protocol layer is agnostic to *how* — the desktop shell
-/// implements this over the `matter-peek-rpc` actor channel; a future esp shell
+/// implements this over a connection to the matter-peek server; a future esp shell
 /// would implement it over its own in-process controller.
 pub trait Dispatch {
-    /// `Err(message)` is for transport/actor failures (becomes a JSON-RPC
+    /// `Err(message)` is for transport failures (becomes a JSON-RPC
     /// internal error); a controller-level failure is a normal
     /// [`proto::Response::Error`] carried in `Ok`.
     fn dispatch(
@@ -112,10 +112,10 @@ fn initialize_result() -> Value {
         "instructions":
             "Vendor-agnostic Matter diagnostic controller. Read-only tools \
              (discover, list_devices, peek_device, retrieve_logs, identify, \
-             ota_images) are always available. The tools that change devices \
+             read_qr_image, ota_images) are always available. The tools that change devices \
              or the stored state (commission, decommission, remember, set_tags, \
-             sync, ota_upload, ota_delete, ota_update) require the server to \
-             have been started with --allow-mutate."
+             sync, ota_upload, ota_delete, ota_update) require matter-peek-mcp \
+             to have been started with --allow-mutate."
     })
 }
 
@@ -128,8 +128,10 @@ fn tool_list(caps: Caps) -> Vec<Value> {
     let mut tools = vec![
         tool(
             "discover",
-            "Browse the local network for commissionable Matter devices via \
-             mDNS. Returns a list of addresses + commissionable ids.",
+            "Find the Matter devices in commissioning mode: on the local \
+             network via mDNS (addresses + commissionable ids, for commission's \
+             peer_addr) and over Bluetooth LE (addresses + discriminator, \
+             vendor and product ids, for commission's ble_addr).",
             json!({
                 "type": "object",
                 "properties": {
@@ -197,6 +199,19 @@ fn tool_list(caps: Caps) -> Vec<Value> {
             }),
         ),
         tool(
+            "read_qr_image",
+            "Read the setup code (MT: payload) from a picture of a device's QR \
+             code: a PNG or JPEG file on this machine. The code can then be \
+             passed to commission.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path of the image file." }
+                },
+                "required": ["path"]
+            }),
+        ),
+        tool(
             "ota_images",
             "List the stored OTA images (name, vendor/product id, software \
              version) that devices can be updated to.",
@@ -207,18 +222,23 @@ fn tool_list(caps: Caps) -> Vec<Value> {
     if caps.allow_mutate {
         tools.push(tool(
             "commission",
-            "Commission a Matter device at the given address onto our fabric; \
-             it is listed from then on. With remember=true a record of it is \
-             also kept (see remember). MUTATING — alters the device's fabric \
-             table.",
+            "Commission a Matter device onto our fabric, reaching it over the \
+             network at peer_addr, or over Bluetooth LE with ble=true (then \
+             giving it the Wi-Fi or Thread network to join). It is listed from \
+             then on. With remember=true a record of it is also kept (see \
+             remember). MUTATING — alters the device's fabric table.",
             json!({
                 "type": "object",
                 "properties": {
-                    "peer_addr": { "type": "string", "description": "e.g. \"192.168.1.20:5540\" or \"[fe80::1]:5540\"." },
+                    "peer_addr": { "type": "string", "description": "Over the network: e.g. \"192.168.1.20:5540\" or \"[fe80::1]:5540\"." },
+                    "ble": { "type": "boolean", "description": "Over Bluetooth LE instead (see discover). Default false." },
+                    "ble_addr": { "type": "string", "description": "Over Bluetooth: the device's address (e.g. \"E8:F6:0A:60:E4:72\"); else the one matching the setup code." },
+                    "wifi_ssid": { "type": "string", "description": "Over Bluetooth: the Wi-Fi network the device joins." },
+                    "wifi_password": { "type": "string", "description": "The password of that Wi-Fi network." },
+                    "thread_dataset": { "type": "string", "description": "Over Bluetooth: the Thread network the device joins, as its operational dataset in hex." },
                     "setup_code": { "type": "string", "description": "Setup passcode, manual pairing code or MT: QR code payload (default 20202021)." },
                     "remember": { "type": "boolean", "description": "Also keep a record of the device. Default false." }
-                },
-                "required": ["peer_addr"]
+                }
             }),
         ));
         tools.push(tool(
@@ -335,12 +355,23 @@ async fn tools_call<D: Dispatch>(
     if MUTATING_TOOLS.contains(&name) && !caps.allow_mutate {
         return Err((
             jsonrpc::INVALID_PARAMS,
-            format!("tool '{name}' is disabled; start the server with --allow-mutate to enable it"),
+            format!(
+                "tool '{name}' is disabled; start matter-peek-mcp with --allow-mutate to enable it"
+            ),
         ));
     }
 
     let response = if name == "ota_upload" {
         ota_upload(&args, dispatch).await?
+    } else if name == "read_qr_image" {
+        let path = arg_str(&args, "path")?;
+        let image = dispatch
+            .read_file(&path)
+            .await
+            .map_err(|e| (jsonrpc::INVALID_PARAMS, e))?;
+
+        let image = BASE64.encode(image);
+        call(dispatch, proto::Request::ReadQrImage { image }).await?
     } else {
         let request = build_request(name, &args)?;
         call(dispatch, request).await?
@@ -446,11 +477,7 @@ fn build_request(name: &str, args: &Value) -> Result<proto::Request, ToolErr> {
             secs: args.get("secs").and_then(Value::as_u64).unwrap_or(3) as u16,
         },
         "commission" => proto::Request::Commission {
-            peer_addr: args
-                .get("peer_addr")
-                .and_then(Value::as_str)
-                .ok_or((jsonrpc::INVALID_PARAMS, "missing peer_addr".to_string()))?
-                .to_string(),
+            via: commission_via(args)?,
             setup_code: args
                 .get("setup_code")
                 .and_then(Value::as_str)
@@ -476,6 +503,31 @@ fn build_request(name: &str, args: &Value) -> Result<proto::Request, ToolErr> {
         other => return Err((jsonrpc::METHOD_NOT_FOUND, format!("unknown tool: {other}"))),
     };
     Ok(req)
+}
+
+/// How `commission` reaches the device, from its arguments.
+fn commission_via(args: &Value) -> Result<proto::CommissionVia, ToolErr> {
+    let opt_str = |key| args.get(key).and_then(Value::as_str).map(str::to_string);
+
+    if !args.get("ble").and_then(Value::as_bool).unwrap_or(false) {
+        return Ok(proto::CommissionVia::Ip {
+            addr: arg_str(args, "peer_addr")?,
+        });
+    }
+
+    let network = match (opt_str("wifi_ssid"), opt_str("thread_dataset")) {
+        (Some(ssid), _) => Some(proto::NetworkCredentials::Wifi {
+            ssid,
+            password: opt_str("wifi_password").unwrap_or_default(),
+        }),
+        (None, Some(dataset)) => Some(proto::NetworkCredentials::Thread { dataset }),
+        (None, None) => None,
+    };
+
+    Ok(proto::CommissionVia::Ble {
+        addr: opt_str("ble_addr"),
+        network,
+    })
 }
 
 fn arg_u64(args: &Value, key: &str) -> Result<u64, ToolErr> {

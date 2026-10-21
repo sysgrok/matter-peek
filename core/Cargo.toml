@@ -8,9 +8,6 @@ publish = false
 repository.workspace = true
 rust-version.workspace = true
 
-[lib]
-name = "matter_peek_core"
-
 [features]
 # Default is the hosted/desktop build (Avahi backend → `std`). An embedded
 # target builds with `--no-default-features` and selects an embedded-appropriate

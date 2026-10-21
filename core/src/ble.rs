@@ -6,8 +6,8 @@
 //! GATT-Central BTP transport (`rs_matter::transport::network::btp::gatt::bluez`)
 //! and adds the network-commissioning step the IP path doesn't need.
 //!
-//! The flow has two phases over two different transports on the **same** `Matter`
-//! stack (see [`commission_ble`]):
+//! The flow has two phases over the two sides of the **same** `Matter` stack's
+//! transport, which the caller runs over both UDP and BTP (see [`commission_ble`]):
 //!
 //! - **Phase A — over BLE/BTP.** Scan for the device's commissionable
 //!   advertisement, connect to it as a GATT Central, and run PASE → ArmFailSafe →
@@ -17,9 +17,9 @@
 //!   still armed.
 //!
 //! - **Phase B — over IP.** Once the device joins, it announces itself
-//!   operationally over `_matter._tcp` mDNS. We tear down the BLE transport,
-//!   bring up the UDP transport + mDNS backend, resolve the device's operational
-//!   address, establish CASE, and invoke `CommissioningComplete`.
+//!   operationally over `_matter._tcp` mDNS. We drop the BLE link, resolve the
+//!   device's operational address, establish CASE, and invoke
+//!   `CommissioningComplete`.
 //!
 //! Which network a device wants is *not* in its onboarding payload - a QR code's
 //! discovery capabilities say how to *reach* it for commissioning, not what it will
@@ -27,19 +27,23 @@
 
 extern crate alloc;
 
+use core::cell::Cell;
 use core::num::NonZeroU8;
 use core::pin::pin;
 
 use alloc::vec::Vec;
 
 use embassy_futures::select::{select, Either};
-use embassy_time::{Duration, Timer};
+use embassy_time::{with_timeout, Duration, Timer};
 
 use log::{error, info, warn};
 
 use rs_matter::cert::gen::VALID_FOREVER;
 use rs_matter::cert::{MAX_CERT_TLV_AND_ASN1_LEN, MAX_CERT_TLV_LEN};
 use rs_matter::crypto::Crypto;
+use rs_matter::dm::clusters::decl::general_commissioning::{
+    GeneralCommissioningAttrReads as _, GeneralCommissioningAttrResponses as _,
+};
 use rs_matter::dm::clusters::decl::network_commissioning::{
     Feature, NetworkCommissioningAttrReads as _, NetworkCommissioningAttrResponses as _,
     NetworkCommissioningClient as _, NetworkCommissioningStatusEnum,
@@ -54,12 +58,13 @@ use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::network::btp::bluez;
 use rs_matter::transport::network::btp::Btp;
 use rs_matter::transport::network::mdns::CommissionableFilter;
-use rs_matter::transport::network::{Address, NoNetwork};
-use rs_matter::utils::select::Coalesce;
+use rs_matter::transport::network::{Address, BtAddr};
+use rs_matter::transport::session::SessionMode;
 use rs_matter::utils::zbus::Connection;
 use rs_matter::Matter;
 
 use crate::ca::ControllerCa;
+use crate::controller::remove_sessions;
 use crate::model::{CommissionOutcome, DeviceHandle};
 
 /// Fail-safe duration armed for the whole BLE→Thread flow.
@@ -73,8 +78,12 @@ use crate::model::{CommissionOutcome, DeviceHandle};
 /// [`OPERATIONAL_JOIN_TIMEOUT_SECS`]. (The spec caps ArmFailSafe at 900 s.)
 const BLE_FAIL_SAFE_SECS: u16 = 240;
 
+/// How long a device without concurrent connection gets to answer
+/// `ConnectNetwork` over BLE, which it leaves to join its network.
+const NON_CONCURRENT_CONNECT_WAIT_SECS: u64 = 5;
+
 /// How long [`commission_ble`] scans for the commissionable advertisement.
-const SCAN_TIMEOUT_SECS: u16 = 60;
+const SCAN_TIMEOUT_SECS: u16 = 30;
 
 /// How long to keep retrying the operational CASE resolve/handshake in phase B,
 /// while the device is joining Thread and starting to announce itself.
@@ -90,20 +99,76 @@ const OPERATIONAL_JOIN_TIMEOUT_SECS: u64 = 180;
 /// without depending on `rs-matter`'s cluster module directly.
 pub use rs_matter::dm::clusters::net_comm::WirelessCreds;
 
+/// A device advertising as commissionable over Bluetooth LE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BleDevice {
+    pub addr: BtAddr,
+    pub discriminator: u16,
+    pub vendor_id: u16,
+    pub product_id: u16,
+}
+
+/// The devices advertising as commissionable over Bluetooth LE that match
+/// `filter`, scanning for `secs` seconds.
+pub async fn scan_ble(filter: &CommissionableFilter, secs: u16) -> Result<Vec<BleDevice>, Error> {
+    let connection = Connection::system()
+        .await
+        .map_err(|_| Error::from(ErrorCode::NoNetworkInterface))?;
+
+    let mut found = Vec::new();
+
+    // Every match is collected, so the scan only ends with its time limit.
+    let _ = bluez::scan(&connection, None, filter, Some(secs), |addr, adv| {
+        found.push(BleDevice {
+            addr,
+            discriminator: adv.discriminator(),
+            vendor_id: adv.vid(),
+            product_id: adv.pid(),
+        });
+
+        None::<()>
+    })
+    .await;
+
+    Ok(found)
+}
+
+/// Parse a Bluetooth address (`AA:BB:CC:DD:EE:FF`).
+pub fn parse_bt_addr(s: &str) -> Result<BtAddr, Error> {
+    let mut addr = [0; 6];
+    let mut parts = s.split(':');
+
+    for byte in &mut addr {
+        let part = parts.next().ok_or(ErrorCode::InvalidData)?;
+        *byte = u8::from_str_radix(part, 16).map_err(|_| ErrorCode::InvalidData)?;
+    }
+
+    if parts.next().is_some() {
+        return Err(ErrorCode::InvalidData.into());
+    }
+
+    Ok(BtAddr(addr))
+}
+
 /// Commission a device that is currently only reachable over BLE, provisioning it
 /// with the given operational-network credentials so it joins its network and
 /// finishes commissioning over IP.
 ///
-/// See the module docs for the two-phase flow. Returns the installed device
-/// handle on success.
+/// The caller runs `matter`'s transport over both UDP and `btp` (e.g. a
+/// `ChainedNetwork` routing BTP addresses to `btp`), plus the mDNS backend:
+/// phase A goes over `btp`, phase B over UDP. See the module docs for the flow.
+/// Returns the installed device handle on success.
 ///
 /// # Arguments
 /// - `matter` / `crypto`: the borrowed rs-matter stack and crypto backend (as held
 ///   by [`crate::Controller`]).
 /// - `ca` / `controller_fab_idx`: the controller CA and its local fabric index
 ///   (from [`ControllerCa::bootstrap`](crate::ca::ControllerCa::bootstrap)).
+/// - `btp`: the BTP side of `matter`'s transport.
 /// - `filter`: matches the device's BLE advertisement (typically a discriminator
 ///   from the scanned QR / manual pairing code).
+/// - `addr`: the device's Bluetooth address, if already known (e.g. from
+///   [`scan_ble`]); else the first device matching `filter` is used.
 /// - `passcode`: the device's PASE passcode (from the same QR / pairing code).
 /// - `device_node_id`: the operational Node ID to assign the device.
 /// - `creds`: the credentials for the network the device should join. Which kind is
@@ -111,29 +176,25 @@ pub use rs_matter::dm::clusters::net_comm::WirelessCreds;
 ///   the device itself (see [`read_network_type`]) - so this must match the
 ///   device's actual network type. Pass `None` for an Ethernet device, which is
 ///   already on its network and needs no network commissioning at all.
-/// - `udp`: a bound UDP socket for phase B (the IP transport). `[::]:0` works.
 #[allow(clippy::too_many_arguments)]
-pub async fn commission_ble<C, S>(
+pub async fn commission_ble<C: Crypto>(
     matter: &Matter<'_>,
     crypto: &C,
     ca: &ControllerCa,
     controller_fab_idx: NonZeroU8,
+    btp: &Btp,
     filter: &CommissionableFilter,
+    addr: Option<BtAddr>,
     passcode: u32,
     device_node_id: u64,
     creds: Option<&WirelessCreds<'_>>,
-    udp: &S,
-) -> Result<CommissionOutcome, Error>
-where
-    C: Crypto,
-    for<'x> &'x S:
-        rs_matter::transport::network::NetworkSend + rs_matter::transport::network::NetworkReceive,
-{
+) -> Result<CommissionOutcome, Error> {
     let connection = Connection::system()
         .await
         .map_err(|_| Error::from(ErrorCode::NoNetworkInterface))?;
 
     // ---- Discovery: find the device's commissionable BLE advertisement. --------
+    // Also when its address is known: the GATT connect needs BlueZ to have seen it.
     info!("BLE commission: scanning for a commissionable device (filter: {filter:?})");
 
     let addr = bluez::scan(
@@ -141,9 +202,9 @@ where
         None,
         filter,
         Some(SCAN_TIMEOUT_SECS),
-        |addr, adv| {
-            info!("BLE commission: found candidate {addr} (adv: {adv:?})");
-            Some(addr)
+        |found, adv| {
+            info!("BLE commission: found candidate {found} (adv: {adv:?})");
+            addr.is_none_or(|addr| addr == found).then_some(found)
         },
     )
     .await?;
@@ -151,26 +212,26 @@ where
     info!("BLE commission: using device {addr}");
 
     // ---- Phase A — over BLE/BTP. -----------------------------------------------
+    // BlueZ reports an under-stated GATT MTU; the relaxed negotiation lets us use
+    // the larger MTU the peer actually supports (mirrors the peripheral).
+    btp.set_relaxed_mtu_nego(true);
+
+    // Establish the initiator role and a clean session *before* the futures below
+    // run. The commissioner (`flow`) starts sending Matter traffic (the PASE
+    // PBKDFParamRequest) as soon as the link is up, so the session must already
+    // be reset and in the initiator role - otherwise a later reset would race
+    // with, and wipe, that first queued SDU.
+    btp.reset();
+    btp.set_initiator(true);
+
     let phase1 = {
-        let btp = Btp::new();
-        // BlueZ reports an under-stated GATT MTU; the relaxed negotiation lets us
-        // use the larger MTU the peer actually supports (mirrors the peripheral).
-        btp.set_relaxed_mtu_nego(true);
+        // The GATT Central (BlueZ side); the caller's transport pumps `btp`.
+        let mut central = pin!(bluez::run_central(&connection, None, addr, btp));
 
-        // Establish the initiator role and a clean session *before* any of the
-        // three futures below run. The commissioner (`flow`) starts sending Matter
-        // traffic (the PASE PBKDFParamRequest) as soon as the transport is up, so
-        // the session must already be reset and in the initiator role - otherwise
-        // a later reset inside the transport setup would race with, and wipe, that
-        // first queued SDU.
-        btp.reset();
-        btp.set_initiator(true);
+        // Set once `ConnectNetwork` is sent: the device may leave BLE from then on.
+        let joining = Cell::new(false);
 
-        // The BTP transport pump (matter side) and the GATT Central (BlueZ side).
-        let mut transport = pin!(matter.run(crypto, &btp, &btp, NoNetwork));
-        let mut central = pin!(bluez::run_central(&connection, None, addr, &btp));
-
-        // The commissioning steps that run *over* this transport.
+        // The commissioning steps that run *over* this link.
         let mut flow = pin!(phase_a_flow(
             matter,
             crypto,
@@ -180,58 +241,35 @@ where
             passcode,
             device_node_id,
             creds,
+            &joining,
         ));
 
-        // Race the two transport drivers against the flow. The flow completing (or
-        // erroring) is the only non-error way out; either transport ending first is
-        // unexpected.
-        let result = select(select(&mut transport, &mut central).coalesce(), &mut flow).await;
-
-        let phase1 = match result {
-            Either::First(transport_result) => {
-                // A transport future returned before the flow — always an error path.
-                transport_result?;
-                return Err(ErrorCode::NoNetworkInterface.into());
+        let result = match select(&mut central, &mut flow).await {
+            // Leaving BLE to join its network, as a device without concurrent
+            // connection does: the flow ends on its own, answered or not.
+            Either::First(_) if joining.get() => {
+                info!("BLE commission: the device left BLE to join its network");
+                flow.await
             }
-            Either::Second(flow_result) => flow_result?,
+            Either::First(central_result) => Err(central_result
+                .err()
+                .unwrap_or_else(|| ErrorCode::NoNetworkInterface.into())),
+            Either::Second(flow_result) => flow_result,
         };
 
-        // Drop the BLE transport before bringing up the UDP one.
-        matter.reset_transport()?;
-
-        phase1
+        drop_ble_link(matter, btp, addr);
+        result?
     };
 
     info!(
-        "BLE commission: phase A ok (device fabric {}, node 0x{:016x}); device is joining Thread",
+        "BLE commission: phase A ok (device fabric {}, node 0x{:016x}); device is joining its network",
         phase1.fabric_index, phase1.device_node_id
     );
 
     // ---- Phase B — over IP. ----------------------------------------------------
-    // Bring up the UDP transport + mDNS backend, and complete CASE once the device
-    // has joined Thread and announced itself operationally.
-    let mut transport = pin!(matter.run(crypto, udp, udp, NoNetwork));
-    let mut mdns = pin!(crate::discovery::run_mdns_backend(matter, crypto));
-    let mut complete = pin!(phase_b_complete(
-        matter,
-        crypto,
-        controller_fab_idx,
-        ca,
-        &phase1,
-    ));
-
-    let result = select(select(&mut transport, &mut mdns).coalesce(), &mut complete).await;
-
-    match result {
-        Either::First(transport_result) => {
-            transport_result?;
-            matter.reset_transport()?;
-            return Err(ErrorCode::NoNetworkInterface.into());
-        }
-        Either::Second(complete_result) => complete_result?,
-    }
-
-    matter.reset_transport()?;
+    // Complete CASE once the device has joined its network and announced itself
+    // operationally.
+    phase_b_complete(matter, crypto, controller_fab_idx, ca, &phase1).await?;
 
     info!("BLE commission: phase B ok (CASE established, CommissioningComplete acknowledged)");
 
@@ -243,8 +281,19 @@ where
     })
 }
 
+/// Done with the BLE link to `addr`: drop the PASE session that ran over it and
+/// reset the BTP session (the GATT connection went with the central's future).
+fn drop_ble_link(matter: &Matter<'_>, btp: &Btp, addr: BtAddr) {
+    let peer = Address::Btp(addr);
+    remove_sessions(matter, |sess| {
+        matches!(sess.get_session_mode(), SessionMode::Pase { .. }) && sess.get_peer_addr() == peer
+    });
+
+    btp.reset();
+}
+
 /// Phase A steps that run over the live BLE/BTP transport: PASE → AddNOC, then
-/// Thread network provisioning.
+/// network provisioning, which sets `joining` once the device is told to join.
 #[allow(clippy::too_many_arguments)]
 async fn phase_a_flow<C: Crypto>(
     matter: &Matter<'_>,
@@ -255,6 +304,7 @@ async fn phase_a_flow<C: Crypto>(
     passcode: u32,
     device_node_id: u64,
     creds: Option<&WirelessCreds<'_>>,
+    joining: &Cell<bool>,
 ) -> Result<CommissionResult, Error> {
     let peer = Address::Btp(addr);
 
@@ -285,7 +335,12 @@ async fn phase_a_flow<C: Crypto>(
 
     // Network commissioning: hand the device its credentials and tell it to connect.
     // Runs over PASE on the still-live BTP session.
-    provision_network(matter, crypto, peer, passcode, creds).await?;
+    if let Err(e) = provision_network(matter, crypto, peer, passcode, creds, joining).await {
+        // Roll the device back at once, so it can be commissioned again right
+        // away. Best-effort, as the device may be gone.
+        let _ = commissioner.disarm_fail_safe(peer).await;
+        return Err(e);
+    }
 
     Ok(phase1)
 }
@@ -303,10 +358,14 @@ async fn provision_network<C: Crypto>(
     peer: Address,
     passcode: u32,
     creds: Option<&WirelessCreds<'_>>,
+    joining: &Cell<bool>,
 ) -> Result<(), Error> {
     let net_type = read_network_type(matter, crypto, peer, passcode).await?;
+    let concurrent = read_concurrent_connection(matter, crypto, peer, passcode).await;
 
-    info!("BLE commission: device network type is {net_type:?}");
+    info!(
+        "BLE commission: device network type is {net_type:?} (concurrent connection: {concurrent})"
+    );
 
     if matches!(net_type, NetworkType::Ethernet) {
         // An Ethernet device is already on its operational network; there is nothing
@@ -384,14 +443,41 @@ async fn provision_network<C: Crypto>(
     info!("BLE commission: ConnectNetwork (network id {network_id:02x?})");
 
     let exchange = Exchange::initiate_pase(matter, crypto, peer, passcode).await?;
-    let handle = exchange
+    joining.set(true);
+
+    let connect = exchange
         .network_commissioning()
         .connect_network(ROOT_ENDPOINT_ID, |req| {
             req.network_id(OctetStr::new(network_id))?
                 .breadcrumb(None)?
                 .end()
-        })
-        .await?;
+        });
+
+    // A device with concurrent connection answers over BLE once it has tried to
+    // join; one without leaves BLE to join, perhaps without answering.
+    let connect = if concurrent {
+        connect.await
+    } else {
+        let wait = Duration::from_secs(NON_CONCURRENT_CONNECT_WAIT_SECS);
+        with_timeout(wait, connect)
+            .await
+            .unwrap_or_else(|_| Err(ErrorCode::RxTimeout.into()))
+    };
+
+    // With no answer, phase B finds out whether the device joined: some claim
+    // concurrent connection and go silent all the same.
+    let handle = match connect {
+        Ok(handle) => handle,
+        Err(e) if matches!(e.code(), ErrorCode::RxTimeout | ErrorCode::TxTimeout) => {
+            if concurrent {
+                warn!("BLE commission: no ConnectNetwork response, although the device claims concurrent connection ({e:?}); trying it on its network");
+            } else {
+                info!("BLE commission: no ConnectNetwork response, as the device has no concurrent connection; trying it on its network");
+            }
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     check_net_status(handle.response()?.networking_status()?, "ConnectNetwork")?;
     handle.complete().await?;
 
@@ -449,6 +535,52 @@ async fn read_network_type<C: Crypto>(
         error!("BLE commission: device reports no known network interface ({features:?})");
         Err(ErrorCode::InvalidData.into())
     }
+}
+
+/// Whether the device stays on BLE while it joins its network
+/// (`SupportsConcurrentConnection`), read over PASE. Assumed when it cannot be
+/// read, as CHIP does.
+async fn read_concurrent_connection<C: Crypto>(
+    matter: &Matter<'_>,
+    crypto: &C,
+    peer: Address,
+    passcode: u32,
+) -> bool {
+    let read = async {
+        let exchange = Exchange::initiate_pase(matter, crypto, peer, passcode).await?;
+
+        let mut chunk = exchange
+            .read_with(|msg| {
+                msg.attr_requests()?
+                    .general_commissioning_read()
+                    .supports_concurrent_connection(ROOT_ENDPOINT_ID)?
+                    .end()?
+                    .fabric_filtered(false)?
+                    .end()
+            })
+            .await?;
+
+        let mut concurrent = None;
+        {
+            let resp = chunk.response()?;
+            for (_endpoint, result) in resp
+                .general_commissioning_read_resp()
+                .supports_concurrent_connection()
+            {
+                concurrent = Some(result?);
+            }
+        }
+        while let Some(next) = chunk.complete().await? {
+            chunk = next;
+        }
+
+        concurrent.ok_or_else(|| Error::from(ErrorCode::InvalidData))
+    };
+
+    read.await.unwrap_or_else(|e: Error| {
+        warn!("BLE commission: cannot read SupportsConcurrentConnection ({e:?}); assuming it");
+        true
+    })
 }
 
 /// Phase B: retry the operational CASE handshake (which resolves the device's

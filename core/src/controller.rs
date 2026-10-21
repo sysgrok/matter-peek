@@ -697,7 +697,7 @@ pub enum CommissionFlow {
 ///
 /// Wakes the transport's session-removed waiters when anything was dropped, as
 /// rs-matter does itself when it removes sessions.
-fn remove_sessions<F>(matter: &Matter<'_>, predicate: F) -> usize
+pub(crate) fn remove_sessions<F>(matter: &Matter<'_>, predicate: F) -> usize
 where
     F: FnMut(&Session) -> bool,
 {

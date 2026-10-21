@@ -17,6 +17,8 @@ use core::num::NonZeroU8;
 use core::pin::pin;
 
 use std::collections::{HashMap, HashSet};
+use std::fs::{File, TryLockError};
+use std::io;
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -36,13 +38,15 @@ use rs_matter::dm::clusters::ota_prov::OtaRequestorId;
 use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::persist::DirKvBlobStore;
+use rs_matter::transport::network::btp::Btp;
 use rs_matter::transport::network::mdns::CommissionableFilter;
-use rs_matter::transport::network::NoNetwork;
+use rs_matter::transport::network::{Address, ChainedNetwork, NoNetwork};
 use rs_matter::utils::init::InitMaybeUninit;
 use rs_matter::Matter;
 
 use static_cell::StaticCell;
 
+use matter_peek_core::ble::{self, WirelessCreds};
 use matter_peek_core::ca::{CaTier, ControllerCa};
 use matter_peek_core::controller::FabricIdentity;
 use matter_peek_core::node;
@@ -65,6 +69,12 @@ const FIRST_DEVICE_NODE_ID: u64 = 112234;
 const FIRST_SYNC_DELAY_SECS: u64 = 5;
 /// How often the device list is synced with our fabric.
 const SYNC_PERIOD_SECS: u64 = 300;
+
+/// How often a running subscription checks that a connection still watches it.
+const WATCHERS_CHECK_SECS: u64 = 5;
+
+/// How long a discovery scans for devices advertising over Bluetooth LE.
+const BLE_SCAN_SECS: u16 = 5;
 
 /// The persistent controller stack, fed `'static` device details so `Matter`'s
 /// lifetime is `'static` and it can be shared freely across tasks.
@@ -94,10 +104,45 @@ pub struct Command {
     pub out: Option<async_channel::Sender<proto::ServerMsg>>,
 }
 
+/// The store directory, locked for one actor: two controllers sharing a store
+/// would overwrite each other's fabric and device records.
+pub struct Store {
+    dir: PathBuf,
+    _lock: File,
+}
+
+impl Store {
+    /// Lock the store; fails if another matter-peek process holds it.
+    pub fn lock() -> io::Result<Self> {
+        let dir = store_dir();
+        let lock = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("lock"))?;
+
+        match lock.try_lock() {
+            Ok(()) => Ok(Self { dir, _lock: lock }),
+            Err(TryLockError::WouldBlock) => Err(io::Error::other(format!(
+                "the store at {} is in use by another matter-peek process; \
+                 if it is a matter-peek-server, connect to it instead",
+                dir.display()
+            ))),
+            Err(TryLockError::Error(e)) => Err(e),
+        }
+    }
+}
+
 /// Run the persistent actor: stand up one Matter stack for the process, restore
 /// persisted state, ensure the controller CA + fabric, then service commands
-/// against that shared stack until the channel closes.
-pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
+/// against that shared stack until the channel closes. `periodic_sync` syncs
+/// the device list shortly after startup and every few minutes after.
+pub async fn run(
+    rx: async_channel::Receiver<Command>,
+    cancel: CancelFlag,
+    store: Store,
+    periodic_sync: bool,
+) {
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
 
     // One `&'static` stack for the whole process (see module docs). Kept `&mut`
@@ -115,9 +160,11 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
     // actor owns one (`kv_buf`) for the whole run and lends it to the
     // `ControllerStore`. `startup` takes that store's KV access (which carries
     // the buffer) — a single argument now.
-    let dir = store_dir();
+    let dir = store.dir.clone();
     info!("actor: persistence store at {}", dir.display());
     let kv_buf = kv_buf();
+    // Held (locked) for as long as the actor runs.
+    let _store = store;
     let store = ControllerStore::new(DirKvBlobStore::new(dir.clone()), &kv_buf);
     if let Err(e) = matter.startup(store.kv()) {
         error!("actor: startup failed: {e:?} (continuing with fresh state)");
@@ -156,6 +203,9 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
 
     let controller = Controller::new(matter, &crypto);
 
+    // The transport runs over UDP and BTP: commissioning over BLE uses the latter.
+    let btp = Btp::new();
+
     // Our OTA Provider: the devices on our fabric may ask it for updates.
     if let Err(e) = node::allow_ota_requestors(matter, &store, fab_idx) {
         warn!("actor: cannot open our OTA Provider to the devices: {e:?}");
@@ -188,6 +238,7 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
         next_upload_id: Cell::new(1),
         online: RefCell::new(None),
         transient: RefCell::new(Vec::new()),
+        btp: &btp,
     };
 
     // Four concurrent arms, for the actor's lifetime:
@@ -203,8 +254,13 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
     // Because subscriptions run in their own arm — not inside a command — the
     // command loop stays free while any number of subscriptions stream, so a
     // `Subscribe` returns immediately and multiple devices can be watched at once.
-    let mut pump = pin!(matter.run(&crypto, &socket, &socket, NoNetwork));
-    let mut loop_ = pin!(command_loop(rx, &ctx, &sub_submit));
+    let mut pump = pin!(matter.run(
+        &crypto,
+        ChainedNetwork::new(Address::is_udp, &socket, &btp),
+        ChainedNetwork::new(Address::is_udp, &socket, &btp),
+        NoNetwork,
+    ));
+    let mut loop_ = pin!(command_loop(rx, &ctx, &sub_submit, periodic_sync));
     let mut subs = pin!(run_subscriptions(sub_recv, &ctx));
     let mut mdns = pin!(ctx.controller.run_mdns_backend());
     // What devices reach on us: our OTA Provider and the subscription reports.
@@ -264,62 +320,84 @@ async fn run_subscription<C: Crypto>(job: SubJob, ctx: &ActorCtx<'_, C>) {
     let SubJob {
         node_id,
         handle,
-        out,
         stop_rx,
         my_stop,
     } = job;
 
-    let seq = Cell::new(0u64);
-    let out_reports = out.clone();
-    let out_state = out.clone();
+    // The registry entry of this subscription, unless it was replaced or removed.
+    let with_watch = |f: &mut dyn FnMut(&mut Watch)| {
+        if let Some(watch) = ctx
+            .subs
+            .borrow_mut()
+            .get_mut(&node_id)
+            .filter(|watch| watch.stop.same_channel(&my_stop))
+        {
+            f(watch);
+        }
+    };
 
     let subscription = ctx.controller.subscribe_health(
         &ctx.reports,
         handle,
         DiagSet::ALL,
-        move |health| {
-            seq.set(seq.get() + 1);
-            let _ = out_reports.try_send(proto::ServerMsg::Event {
-                event: proto::Event::HealthReport {
+        |health| {
+            let health = convert::health(health);
+            with_watch(&mut |watch| {
+                watch.reports += 1;
+                watch.health.merge(health.clone());
+                watch.broadcast(proto::Event::HealthReport {
                     node_id,
-                    seq: seq.get(),
-                    health: convert::health(health),
-                },
+                    seq: watch.reports,
+                    health: health.clone(),
+                });
             });
         },
-        move |state| {
-            let _ = out_state.try_send(proto::ServerMsg::Event {
-                event: proto::Event::SubscriptionState {
-                    node_id,
-                    state: convert::sub_state(state),
-                },
+        |state| {
+            let state = convert::sub_state(state);
+            with_watch(&mut |watch| {
+                watch.state = Some(state);
+                watch.broadcast(proto::Event::SubscriptionState { node_id, state });
             });
         },
     );
 
-    // Stop when EITHER the explicit stop signal fires OR the connection's sink
-    // closes (client disconnected — don't leak the device-side subscription).
+    // Stop on the explicit signal, or once no connection watches the device.
     let stop = async {
-        let _ = select(stop_rx.recv(), out.closed()).await;
+        loop {
+            let check = Timer::after(Duration::from_secs(WATCHERS_CHECK_SECS));
+            if let Either::First(_) = select(stop_rx.recv(), check).await {
+                break;
+            }
+
+            let mut watched = false;
+            with_watch(&mut |watch| watched = watch.watched());
+            if !watched {
+                break;
+            }
+        }
     };
     let _ = select(subscription, stop).await;
 
     // Drop our registry entry, but only if it's still *ours* (a quick
-    // unsubscribe+resubscribe of the same device could have replaced it).
-    {
+    // unsubscribe+resubscribe of the same device could have replaced it), and
+    // tell its watchers.
+    let watch = {
         let mut map = ctx.subs.borrow_mut();
-        if map.get(&node_id).is_some_and(|s| s.same_channel(&my_stop)) {
-            map.remove(&node_id);
+        if map
+            .get(&node_id)
+            .is_some_and(|watch| watch.stop.same_channel(&my_stop))
+        {
+            map.remove(&node_id)
+        } else {
+            None
         }
-    }
-
-    // Terminal state (delivered only if the connection is still up).
-    let _ = out.try_send(proto::ServerMsg::Event {
-        event: proto::Event::SubscriptionState {
+    };
+    if let Some(mut watch) = watch {
+        watch.broadcast(proto::Event::SubscriptionState {
             node_id,
             state: proto::SubscriptionState::Stopped,
-        },
-    });
+        });
+    }
 }
 
 /// Shared state every command handler operates on.
@@ -333,11 +411,9 @@ struct ActorCtx<'a, C: Crypto> {
     /// Cooperative cancel flag for the in-flight commission (set by the server's
     /// dispatch, polled by [`commission_flow`] at phase boundaries).
     cancel: CancelFlag,
-    /// Live health subscriptions, keyed by device `node_id`. The value is the
-    /// **stop** sender: send `()` (or drop it) to make the subscription task's
-    /// `select` complete, dropping the `subscribe_health` future and tearing the
-    /// subscription down. Present ⇒ that device is being watched.
-    subs: RefCell<HashMap<u64, async_channel::Sender<()>>>,
+    /// Live health subscriptions, keyed by device `node_id`, each shared by the
+    /// connections watching that device. Present ⇒ that device is being watched.
+    subs: RefCell<HashMap<u64, Watch>>,
     /// Routes the reports of the live subscriptions to them.
     reports: Reports,
     /// Our OTA Provider, over the images in the data directory.
@@ -353,6 +429,65 @@ struct ActorCtx<'a, C: Crypto> {
     /// The listed devices we keep no record of (not remembered): commissioned
     /// without `remember`, or found by a sync, since the server started.
     transient: RefCell<Vec<StoredDevice>>,
+    /// The Bluetooth side of the transport, for commissioning over BLE.
+    btp: &'a Btp,
+}
+
+/// A live health subscription to a device, shared by every connection watching
+/// it: its events go to all of them.
+struct Watch {
+    /// Fires (or drops) to stop the device subscription.
+    stop: async_channel::Sender<()>,
+    /// The connections watching the device.
+    watchers: Vec<async_channel::Sender<proto::ServerMsg>>,
+    /// The subscription's state, and the health merged from its reports, so
+    /// far: what a connection joining it now is told first.
+    state: Option<proto::SubscriptionState>,
+    health: proto::DeviceHealth,
+    reports: u64,
+}
+
+impl Watch {
+    /// Send `event` to the watchers still connected, forgetting the others.
+    fn broadcast(&mut self, event: proto::Event) {
+        self.watchers.retain(|watcher| !watcher.is_closed());
+
+        for watcher in &self.watchers {
+            let _ = watcher.try_send(proto::ServerMsg::Event {
+                event: event.clone(),
+            });
+        }
+    }
+
+    /// Add `watcher`, telling it the subscription's state and health so far.
+    fn join(&mut self, node_id: u64, watcher: async_channel::Sender<proto::ServerMsg>) {
+        if self.watchers.iter().any(|w| w.same_channel(&watcher)) {
+            return;
+        }
+
+        if self.reports > 0 {
+            let _ = watcher.try_send(proto::ServerMsg::Event {
+                event: proto::Event::HealthReport {
+                    node_id,
+                    seq: self.reports,
+                    health: self.health.clone(),
+                },
+            });
+        }
+        if let Some(state) = self.state {
+            let _ = watcher.try_send(proto::ServerMsg::Event {
+                event: proto::Event::SubscriptionState { node_id, state },
+            });
+        }
+
+        self.watchers.push(watcher);
+    }
+
+    /// Whether a connection still watches the device.
+    fn watched(&mut self) -> bool {
+        self.watchers.retain(|watcher| !watcher.is_closed());
+        !self.watchers.is_empty()
+    }
 }
 
 /// An OTA image file being uploaded in chunks: written as it arrives, and
@@ -379,8 +514,6 @@ struct OtaListener {
 struct SubJob {
     node_id: u64,
     handle: DeviceHandle,
-    /// The connection's outbound sink — where this subscription streams frames.
-    out: async_channel::Sender<proto::ServerMsg>,
     /// Fires (or its sender drops) to stop the subscription.
     stop_rx: async_channel::Receiver<()>,
     /// A clone of the registry stop-sender, so the driver can verify at cleanup
@@ -396,8 +529,17 @@ async fn command_loop<C: Crypto>(
     rx: async_channel::Receiver<Command>,
     ctx: &ActorCtx<'_, C>,
     sub_submit: &async_channel::Sender<SubJob>,
+    periodic_sync: bool,
 ) {
-    let mut next_sync = Instant::now() + Duration::from_secs(FIRST_SYNC_DELAY_SECS);
+    let after = |secs| {
+        if periodic_sync {
+            Instant::now() + Duration::from_secs(secs)
+        } else {
+            Instant::MAX
+        }
+    };
+
+    let mut next_sync = after(FIRST_SYNC_DELAY_SECS);
 
     loop {
         match select(rx.recv(), Timer::at(next_sync)).await {
@@ -405,7 +547,7 @@ async fn command_loop<C: Crypto>(
                 let response = service(&cmd, ctx, sub_submit).await;
 
                 if matches!(cmd.request, proto::Request::Sync) {
-                    next_sync = Instant::now() + Duration::from_secs(SYNC_PERIOD_SECS);
+                    next_sync = after(SYNC_PERIOD_SECS);
                 }
 
                 // Best-effort: if the client vanished, dropping the reply is fine.
@@ -417,7 +559,7 @@ async fn command_loop<C: Crypto>(
                     warn!("sync failed: {e:?}");
                 }
 
-                next_sync = Instant::now() + Duration::from_secs(SYNC_PERIOD_SECS);
+                next_sync = after(SYNC_PERIOD_SECS);
             }
         }
     }
@@ -431,10 +573,11 @@ async fn service<C: Crypto>(
 ) -> proto::Response {
     match &cmd.request {
         proto::Request::Commission {
-            peer_addr,
+            via,
             setup_code,
             remember,
-        } => commission(cmd, ctx, peer_addr, setup_code, *remember).await,
+        } => commission(cmd, ctx, via, setup_code, *remember).await,
+        proto::Request::ReadQrImage { image } => read_qr_image(image),
         proto::Request::Discover {
             discriminator,
             setup_code,
@@ -448,7 +591,7 @@ async fn service<C: Crypto>(
         }
         proto::Request::Identify { node_id, secs } => identify(ctx, *node_id, *secs).await,
         proto::Request::Subscribe { node_id } => subscribe(cmd, ctx, sub_submit, *node_id).await,
-        proto::Request::Unsubscribe { node_id } => unsubscribe(ctx, *node_id),
+        proto::Request::Unsubscribe { node_id } => unsubscribe(cmd, ctx, *node_id),
         proto::Request::Decommission { node_id, force } => {
             decommission(ctx, *node_id, *force).await
         }
@@ -783,12 +926,37 @@ async fn run_discover<C: Crypto>(
         (None, None) => CommissionableFilter::default(),
     };
 
+    // A device can advertise as commissionable while not taking commissioning
+    // (`CM=0`, e.g. once decommissioned); listing it would only invite a failure.
+    let filter = CommissionableFilter {
+        commissioning_mode_only: true,
+        ..filter
+    };
+
     // The actor already runs the mDNS backend (a permanent arm); use the `_bg`
     // variant so discovery doesn't start a competing second backend.
-    let devices = ctx
-        .controller
-        .discover_all_bg(&filter, max.max(1), None)
-        .await
+    let (devices, ble_devices) = embassy_futures::join::join(
+        ctx.controller.discover_all_bg(&filter, max.max(1), None),
+        ble::scan_ble(&filter, BLE_SCAN_SECS),
+    )
+    .await;
+
+    let ble_devices = ble_devices
+        .unwrap_or_else(|e| {
+            warn!("discover: no Bluetooth scan: {e:?}");
+            Vec::new()
+        })
+        .into_iter()
+        .take(max.into())
+        .map(|d| proto::BleDevice {
+            addr: d.addr.to_string(),
+            discriminator: d.discriminator,
+            vendor_id: d.vendor_id,
+            product_id: d.product_id,
+        })
+        .collect();
+
+    let devices = devices
         .into_iter()
         .map(|d| proto::DiscoveredDevice {
             addr: match d.address {
@@ -799,7 +967,10 @@ async fn run_discover<C: Crypto>(
         })
         .collect();
 
-    proto::Response::Discovered { devices }
+    proto::Response::Discovered {
+        devices,
+        ble_devices,
+    }
 }
 
 /// List the devices on our fabric (see [`proto::Request::ListDevices`]).
@@ -903,15 +1074,6 @@ async fn subscribe<C: Crypto>(
         return no_device(node_id);
     };
 
-    // Already watching this device? No-op success (the existing subscription
-    // keeps streaming).
-    if ctx.subs.borrow().contains_key(&node_id) {
-        return proto::Response::Subscribed {
-            node_id,
-            already: true,
-        };
-    }
-
     // Events stream to the connection's outbound sink, which outlives this
     // command. Without one (non-WS caller) there's nowhere to stream, so decline.
     let Some(out) = cmd.out.clone() else {
@@ -920,19 +1082,37 @@ async fn subscribe<C: Crypto>(
         };
     };
 
-    // Stop signal: `Unsubscribe` (or connection teardown) fires it. Register the
-    // sender under `node_id`; `my_stop` (a clone) lets the driver verify ownership
-    // at cleanup.
+    // Already watching this device? Join the running subscription.
+    if let Some(watch) = ctx.subs.borrow_mut().get_mut(&node_id) {
+        watch.join(node_id, out);
+
+        return proto::Response::Subscribed {
+            node_id,
+            already: true,
+        };
+    }
+
+    // Stop signal: `Unsubscribe` (or the last watcher leaving) fires it. Register
+    // the sender under `node_id`; `my_stop` (a clone) lets the driver verify
+    // ownership at cleanup.
     let (stop_tx, stop_rx) = async_channel::bounded::<()>(1);
     let my_stop = stop_tx.clone();
-    ctx.subs.borrow_mut().insert(node_id, stop_tx);
+    ctx.subs.borrow_mut().insert(
+        node_id,
+        Watch {
+            stop: stop_tx,
+            watchers: vec![out],
+            state: None,
+            health: proto::DeviceHealth::default(),
+            reports: 0,
+        },
+    );
 
     // Hand a job (owned data only) to the driver, which builds+runs the actual
     // subscription against the shared stack. Reply immediately.
     let job = SubJob {
         node_id,
         handle: dev.handle,
-        out,
         stop_rx,
         my_stop,
     };
@@ -949,16 +1129,27 @@ async fn subscribe<C: Crypto>(
     }
 }
 
-/// Stop a live subscription: fire its stop signal (which ends the subscription
-/// task) and forget it. Idempotent — unsubscribing an unknown device is `Ok`.
-fn unsubscribe<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64) -> proto::Response {
-    if let Some(stop) = ctx.subs.borrow_mut().remove(&node_id) {
-        // Best-effort: send the stop; if the receiver is already gone the task is
-        // ending anyway. Dropping `stop` here also closes the channel, which the
-        // task's `recv()` sees as `Err` — either way it wakes and completes.
-        let _ = stop.try_send(());
-        info!("unsubscribed node 0x{node_id:016x}");
+/// Stop watching a device on this connection; the device subscription stops
+/// with its last watcher. Idempotent — unsubscribing an unknown device is `Ok`.
+fn unsubscribe<C: Crypto>(cmd: &Command, ctx: &ActorCtx<'_, C>, node_id: u64) -> proto::Response {
+    let mut subs = ctx.subs.borrow_mut();
+
+    if let Some(watch) = subs.get_mut(&node_id) {
+        match &cmd.out {
+            Some(out) => watch.watchers.retain(|watcher| !watcher.same_channel(out)),
+            None => watch.watchers.clear(),
+        }
+
+        // The last watcher gone: stop the device subscription. Best-effort: if
+        // the task is already ending, dropping `stop` wakes it all the same.
+        if !watch.watched() {
+            if let Some(watch) = subs.remove(&node_id) {
+                let _ = watch.stop.try_send(());
+            }
+            info!("unsubscribed node 0x{node_id:016x}");
+        }
     }
+
     proto::Response::Ok
 }
 
@@ -1023,9 +1214,15 @@ async fn decommission<C: Crypto>(
         return no_device(node_id);
     };
 
-    // Stop any live subscription first (its CASE session is about to be torn down).
-    if let Some(stop) = ctx.subs.borrow_mut().remove(&node_id) {
-        let _ = stop.try_send(());
+    // Stop any live subscription first (its CASE session is about to be torn
+    // down), and tell its watchers.
+    let watch = ctx.subs.borrow_mut().remove(&node_id);
+    if let Some(mut watch) = watch {
+        let _ = watch.stop.try_send(());
+        watch.broadcast(proto::Event::SubscriptionState {
+            node_id,
+            state: proto::SubscriptionState::Stopped,
+        });
     }
 
     let removed = if force {
@@ -1100,9 +1297,9 @@ async fn sync<C: Crypto>(ctx: &ActorCtx<'_, C>) -> proto::Response {
 }
 
 /// Align the device list with the devices advertising on our fabric: list
-/// those not listed yet (keeping no record of them) and, if `refresh`, re-read
-/// the others' identity. Notes which devices are online. Returns a notice of
-/// what changed, if anything did.
+/// those not listed yet (keeping no record of them), drop those without a record
+/// that are gone and, if `refresh`, re-read the others' identity. Notes which
+/// devices are online. Returns a notice of what changed, if anything did.
 async fn sync_devices<C: Crypto>(
     ctx: &ActorCtx<'_, C>,
     refresh: bool,
@@ -1164,6 +1361,11 @@ async fn sync_devices<C: Crypto>(
             }
         }
     }
+
+    // Without a record, a device is listed only while it is on our fabric.
+    ctx.transient
+        .borrow_mut()
+        .retain(|d| advertised.contains(&d.handle.node_id));
 
     *ctx.online.borrow_mut() = Some(advertised.into_iter().collect());
 
@@ -1282,30 +1484,90 @@ fn no_device(node_id: u64) -> proto::Response {
     }
 }
 
-/// Commission a freshly-addressed peer onto our fabric, using the shared
-/// persistent stack + CA. With `remember`, also keep a record of it.
+/// How a commission reaches the device.
+enum Reach {
+    Ip(SocketAddr),
+    Ble {
+        /// Matches the device's advertisement (from its setup code).
+        filter: CommissionableFilter,
+        addr: Option<rs_matter::transport::network::BtAddr>,
+        network: Option<proto::NetworkCredentials>,
+    },
+}
+
+/// Commission a device onto our fabric, using the shared persistent stack + CA.
+/// With `remember`, also keep a record of it.
 async fn commission<C: Crypto>(
     cmd: &Command,
     ctx: &ActorCtx<'_, C>,
-    peer_addr: &str,
+    via: &proto::CommissionVia,
     setup_code: &str,
     remember: bool,
 ) -> proto::Response {
-    let peer_addr: SocketAddr = match peer_addr.parse() {
-        Ok(a) => a,
-        Err(e) => {
-            return proto::Response::Error {
-                message: format!("invalid peer addr: {e}"),
+    let code = match SetupCode::parse(setup_code) {
+        Ok(code) => code,
+        Err(e) => return invalid_setup_code(e),
+    };
+
+    let reach = match via {
+        proto::CommissionVia::Ip { addr } => match addr.parse() {
+            Ok(addr) => Reach::Ip(addr),
+            Err(e) => {
+                return proto::Response::Error {
+                    message: format!("invalid peer addr: {e}"),
+                }
+            }
+        },
+        proto::CommissionVia::Ble { addr, network } => {
+            let addr = match addr.as_deref().map(ble::parse_bt_addr).transpose() {
+                Ok(addr) => addr,
+                Err(_) => {
+                    return proto::Response::Error {
+                        message: format!(
+                            "invalid Bluetooth address: {}",
+                            addr.as_deref().unwrap_or("")
+                        ),
+                    }
+                }
+            };
+
+            Reach::Ble {
+                filter: code.filter,
+                addr,
+                network: network.clone(),
             }
         }
     };
 
-    let passcode = match SetupCode::parse(setup_code) {
-        Ok(code) => code.passcode,
-        Err(e) => return invalid_setup_code(e),
+    commission_flow(cmd, ctx, reach, code.passcode, remember).await
+}
+
+/// Read the setup code out of a picture of a QR code (PNG or JPEG, base64).
+fn read_qr_image(image: &str) -> proto::Response {
+    use rs_matter::pairing::qr::{scan, QrPayload};
+
+    let read = || -> Result<String, String> {
+        let file = BASE64
+            .decode(image)
+            .map_err(|e| format!("the image is not base64: {e}"))?;
+        let luma = image::load_from_memory(&file)
+            .map_err(|e| format!("cannot read the image: {e}"))?
+            .to_luma8();
+
+        let text = scan::scan_luma(luma.width() as _, luma.height() as _, luma.as_raw())
+            .map_err(|_| "no Matter QR code found in the image".to_string())?;
+
+        // Only a Matter onboarding payload is a setup code.
+        let mut buf = [0; 128];
+        QrPayload::parse(&text, &mut buf).map_err(|_| format!("not a Matter QR code: {text}"))?;
+
+        Ok(text)
     };
 
-    commission_flow(cmd, ctx, peer_addr, passcode, remember).await
+    match read() {
+        Ok(setup_code) => proto::Response::SetupCode { setup_code },
+        Err(message) => proto::Response::Error { message },
+    }
 }
 
 fn invalid_setup_code(e: Error) -> proto::Response {
@@ -1322,7 +1584,7 @@ fn invalid_setup_code(e: Error) -> proto::Response {
 async fn commission_flow<C: Crypto>(
     cmd: &Command,
     ctx: &ActorCtx<'_, C>,
-    peer_addr: SocketAddr,
+    reach: Reach,
     passcode: u32,
     remember: bool,
 ) -> proto::Response {
@@ -1352,11 +1614,37 @@ async fn commission_flow<C: Crypto>(
     }
 
     // --- Commission ---
+    emit(cmd, Step::Commission, started()).await;
+
+    let peer_addr = match reach {
+        Reach::Ip(peer_addr) => peer_addr,
+        Reach::Ble {
+            filter,
+            addr,
+            network,
+        } => {
+            let outcome =
+                commission_ble(ctx, &filter, addr, network, passcode, device_node_id).await;
+
+            return match outcome {
+                Ok(outcome) => {
+                    emit(cmd, Step::Commission, done()).await;
+                    commissioned(ctx, outcome, remember).await
+                }
+                Err(e) => {
+                    emit(cmd, Step::Commission, failed(&e)).await;
+                    proto::Response::Error {
+                        message: format!("commission failed: {e:?}"),
+                    }
+                }
+            };
+        }
+    };
+
     // Cancellable up to AddNOC: the closure lets `commission_cancellable` poll
     // the flag and abandon the (often-hung-on-a-closed-window) orphan sweep / PASE
     // — all pre-AddNOC, so abandoning is safe and needs no cleanup. A `Cancelled`
     // here means no device state was created.
-    emit(cmd, Step::Commission, started()).await;
     let cancel = ctx.cancel.clone();
     // Fabrics we still have a record for are live commissionings, not leaks —
     // the sweep must not reclaim them (that would decommission the device we are
@@ -1403,7 +1691,57 @@ async fn commission_flow<C: Crypto>(
         return cancelled(removed);
     }
 
-    // Our fabric changed with the device on it: keep it across restarts.
+    commissioned(ctx, outcome, remember).await
+}
+
+/// Commission a device over BLE, provisioning it with `network`.
+async fn commission_ble<C: Crypto>(
+    ctx: &ActorCtx<'_, C>,
+    filter: &CommissionableFilter,
+    addr: Option<rs_matter::transport::network::BtAddr>,
+    network: Option<proto::NetworkCredentials>,
+    passcode: u32,
+    device_node_id: u64,
+) -> Result<matter_peek_core::CommissionOutcome, Error> {
+    let dataset;
+    let creds = match &network {
+        None => None,
+        Some(proto::NetworkCredentials::Wifi { ssid, password }) => Some(WirelessCreds::Wifi {
+            ssid: ssid.as_bytes(),
+            pass: password.as_bytes(),
+        }),
+        Some(proto::NetworkCredentials::Thread { dataset: hex }) => {
+            dataset = ble::decode_hex(hex)?;
+            Some(WirelessCreds::Thread {
+                dataset_tlv: &dataset,
+            })
+        }
+    };
+
+    ble::commission_ble(
+        ctx.matter,
+        ctx.crypto,
+        &ctx.ca,
+        ctx.fab_idx,
+        ctx.btp,
+        filter,
+        addr,
+        passcode,
+        device_node_id,
+        creds.as_ref(),
+    )
+    .await
+}
+
+/// The device holds our fabric now: keep our fabric across restarts, list the
+/// device and, with `remember`, keep a record of it. Re-matching reuses the
+/// record of a re-commissioned unit; a fingerprint-only hit comes back as a
+/// candidate to surface for linking.
+async fn commissioned<C: Crypto>(
+    ctx: &ActorCtx<'_, C>,
+    outcome: matter_peek_core::CommissionOutcome,
+    remember: bool,
+) -> proto::Response {
     if let Err(e) = ctx
         .matter
         .with_state(|state| ctx.store.save_fabric(state.fabrics.fabric(ctx.fab_idx)?))
@@ -1411,9 +1749,6 @@ async fn commission_flow<C: Crypto>(
         error!("actor: saving our fabric failed: {e:?}");
     }
 
-    // List the device; keep a record of it if asked. Re-matching reuses the
-    // record of a re-commissioned unit; a fingerprint-only hit comes back as a
-    // candidate to surface for linking.
     let rematch_candidate = if remember {
         match persist_commissioned(ctx, outcome.handle).await {
             Ok(candidate) => candidate,

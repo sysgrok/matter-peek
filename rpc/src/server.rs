@@ -106,7 +106,7 @@ where
 
 /// Turn one client request into an actor [`Command`] and pump its events +
 /// final reply out to the connection's outbound channel.
-async fn dispatch(
+pub(crate) async fn dispatch(
     msg: proto::ClientMsg,
     tx: &async_channel::Sender<Command>,
     out_tx: &async_channel::Sender<proto::ServerMsg>,

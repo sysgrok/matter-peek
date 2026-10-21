@@ -1,10 +1,10 @@
-# Matter Mini Commissioner / Controller — Design & Plan
+# Matter "Peek"" Controller — Design & Plan
 
-> Working name: **matter-peek** (rename freely). A vendor-agnostic Matter
+> **matter-peek** A vendor-agnostic Matter
 > diagnostic tool for installers/technicians: commission into one or more
-> devices, read their health via the standard diagnostic clusters, and pull
-> **DiagnosticLogs** (crash dumps / logs) over BDX. Future: consent-gated
-> upload of logs & core dumps to a vendor cloud.
+> devices, read their health via the standard diagnostic clusters, pull
+> **DiagnosticLogs** (crash dumps / logs) over BDX, examine other device state.
+> Future: consent-gated upload of logs & core dumps to a vendor cloud.
 
 ---
 

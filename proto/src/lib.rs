@@ -52,19 +52,21 @@ pub enum ServerMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    /// **Commission** the device at `peer_addr` onto our fabric. It is listed
-    /// from then on; `remember` also keeps a record of it (see
-    /// [`Request::Remember`]). Progress arrives as [`Event::Step`]s; the final
-    /// [`Response::Commissioned`] carries the result.
+    /// **Commission** a device onto our fabric, reaching it `via` IP or
+    /// Bluetooth. It is listed from then on; `remember` also keeps a record of
+    /// it (see [`Request::Remember`]). Progress arrives as [`Event::Step`]s; the
+    /// final [`Response::Commissioned`] carries the result.
     Commission {
-        /// e.g. `"[fdb5::1]:5540"`.
-        peer_addr: String,
+        via: CommissionVia,
         /// The device's passcode, manual pairing code or QR code payload.
         setup_code: String,
         remember: bool,
     },
-    /// Browse the local network for commissionable devices via mDNS, returning a
-    /// pick-list. Optional `discriminator` narrows to a single device (useful
+    /// Read the setup code out of a picture of a device's QR code: a PNG or JPEG
+    /// file, base64-encoded. Answered with [`Response::SetupCode`].
+    ReadQrImage { image: String },
+    /// Find the commissionable devices: on the local network via mDNS, and over
+    /// Bluetooth LE. Optional `discriminator` narrows to a single device (useful
     /// when several commissionable devices are present).
     Discover {
         discriminator: Option<u16>,
@@ -76,7 +78,7 @@ pub enum Request {
         max: u8,
     },
     /// List the devices on our fabric: the remembered ones (also while offline),
-    /// plus the others commissioned or found by a sync since the server started.
+    /// plus the others while they are on it (see [`Request::Sync`]).
     /// Answered with [`Response::Devices`].
     ListDevices,
     /// Re-address a listed device by its NodeID over a fresh CASE session — no
@@ -167,8 +169,15 @@ pub enum Request {
 pub enum Response {
     /// The commission completed.
     Commissioned(CommissionResult),
-    /// Devices found by a [`Request::Discover`] (possibly empty).
-    Discovered { devices: Vec<DiscoveredDevice> },
+    /// The `MT:` setup code read by a [`Request::ReadQrImage`].
+    SetupCode { setup_code: String },
+    /// Devices found by a [`Request::Discover`] (possibly none): on the
+    /// network, and over Bluetooth LE.
+    Discovered {
+        devices: Vec<DiscoveredDevice>,
+        #[serde(default)]
+        ble_devices: Vec<BleDevice>,
+    },
     /// The devices on our fabric (see [`Request::ListDevices`]).
     ///
     /// `notice` carries a non-fatal remark about the operation that produced the
@@ -320,6 +329,47 @@ pub enum StepStatus {
 // Domain payloads (mirror matter-peek-core's model, with serde)
 // ---------------------------------------------------------------------------
 
+/// How [`Request::Commission`] reaches the device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "via", rename_all = "snake_case")]
+pub enum CommissionVia {
+    /// Over IP, at `addr` (e.g. `"[fdb5::1]:5540"`).
+    Ip { addr: String },
+    /// Over Bluetooth LE: the device at `addr` (e.g. `"E8:F6:0A:60:E4:72"`), or
+    /// else the first one matching the setup code. It then joins `network`;
+    /// none for a device already on its network (Ethernet).
+    Ble {
+        #[serde(default)]
+        addr: Option<String>,
+        #[serde(default)]
+        network: Option<NetworkCredentials>,
+    },
+}
+
+/// The operational network a device commissioned over Bluetooth joins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NetworkCredentials {
+    Wifi {
+        ssid: String,
+        password: String,
+    },
+    /// The Thread operational dataset, hex-encoded.
+    Thread {
+        dataset: String,
+    },
+}
+
+/// A device advertising as commissionable over Bluetooth LE.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BleDevice {
+    /// Its Bluetooth address, for [`CommissionVia::Ble`].
+    pub addr: String,
+    pub discriminator: u16,
+    pub vendor_id: u16,
+    pub product_id: u16,
+}
+
 /// Identifies a commissioned device on our fabric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceHandle {
@@ -332,7 +382,7 @@ pub struct DeviceHandle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveredDevice {
     /// Operational address as a string (e.g. `"[fdb5:…]:5540"`), ready to feed
-    /// back into [`Request::Commission`].
+    /// back into [`CommissionVia::Ip`].
     pub addr: String,
     /// The commissionable instance id from the advertisement (stable per device
     /// while its commissioning window is open).
@@ -398,6 +448,28 @@ pub struct CommissionResult {
 pub struct DeviceHealth {
     pub general: Option<GeneralDiag>,
     pub software: Option<SoftwareDiag>,
+}
+
+impl DeviceHealth {
+    /// Merge in a subscription report, which carries only the attributes that
+    /// changed: those replace the values held so far.
+    pub fn merge(&mut self, delta: DeviceHealth) {
+        if let Some(g) = delta.general {
+            let base = self.general.get_or_insert_with(Default::default);
+            base.up_time_secs = g.up_time_secs.or(base.up_time_secs);
+            base.reboot_count = g.reboot_count.or(base.reboot_count);
+            base.total_operational_hours =
+                g.total_operational_hours.or(base.total_operational_hours);
+        }
+        if let Some(s) = delta.software {
+            let base = self.software.get_or_insert_with(Default::default);
+            base.current_heap_free = s.current_heap_free.or(base.current_heap_free);
+            base.current_heap_used = s.current_heap_used.or(base.current_heap_used);
+            base.current_heap_high_watermark = s
+                .current_heap_high_watermark
+                .or(base.current_heap_high_watermark);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

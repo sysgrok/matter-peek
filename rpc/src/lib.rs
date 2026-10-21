@@ -1,10 +1,13 @@
-//! matter-peek-rpc — a local WebSocket/JSON RPC server over `matter-peek-core`.
+//! matter-peek-rpc — the matter-peek API over `matter-peek-core`.
 //!
-//! Architecture (see `DESIGN.md` §3):
+//! Architecture (see `DESIGN.md`):
 //! - an **actor** task owns the Matter stack and services one command at a time
 //!   ([`actor`]);
-//! - a **WS server** accepts browser/UI connections and relays
-//!   [`matter_peek_proto`] frames to/from the actor ([`server`]).
+//! - a **WS server** (the `matter-peek-server` binary) accepts browser/UI
+//!   connections and relays [`matter_peek_proto`] frames to/from the actor
+//!   ([`server`]);
+//! - its clients (the CLI, the MCP server) talk to it, or to an actor of their
+//!   own, through a [`client::Connection`].
 //!
 //! Everything runs on a single-threaded [`async_executor::LocalExecutor`]
 //! (smol/async-io family). Single-threaded is deliberate: the Matter stack
@@ -17,6 +20,7 @@ use std::rc::Rc;
 use async_executor::LocalExecutor;
 
 pub mod actor;
+pub mod client;
 pub mod convert;
 pub mod ota;
 pub mod server;
@@ -59,14 +63,16 @@ where
 /// Run the RPC server: start the actor, then serve WS connections on `addr`,
 /// driving the thread-local executor to completion.
 pub fn run(addr: &str) -> std::io::Result<()> {
+    let store = actor::Store::lock()?;
+
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<actor::Command>();
 
     // The commission cancel flag, shared (single-threaded `Rc<Cell>`) between the
     // actor (polls it) and the server (sets it on a `Cancel` request, bypassing
     // the serial command queue).
-    let cancel: actor::CancelFlag = std::rc::Rc::new(std::cell::Cell::new(false));
+    let cancel = actor::CancelFlag::default();
 
-    spawn(actor::run(cmd_rx, cancel.clone()));
+    spawn(actor::run(cmd_rx, cancel.clone(), store, true));
 
     let ex = executor();
     futures_lite::future::block_on(ex.run(server::serve(addr, cmd_tx, cancel)))

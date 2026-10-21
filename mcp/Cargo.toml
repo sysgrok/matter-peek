@@ -15,11 +15,10 @@ required-features = ["std"]
 
 [features]
 # The library (protocol layer) is `no_std` + `alloc` by default. The `std`
-# feature adds the stdio binary that wires it to the desktop `rpc` actor.
+# feature adds the stdio binary that wires it to the matter-peek server.
 default = ["std"]
 std = [
     "dep:matter-peek-rpc",
-    "dep:async-channel",
     "dep:blocking",
     "dep:futures-lite",
     "dep:embassy-time-queue-utils",
@@ -39,16 +38,15 @@ matter-peek-proto = { path = "../proto" }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 log = { version = "0.4", default-features = false }
-# OTA image uploads go to the actor base64-encoded.
+# OTA image uploads go to the server base64-encoded.
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 
 # --- std binary glue (behind the `std` feature). ---
 # MCP-over-stdio is just JSON-RPC 2.0 over newline-delimited stdin/stdout; the
-# binary reuses the desktop WS server's actor (`matter-peek-rpc`) over the same
-# smol/async-io runtime. (No tokio-based MCP SDK: it is `Send`-bound, which
-# clashes with the non-`Send` Matter stack on the single-threaded executor.)
+# binary talks to the matter-peek server through `matter-peek-rpc`'s client, on
+# its smol/async-io runtime. (No tokio-based MCP SDK: it is `Send`-bound, which
+# clashes with that single-threaded executor.)
 matter-peek-rpc = { path = "../rpc", optional = true }
-async-channel = { workspace = true, optional = true }
 # `blocking::Unblock` async-wraps stdin/stdout via a thread pool — the smol-family
 # way to do async stdio (a direct `async_io::Async` over stdin can fail to
 # register a pipe/tty fd with epoll).
