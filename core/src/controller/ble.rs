@@ -636,9 +636,9 @@ pub fn decode_hex(s: &str) -> Result<Vec<u8>, Error> {
     }
 
     let mut out = Vec::with_capacity(cleaned.len() / 2);
-    for pair in cleaned.chunks_exact(2) {
-        let hi = hex_val(pair[0]).ok_or(ErrorCode::InvalidData)?;
-        let lo = hex_val(pair[1]).ok_or(ErrorCode::InvalidData)?;
+    for &[hi, lo] in cleaned.as_chunks::<2>().0 {
+        let hi = hex_val(hi).ok_or(ErrorCode::InvalidData)?;
+        let lo = hex_val(lo).ok_or(ErrorCode::InvalidData)?;
         out.push((hi << 4) | lo);
     }
 
