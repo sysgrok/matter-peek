@@ -6,6 +6,8 @@ use yew::prelude::*;
 
 use matter_peek_core::api::{self, display, wire};
 
+use crate::icons::{icon, kind_class, kind_icon, Icon};
+use crate::ui;
 use crate::{input_value, send_request, textarea_value, App, Msg};
 
 /// The parts of the popup.
@@ -226,22 +228,16 @@ pub fn view_modal(view: &NetworkView, title: &str, error: Option<&str>, link: &S
             <div class="modal is-active">
                 <div class="modal-background"></div>
                 <div class="modal-card is-fullscreen">
-                    <header class="modal-card-head">
-                        <div class="modal-card-title net-title">
-                            <span class="net-eyebrow">{ "Network" }</span>
-                            <span>{ title.to_string() }</span>
-                        </div>
+                    { ui::modal_head("Network", title, html! {
                         <button
-                            class={classes!("button", "is-small", "mr-3", view.loading.then_some("is-loading"))}
+                            class={classes!("button", "is-small", view.loading.then_some("is-loading"))}
                             title="Read the network again"
                             disabled={view.loading}
                             onclick={link.callback(|_| Msg::RefreshNetwork)}>
                             <span class="icon is-small">{ icon(Icon::Refresh, 16) }</span>
                             <span>{ "Refresh" }</span>
                         </button>
-                        <button class="delete is-large" aria-label="close"
-                            onclick={link.callback(|_| Msg::CloseNetwork)}></button>
-                    </header>
+                    }, link.callback(|_| Msg::CloseNetwork)) }
                     <section class="modal-card-body">
                         <div class="app container">
                             if let Some(e) = error {
@@ -417,9 +413,9 @@ fn hero(info: &api::NetworkInfo) -> Html {
                 <div class="net-hero-title">
                     <span class="title is-4 mb-0">{ headline }</span>
                     if online {
-                        <span class="net-status is-up">{ "Online" }</span>
+                        <span class="pill is-up">{ "Online" }</span>
                     } else {
-                        <span class="net-status">{ "Offline" }</span>
+                        <span class="pill">{ "Offline" }</span>
                     }
                 </div>
                 <p class="net-weak">{ subline }</p>
@@ -451,7 +447,7 @@ fn known_networks(config: &api::NetworkConfig, view: &NetworkView, link: &Scope<
                   disabled: bool,
                   change: api::NetworkChange| {
         html! {
-            <button class={classes!("net-action", class)} title={title.to_string()}
+            <button class={classes!("icon-action", class)} title={title.to_string()}
                 disabled={view.loading || disabled}
                 onclick={link.callback(move |_| Msg::ChangeNetwork(endpoint, change.clone()))}>
                 { icon(glyph, 18) }
@@ -487,10 +483,10 @@ fn known_networks(config: &api::NetworkConfig, view: &NetworkView, link: &Scope<
                         (kind == Some(api::NetworkKind::Thread)).then_some("mono"),
                     )}>{ network.name.clone() }</span>
                     if network.connected {
-                        <span class="net-status is-up" title="As the device reports it">{ "Connected" }</span>
+                        <span class="pill is-up" title="As the device reports it">{ "Connected" }</span>
                     }
                     if let Some(status) = failed {
-                        <span class="net-status is-warning"
+                        <span class="pill is-warning"
                             title={match config.last_connect_error {
                                 Some(e) => format!("The last attempt to connect failed (error {e})"),
                                 None => "The last attempt to connect failed".to_string(),
@@ -759,9 +755,9 @@ fn interface_card(
                 </div>
                 if let Some(iface) = iface {
                     if iface.operational {
-                        <span class="net-status is-up">{ "Up" }</span>
+                        <span class="pill is-up">{ "Up" }</span>
                     } else {
-                        <span class="net-status">{ "Down" }</span>
+                        <span class="pill">{ "Down" }</span>
                     }
                 }
             </div>
@@ -967,30 +963,14 @@ fn neighbor_kind(n: &api::ThreadNeighbor) -> &'static str {
 }
 
 fn confirm_dialog(confirm: &Confirm, link: &Scope<App>) -> Html {
-    html! {
-        <div class="modal is-active">
-            <div class="modal-background" onclick={link.callback(|_| Msg::CancelNetworkChange)}></div>
-            <div class="modal-card net-confirm">
-                <header class="modal-card-head">
-                    <p class="modal-card-title">{ confirm.title.clone() }</p>
-                </header>
-                <section class="modal-card-body">
-                    <p>{ confirm.text.clone() }</p>
-                </section>
-                <footer class="modal-card-foot">
-                    <div class="buttons">
-                        <button class={classes!("button", if confirm.danger { "is-danger" } else { "is-warning" })}
-                            onclick={link.callback(|_| Msg::ConfirmNetworkChange)}>
-                            { confirm.action }
-                        </button>
-                        <button class="button" onclick={link.callback(|_| Msg::CancelNetworkChange)}>
-                            { "Cancel" }
-                        </button>
-                    </div>
-                </footer>
-            </div>
-        </div>
-    }
+    ui::confirm_dialog(
+        &confirm.title,
+        &confirm.text,
+        confirm.action,
+        confirm.danger,
+        link.callback(|_| Msg::ConfirmNetworkChange),
+        link.callback(|_| Msg::CancelNetworkChange),
+    )
 }
 
 /// How full the device's list of networks is, as dots.
@@ -1098,153 +1078,4 @@ fn primary_kind(info: &api::NetworkInfo) -> Option<api::NetworkKind> {
     primary_config(info)
         .and_then(|config| config.kind)
         .or_else(|| info.interfaces.first().map(|iface| iface.kind))
-}
-
-fn kind_class(kind: Option<api::NetworkKind>) -> &'static str {
-    match kind {
-        Some(api::NetworkKind::WiFi) => "is-wifi",
-        Some(api::NetworkKind::Thread) => "is-thread",
-        Some(api::NetworkKind::Ethernet) => "is-ethernet",
-        _ => "is-other",
-    }
-}
-
-pub fn kind_icon(kind: Option<api::NetworkKind>) -> Option<Icon> {
-    match kind? {
-        api::NetworkKind::WiFi => Some(Icon::Wifi),
-        api::NetworkKind::Thread => Some(Icon::Thread),
-        api::NetworkKind::Ethernet => Some(Icon::Ethernet),
-        _ => None,
-    }
-}
-
-/// The icons of the UI, drawn in the current text color.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Icon {
-    Wifi,
-    Thread,
-    Ethernet,
-    ArrowUp,
-    ArrowDown,
-    ArrowsUpDown,
-    Connect,
-    Trash,
-    Plus,
-    Lock,
-    Eye,
-    EyeOff,
-    Refresh,
-    Router,
-    Channel,
-    Gauge,
-    Interfaces,
-    Neighbors,
-}
-
-pub fn icon(glyph: Icon, size: u32) -> Html {
-    let shape = match glyph {
-        Icon::Wifi => html! {
-            <>
-                <path d="M2 8.5a15 15 0 0 1 20 0" />
-                <path d="M5.5 12a10 10 0 0 1 13 0" />
-                <path d="M9 15.5a5 5 0 0 1 6 0" />
-                <circle cx="12" cy="19" r="1" fill="currentColor" />
-            </>
-        },
-        Icon::Thread => html! {
-            <>
-                <circle cx="5" cy="6" r="2" />
-                <circle cx="19" cy="6" r="2" />
-                <circle cx="12" cy="19" r="2" />
-                <path d="M7 6h10M6 8l5 9M18 8l-5 9" />
-            </>
-        },
-        Icon::Ethernet => html! {
-            <>
-                <path d="M3 5h18v11h-5v3H8v-3H3z" />
-                <path d="M7 8v3M10 8v3M14 8v3M17 8v3" />
-            </>
-        },
-        Icon::ArrowUp => html! { <path d="M12 19V5M5 12l7-7 7 7" /> },
-        Icon::ArrowDown => html! { <path d="M12 5v14M19 12l-7 7-7-7" /> },
-        Icon::ArrowsUpDown => html! { <path d="M7 4v16M3 8l4-4 4 4M17 20V4M13 16l4 4 4-4" /> },
-        Icon::Connect => html! {
-            <>
-                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-            </>
-        },
-        Icon::Trash => html! {
-            <>
-                <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6" />
-            </>
-        },
-        Icon::Plus => html! { <path d="M12 5v14M5 12h14" /> },
-        Icon::Lock => html! {
-            <>
-                <rect x="3" y="11" width="18" height="11" rx="2" />
-                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-            </>
-        },
-        Icon::Eye => html! {
-            <>
-                <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z" />
-                <circle cx="12" cy="12" r="3" />
-            </>
-        },
-        Icon::EyeOff => html! {
-            <>
-                <path d="M9.9 4.24A9.1 9.1 0 0 1 12 4c7 0 10 8 10 8a18.5 18.5 0 0 1-2.16 3.19" />
-                <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
-                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-10-8-10-8a18.45 18.45 0 0 1 5.06-5.94" />
-                <path d="M2 2l20 20" />
-            </>
-        },
-        Icon::Refresh => html! {
-            <>
-                <path d="M21 12a9 9 0 0 1-15.36 6.36L3 16" />
-                <path d="M3 12a9 9 0 0 1 15.36-6.36L21 8" />
-                <path d="M21 3v5h-5M3 21v-5h5" />
-            </>
-        },
-        Icon::Router => html! {
-            <>
-                <rect x="2" y="14" width="20" height="8" rx="2" />
-                <path d="M6 18h.01M10 18h.01M15 10v4" />
-                <path d="M17.84 7.17a4 4 0 0 0-5.66 0M20.66 4.34a8 8 0 0 0-11.31 0" />
-            </>
-        },
-        Icon::Channel => html! { <path d="M4 9h16M4 15h16M10 3L8 21M16 3l-2 18" /> },
-        Icon::Gauge => html! {
-            <>
-                <path d="M12 14l4-4" />
-                <path d="M3.34 19a10 10 0 1 1 17.32 0" />
-            </>
-        },
-        Icon::Interfaces => html! {
-            <>
-                <rect x="16" y="16" width="6" height="6" rx="1" />
-                <rect x="2" y="16" width="6" height="6" rx="1" />
-                <rect x="9" y="2" width="6" height="6" rx="1" />
-                <path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3M12 12V8" />
-            </>
-        },
-        Icon::Neighbors => html! {
-            <>
-                <circle cx="18" cy="5" r="3" />
-                <circle cx="6" cy="12" r="3" />
-                <circle cx="18" cy="19" r="3" />
-                <path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98" />
-            </>
-        },
-    };
-
-    html! {
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
-            width={size.to_string()} height={size.to_string()} fill="none" stroke="currentColor"
-            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            { shape }
-        </svg>
-    }
 }

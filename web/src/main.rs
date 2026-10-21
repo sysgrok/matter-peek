@@ -14,9 +14,15 @@ use yew::prelude::*;
 
 use matter_peek_core::api::{self, display, wire};
 
+use icons::{icon, Icon};
 use network::{Confirm, NetworkView};
 
+mod commission;
+mod devices;
+mod icons;
 mod network;
+mod ui;
+mod updates;
 
 /// Where the server listens (see `matter-peek-server`'s default).
 const WS_URL: &str = "ws://127.0.0.1:8087";
@@ -95,8 +101,25 @@ enum Network {
     None,
 }
 
+/// A destructive action awaiting confirmation.
+#[derive(Clone, PartialEq)]
+enum Ask {
+    Decommission(u64),
+    DeleteImage(String),
+}
+
 enum Msg {
     SelectTab(Tab),
+    /// Open or close the navigation drawer (on phones).
+    ToggleDrawer,
+    Ask(Ask),
+    AskConfirmed,
+    AskCancelled,
+    DismissNotice,
+    /// Clear the status line, if it is still the one numbered so.
+    ClearStatus(u32),
+    /// Edit the tags of a device, or stop editing.
+    EditTags(Option<u64>),
     PeerAddr(String),
     SetupCode(String),
     DiscoverFilter(String),
@@ -237,8 +260,20 @@ struct App {
     tag_filter: String,
     steps: Vec<StepLine>,
     result: Option<wire::Response>,
-    /// Transient status line for device ops (list size / identify ack).
+    /// Transient status line for device ops (identify ack, …).
     stored_status: Option<String>,
+    /// Numbers the status line, so a stale timer does not clear a newer one.
+    status_seq: u32,
+    /// The navigation drawer is open (on phones).
+    drawer_open: bool,
+    /// The destructive action awaiting confirmation.
+    ask: Option<Ask>,
+    /// The device whose tags are being edited.
+    editing_tags: Option<u64>,
+    /// How an OTA image upload goes (percent), while it does.
+    uploading: Option<u8>,
+    /// The last progress of each device's update (node_id → progress).
+    ota_progress: HashMap<u64, api::OtaProgress>,
     /// Live health subscriptions, keyed by device `node_id`. Multiple devices can
     /// be watched at once, each with its own running panel. An entry exists for as
     /// long as the device is being watched (removed on stop).
@@ -310,6 +345,12 @@ impl Component for App {
             steps: Vec::new(),
             result: None,
             stored_status: None,
+            status_seq: 0,
+            drawer_open: false,
+            ask: None,
+            editing_tags: None,
+            uploading: None,
+            ota_progress: HashMap::new(),
             subs: HashMap::new(),
             sub_ws: None,
             notice: None,
@@ -328,18 +369,56 @@ impl Component for App {
         match msg {
             Msg::SelectTab(tab) => {
                 self.tab = tab;
+                self.drawer_open = false;
                 // Lazily refresh the device list the first time the user opens
                 // the Devices tab with an empty list.
                 if tab == Tab::Devices && self.stored.is_empty() && !self.busy_stored {
                     self.busy_stored = true;
                     self.loading = Some(Loading::List);
-                    self.stored_status = None;
+                    self.set_status(None);
                     send_request(ctx.link().clone(), wire::Request::ListDevices);
                 }
                 // Devices offer updates to the images.
                 if matches!(tab, Tab::Devices | Tab::Updates) {
                     send_request(ctx.link().clone(), wire::Request::OtaImages);
                 }
+                true
+            }
+            Msg::ToggleDrawer => {
+                self.drawer_open = !self.drawer_open;
+                true
+            }
+            Msg::Ask(ask) => {
+                self.ask = Some(ask);
+                true
+            }
+            Msg::AskConfirmed => {
+                match self.ask.take() {
+                    Some(Ask::Decommission(node_id)) => {
+                        ctx.link().send_message(Msg::Decommission(node_id))
+                    }
+                    Some(Ask::DeleteImage(name)) => ctx.link().send_message(Msg::OtaDelete(name)),
+                    None => {}
+                }
+                true
+            }
+            Msg::AskCancelled => {
+                self.ask = None;
+                true
+            }
+            Msg::DismissNotice => {
+                self.notice = None;
+                true
+            }
+            Msg::ClearStatus(seq) => {
+                if seq != self.status_seq || self.busy_stored {
+                    return false;
+                }
+                self.stored_status = None;
+                true
+            }
+            Msg::EditTags(node_id) => {
+                self.editing_tags = node_id;
                 true
             }
             Msg::OtaImages => {
@@ -352,12 +431,13 @@ impl Component for App {
                 false
             }
             Msg::OtaFile(file) => {
-                self.notice = Some(upload_notice(0));
+                self.uploading = Some(0);
+                self.error = None;
                 send_ota_upload(ctx.link().clone(), file);
                 true
             }
             Msg::OtaUploading(percent) => {
-                self.notice = Some(upload_notice(percent));
+                self.uploading = Some(percent);
                 true
             }
             Msg::OtaDelete(name) => {
@@ -378,6 +458,7 @@ impl Component for App {
                     return false;
                 };
 
+                self.ota_progress.remove(&node_id);
                 self.ota_status
                     .insert(node_id, format!("Announcing {name} to the device…"));
                 send_ota_update(ctx.link().clone(), node_id, name);
@@ -386,6 +467,7 @@ impl Component for App {
             Msg::OtaProgress(node_id, progress) => {
                 self.ota_status
                     .insert(node_id, ota_progress_text(&progress));
+                self.ota_progress.insert(node_id, progress);
                 true
             }
             Msg::PeerAddr(v) => {
@@ -413,6 +495,7 @@ impl Component for App {
             }
             Msg::CloseDiscover => {
                 self.discover_open = false;
+                self.error = None;
                 true
             }
             Msg::Discover => {
@@ -487,14 +570,14 @@ impl Component for App {
             Msg::ListDevices => {
                 self.busy_stored = true;
                 self.loading = Some(Loading::List);
-                self.stored_status = None;
+                self.set_status(None);
                 self.error = None;
                 send_request(ctx.link().clone(), wire::Request::ListDevices);
                 true
             }
             Msg::Sync => {
                 self.busy_stored = true;
-                self.stored_status = Some("Syncing with the devices on our fabric…".into());
+                self.set_status(Some("Syncing with the devices on our fabric…".into()));
                 self.error = None;
                 self.notice = None;
                 send_request(ctx.link().clone(), wire::Request::Sync);
@@ -528,6 +611,7 @@ impl Component for App {
             }
             Msg::CloseLogs => {
                 self.logs = None;
+                self.error = None;
                 true
             }
             Msg::OpenNetwork(node_id) => {
@@ -552,6 +636,7 @@ impl Component for App {
             }
             Msg::CloseNetwork => {
                 self.network_view = None;
+                self.error = None;
                 true
             }
             Msg::NetworkSsid(ssid) => {
@@ -658,10 +743,10 @@ impl Component for App {
             }
             Msg::Identify(node_id) => {
                 self.busy_stored = true;
-                self.stored_status = Some(format!(
-                    "Identifying node {} (blink 3s)…",
+                self.set_status(Some(format!(
+                    "Asking node {} to identify itself…",
                     display::hex_u64(node_id)
-                ));
+                )));
                 self.error = None;
                 send_request(
                     ctx.link().clone(),
@@ -671,10 +756,10 @@ impl Component for App {
             }
             Msg::Decommission(node_id) => {
                 self.busy_stored = true;
-                self.stored_status = Some(format!(
-                    "Decommissioning node {} (RemoveFabric)…",
+                self.set_status(Some(format!(
+                    "Decommissioning node {}…",
                     display::hex_u64(node_id)
-                ));
+                )));
                 self.error = None;
                 // Clear any notice from a previous decommission, so what remains
                 // on screen describes *this* one.
@@ -778,10 +863,11 @@ impl Component for App {
                     })
                     .unwrap_or_default();
                 self.busy_stored = true;
-                self.stored_status = Some(format!(
-                    "Saving tags for node {}…",
+                self.editing_tags = None;
+                self.set_status(Some(format!(
+                    "Saving the tags of node {}…",
                     display::hex_u64(node_id)
-                ));
+                )));
                 self.error = None;
                 send_request(ctx.link().clone(), wire::Request::SetTags { node_id, tags });
                 true
@@ -811,7 +897,7 @@ impl Component for App {
                     }
                     wire::Response::SetupCode { setup_code } => self.setup_code = setup_code,
                     wire::Response::Devices { devices, notice } => {
-                        self.stored_status = Some(format!("{} device(s)", devices.len()));
+                        self.set_status(None);
                         // A non-fatal remark about whatever produced this list —
                         // e.g. a decommission that dropped the record locally but
                         // could not reach the device to free its fabric slot.
@@ -835,20 +921,15 @@ impl Component for App {
                         self.subs.entry(node_id).or_default().health.merge(health);
                     }
                     wire::Response::Ok => {
-                        self.stored_status =
-                            Some("Identify acknowledged — device should blink.".into());
+                        self.set_status(Some(
+                            "Identify acknowledged: the device should blink.".into(),
+                        ));
                     }
                     // `Subscribed` / streamed subscription frames arrive on the
                     // dedicated persistent subscription WS, not this one-shot path.
                     wire::Response::Subscribed { .. } => {}
                     wire::Response::OtaImages { images } => {
-                        if self
-                            .notice
-                            .as_deref()
-                            .is_some_and(|notice| notice.starts_with(UPLOAD_NOTICE))
-                        {
-                            self.notice = None;
-                        }
+                        self.uploading = None;
                         self.ota_images = images;
                     }
                     // Uploads run on their own connection (`send_ota_upload`).
@@ -910,9 +991,11 @@ impl Component for App {
                 if let Some(network) = self.network_view.as_mut() {
                     network.changing = false;
                 }
+                self.fade_status(ctx);
                 true
             }
             Msg::Error(e) => {
+                self.uploading = None;
                 self.running = false;
                 self.discovering = false;
                 self.busy_stored = false;
@@ -922,6 +1005,7 @@ impl Component for App {
                     network.changing = false;
                 }
                 self.error = Some(e);
+                self.set_status(None);
                 true
             }
         }
@@ -929,28 +1013,21 @@ impl Component for App {
 
     fn view(&self, ctx: &Context<Self>) -> Html {
         let link = ctx.link();
+        // A popup shows the error itself.
+        let popup = self.discover_open || self.logs.is_some() || self.network_view.is_some();
+
         html! {
             <>
-                <section class="hero is-primary is-small">
-                    <div class="hero-body">
-                        <p class="title">{ "matter-peek" }</p>
-                        <p class="subtitle">
-                            { "The Matter diagnostics tool" }
-                        </p>
-                    </div>
-                </section>
-
-                <main class="app container section">
-                    { self.view_tabs(link) }
-                    { for self.notice.iter().map(|n| html!{
-                        <div class="notification is-warning is-light">{ n.clone() }</div>
-                    }) }
-                    { for self.error.iter().map(|e| html!{
-                        <div class="notification is-danger is-light">
-                            <strong>{ "Error: " }</strong>{ e.clone() }
-                        </div>
-                    }) }
-
+                { self.view_app_bar(link) }
+                <main class={classes!("page", (self.tab != Tab::Devices).then_some("is-narrow"))}>
+                    if let Some(notice) = &self.notice {
+                        { ui::notification(Icon::Info, classes!("is-warning", "is-light"), html! { notice.clone() },
+                            link.callback(|_| Msg::DismissNotice)) }
+                    }
+                    if let Some(e) = self.error.as_ref().filter(|_| !popup) {
+                        { ui::notification(Icon::Alert, classes!("is-danger", "is-light"), html! { e.clone() },
+                            link.callback(|_| Msg::DismissError)) }
+                    }
                     {
                         match self.tab {
                             Tab::Devices => self.view_devices_tab(link),
@@ -959,6 +1036,11 @@ impl Component for App {
                         }
                     }
                 </main>
+                { self.view_status(link) }
+                { self.view_discover_modal(link) }
+                { self.view_logs_modal(link) }
+                { self.view_network_modal(link) }
+                { self.view_ask(link) }
             </>
         }
     }
@@ -972,6 +1054,25 @@ impl Component for App {
 }
 
 impl App {
+    /// Show `status` in the status line, or clear it.
+    fn set_status(&mut self, status: Option<String>) {
+        self.stored_status = status;
+        self.status_seq = self.status_seq.wrapping_add(1);
+    }
+
+    /// Clear the status line after a while, unless it changes meanwhile.
+    fn fade_status(&mut self, ctx: &Context<Self>) {
+        if self.stored_status.is_none() {
+            return;
+        }
+        let seq = self.status_seq;
+        let link = ctx.link().clone();
+        spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(4_000).await;
+            link.send_message(Msg::ClearStatus(seq));
+        });
+    }
+
     /// Send a request over the **persistent subscription WS** (Subscribe /
     /// Unsubscribe). No-op if the WS isn't open yet — `SubWsReady` re-sends the
     /// active subscriptions once it opens.
@@ -1197,1012 +1298,135 @@ impl App {
         true
     }
 
-    /// The top-level Bulma tab bar.
-    fn view_tabs(&self, link: &html::Scope<Self>) -> Html {
-        let tab = |t: Tab, label: &str| {
-            let active = self.tab == t;
-            let onclick = link.callback(move |_| Msg::SelectTab(t));
-            html! {
-                <li class={classes!(active.then_some("is-active"))}>
-                    <a {onclick}>{ label.to_string() }</a>
-                </li>
-            }
-        };
-        html! {
-            <div class="tabs is-boxed is-medium">
-                <ul>
-                    { tab(Tab::Devices, "Devices") }
-                    { tab(Tab::Commission, "Commission") }
-                    { tab(Tab::Updates, "Updates") }
-                </ul>
-            </div>
-        }
-    }
-
-    // --- Discover popup ---------------------------------------------------
-
-    /// Full-screen list of the commissionable devices: picking one on the
-    /// network fills the peer address, one over Bluetooth the Bluetooth device.
-    fn view_discover_modal(&self, link: &html::Scope<Self>) -> Html {
-        if !self.discover_open {
-            return html! {};
-        }
-        html! {
-            <div class="modal is-active">
-                <div class="modal-background"></div>
-                <div class="modal-card is-fullscreen">
-                    <header class="modal-card-head">
-                        <p class="modal-card-title">{ "Commissionable devices" }</p>
-                        <button class="delete is-large" aria-label="close"
-                            onclick={link.callback(|_| Msg::CloseDiscover)}></button>
-                    </header>
-                    <section class="modal-card-body">
-                        <div class="app container">
-                            <div class="field is-grouped">
-                                <div class="control is-expanded">
-                                    <input class="input" placeholder="discriminator or setup code (any)"
-                                        value={self.discover_filter.clone()}
-                                        oninput={link.callback(|e: InputEvent| Msg::DiscoverFilter(input_value(e)))} />
-                                </div>
-                                <div class="control">
-                                    <button class={classes!("button", "is-primary", self.discovering.then_some("is-loading"))}
-                                        disabled={self.discovering || self.running}
-                                        onclick={link.callback(|_| Msg::Discover)}>
-                                        { "Rescan" }
-                                    </button>
-                                </div>
-                            </div>
-
-                            // The page's error banner is hidden behind the popup.
-                            { for self.error.iter().map(|e| html!{
-                                <div class="notification is-danger is-light">
-                                    <strong>{ "Error: " }</strong>{ e.clone() }
-                                </div>
-                            }) }
-                            { self.view_discovered(link) }
-                        </div>
-                    </section>
-                </div>
-            </div>
-        }
-    }
-
-    fn view_discovered(&self, link: &html::Scope<Self>) -> Html {
-        if self.discovered.is_empty() && self.discovered_ble.is_empty() {
-            let text = if self.discovering {
-                "Scanning the network and Bluetooth…"
-            } else {
-                "No commissionable devices found."
+    /// The top bar: the brand and the pages, which fold into a drawer on
+    /// phones.
+    fn view_app_bar(&self, link: &html::Scope<Self>) -> Html {
+        let pages = [
+            (
+                Tab::Devices,
+                "Devices",
+                Icon::Devices,
+                Some(self.stored.len()),
+            ),
+            (Tab::Commission, "Commission", Icon::Commission, None),
+            (
+                Tab::Updates,
+                "Updates",
+                Icon::Updates,
+                Some(self.ota_images.len()),
+            ),
+        ];
+        let link_to =
+            |class: &'static str, (tab, label, glyph, count): (Tab, &str, Icon, Option<usize>)| {
+                html! {
+                    <a class={classes!(class, (self.tab == tab).then_some("is-active"))}
+                        onclick={link.callback(move |_| Msg::SelectTab(tab))}>
+                        <span class="nav-icon">{ icon(glyph, 18) }</span>
+                        <span>{ label.to_string() }</span>
+                        if let Some(count) = count.filter(|count| *count > 0) {
+                            <span class="nav-count">{ count }</span>
+                        }
+                    </a>
+                }
             };
-            return html! { <p class="has-text-grey">{ text }</p> };
-        }
 
         html! {
             <>
-                { self.view_discovered_ip(link) }
-                { self.view_discovered_ble(link) }
-            </>
-        }
-    }
-
-    fn view_discovered_ble(&self, link: &html::Scope<Self>) -> Html {
-        if self.discovered_ble.is_empty() {
-            return html! {};
-        }
-        html! {
-            <>
-                <h3 class="title is-6">{ "Over Bluetooth" }</h3>
-                <table class="table is-fullwidth is-hoverable">
-                    <thead>
-                        <tr>
-                            <th>{ "Bluetooth address" }</th>
-                            <th>{ "Discriminator" }</th>
-                            <th>{ "Vendor" }</th>
-                            <th>{ "Product" }</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        { for self.discovered_ble.iter().map(|d| {
-                            let addr = d.addr.clone();
-                            let onclick = link.callback(move |_| Msg::PickBleDevice(addr.clone()));
-                            html! {
-                                <tr class="is-clickable" title="Commission this device over Bluetooth" {onclick}>
-                                    <td class="mono">{ d.addr.clone() }</td>
-                                    <td class="mono">{ d.discriminator }</td>
-                                    <td>{ display::vendor_label(d.vendor_id, None) }</td>
-                                    <td>{ display::product_label(d.vendor_id, d.product_id, None) }</td>
-                                </tr>
-                            }
-                        }) }
-                    </tbody>
-                </table>
-            </>
-        }
-    }
-
-    fn view_discovered_ip(&self, link: &html::Scope<Self>) -> Html {
-        if self.discovered.is_empty() {
-            return html! {};
-        }
-        html! {
-            <>
-            <h3 class="title is-6">{ "On the network" }</h3>
-            <table class="table is-fullwidth is-hoverable">
-                <thead>
-                    <tr><th>{ "Address" }</th><th>{ "Commissionable id" }</th></tr>
-                </thead>
-                <tbody>
-                    { for self.discovered.iter().map(|d| {
-                        let addr = d.addr.clone();
-                        let onclick = link.callback(move |_| Msg::PickDevice(addr.clone()));
-                        html! {
-                            <tr class="is-clickable" title="Use this device" {onclick}>
-                                <td class="mono">{ d.addr.clone() }</td>
-                                <td class="mono">{ display::hex_u64(d.commissionable_id) }</td>
-                            </tr>
-                        }
-                    }) }
-                </tbody>
-            </table>
-            </>
-        }
-    }
-
-    // --- Commission tab ---------------------------------------------------
-
-    fn view_commission_tab(&self, link: &html::Scope<Self>) -> Html {
-        // Flag what is typed but unusable; leave an empty field neutral.
-        let addr_invalid = !self.peer_addr.trim().is_empty()
-            && self.peer_addr.trim().parse::<SocketAddr>().is_err();
-        let code_invalid =
-            !self.setup_code.trim().is_empty() && !valid_setup_code(&self.setup_code);
-
-        html! {
-            <>
-                { self.view_recommission_warning(link) }
-                { self.view_discover_modal(link) }
-                <div class="box">
-                    <h2 class="title is-5">{ "Commission a device" }</h2>
-
-                    <div class="field">
-                        <label class="label">{ "Reach the device" }</label>
-                        <div class="buttons has-addons">
-                            <button class={classes!("button", (!self.via_ble).then_some("is-link"), (!self.via_ble).then_some("is-selected"))}
-                                onclick={link.callback(|_| Msg::SetViaBle(false))}>
-                                { "Over the network" }
-                            </button>
-                            <button class={classes!("button", self.via_ble.then_some("is-link"), self.via_ble.then_some("is-selected"))}
-                                onclick={link.callback(|_| Msg::SetViaBle(true))}>
-                                { "Over Bluetooth" }
-                            </button>
-                        </div>
-                    </div>
-
-                    {
-                        if self.via_ble {
-                            self.view_ble_fields(link)
-                        } else {
-                            html! {
-                                <div class="field">
-                                    <label class="label">{ "Peer address" }</label>
-                                    <div class="field has-addons">
-                                        <div class="control is-expanded">
-                                            <input class={classes!("input", "mono", addr_invalid.then_some("is-danger"))}
-                                                placeholder="[IPv6]:port or IPv4:port"
-                                                value={self.peer_addr.clone()}
-                                                oninput={link.callback(|e: InputEvent| Msg::PeerAddr(input_value(e)))} />
-                                        </div>
-                                        <div class="control">{ self.discover_button(link) }</div>
-                                    </div>
-                                </div>
-                            }
-                        }
-                    }
-
-                    <div class="field">
-                        <label class="label">{ "Setup code" }</label>
-                        <div class="field has-addons">
-                            <div class="control is-expanded">
-                                <input class={classes!("input", "mono", code_invalid.then_some("is-danger"))}
-                                    value={self.setup_code.clone()}
-                                    oninput={link.callback(|e: InputEvent| Msg::SetupCode(input_value(e)))} />
-                            </div>
-                            <div class="control">
-                                <div class="file">
-                                    <label class="file-label"
-                                        title="Read the setup code from a picture of the device's QR code">
-                                        <input class="file-input" type="file" accept="image/png,image/jpeg"
-                                            onchange={link.batch_callback(|e: Event| picked_file(e).map(Msg::QrImage))} />
-                                        <span class="file-cta">
-                                            <span class="file-label">{ "From QR image" }</span>
-                                        </span>
-                                    </label>
-                                </div>
-                            </div>
-                        </div>
-                        <p class="help">{ "Passcode, manual pairing code or MT: QR code payload." }</p>
-                    </div>
-
-                    <div class="field">
-                        <label class="checkbox">
-                            <input type="checkbox" checked={self.remember}
-                                onchange={link.callback(|e: Event| Msg::SetRemember(checkbox_checked(e)))} />
-                            { " Remember" }
-                        </label>
-                        <p class="help">
-                            { "Keep a record of the device, so it can be tagged and stays listed while offline. Either way, it stays on our fabric." }
-                        </p>
-                    </div>
-
-                    <div class="field">
-                        <div class="field is-grouped">
-                            <div class="control">
-                                <button class={classes!("button", "is-primary", self.running.then_some("is-loading"))}
-                                    disabled={self.running || !self.can_commission()}
-                                    onclick={link.callback(|_| Msg::Commission)}>
-                                    { "Commission" }
-                                </button>
-                            </div>
-                            {
-                                if self.running {
-                                    html! {
-                                        <div class="control">
-                                            <button class="button is-danger is-light"
-                                                onclick={link.callback(|_| Msg::Cancel)}>
-                                                { "Cancel" }
-                                            </button>
-                                        </div>
-                                    }
-                                } else { html! {} }
-                            }
-                        </div>
-                    </div>
-                </div>
-
-                { self.view_progress() }
-                { self.view_result() }
-            </>
-        }
-    }
-
-    /// The Discover button, opening the popup of commissionable devices.
-    fn discover_button(&self, link: &html::Scope<Self>) -> Html {
-        html! {
-            <button class="button is-link"
-                title="Find commissionable devices, on the network and over Bluetooth"
-                disabled={self.running}
-                onclick={link.callback(|_| Msg::OpenDiscover)}>
-                <span class="icon">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
-                        width="18" height="18" fill="none" stroke="currentColor"
-                        stroke-width="2.5" stroke-linecap="round">
-                        <circle cx="10.5" cy="10.5" r="6.5" />
-                        <line x1="15.5" y1="15.5" x2="21" y2="21" />
-                    </svg>
-                </span>
-                <span>{ "Discover" }</span>
-            </button>
-        }
-    }
-
-    /// Commissioning over Bluetooth: which device, and the network it joins.
-    fn view_ble_fields(&self, link: &html::Scope<Self>) -> Html {
-        let addr = self.ble_addr.trim();
-        let addr_invalid = !addr.is_empty() && !valid_bt_addr(addr);
-        let dataset_invalid =
-            !self.thread_dataset.trim().is_empty() && !valid_hex(&self.thread_dataset);
-
-        let network = |network: Network, label: &str| {
-            html! {
-                <label class="radio mr-4">
-                    <input type="radio" name="network" checked={self.network == network}
-                        onchange={link.callback(move |_| Msg::SetNetwork(network))} />
-                    { format!(" {label}") }
-                </label>
-            }
-        };
-
-        html! {
-            <>
-                <div class="field">
-                    <label class="label">{ "Bluetooth device" }</label>
-                    <div class="field has-addons">
-                        <div class="control is-expanded">
-                            <input class={classes!("input", "mono", addr_invalid.then_some("is-danger"))}
-                                placeholder="any device matching the setup code"
-                                value={self.ble_addr.clone()}
-                                oninput={link.callback(|e: InputEvent| Msg::BleAddr(input_value(e)))} />
-                        </div>
-                        <div class="control">{ self.discover_button(link) }</div>
-                    </div>
-                </div>
-
-                <div class="field">
-                    <label class="label">{ "Network to join" }</label>
-                    <div class="control">
-                        { network(Network::Wifi, "Wi-Fi") }
-                        { network(Network::Thread, "Thread") }
-                        { network(Network::None, "None (already on its network)") }
-                    </div>
-                </div>
-
-                {
-                    match self.network {
-                        Network::Wifi => html! {
-                            <div class="field is-grouped">
-                                <div class="control is-expanded">
-                                    <input class="input" placeholder="Wi-Fi network (SSID)"
-                                        value={self.wifi_ssid.clone()}
-                                        oninput={link.callback(|e: InputEvent| Msg::WifiSsid(input_value(e)))} />
-                                </div>
-                                <div class="control is-expanded">
-                                    <input class="input" type="password" placeholder="password"
-                                        value={self.wifi_password.clone()}
-                                        oninput={link.callback(|e: InputEvent| Msg::WifiPassword(input_value(e)))} />
-                                </div>
-                            </div>
-                        },
-                        Network::Thread => html! {
-                            <div class="field">
-                                <div class="control">
-                                    <textarea class={classes!("textarea", "mono", dataset_invalid.then_some("is-danger"))} rows="2"
-                                        placeholder="Thread operational dataset (hex)"
-                                        value={self.thread_dataset.clone()}
-                                        oninput={link.callback(|e: InputEvent| Msg::ThreadDataset(textarea_value(e)))} />
-                                </div>
-                            </div>
-                        },
-                        Network::None => html! {},
-                    }
-                }
-            </>
-        }
-    }
-
-    /// The "you just commissioned this device" guard: re-commissioning a device
-    /// whose window has closed will hang, so steer the user to Peek/Identify or
-    /// require an explicit "Commission anyway".
-    fn view_recommission_warning(&self, link: &html::Scope<Self>) -> Html {
-        if !self.confirm_recommission {
-            return html! {};
-        }
-        html! {
-            <div class="notification is-warning">
-                <p class="mb-3">
-                    <strong>{ "This device was just commissioned." }</strong>
-                    { " Its commissioning window has most likely closed, so commissioning \
-                       it again will hang. To inspect it, use " }
-                    <strong>{ "Peek" }</strong>{ " or " }<strong>{ "Identify" }</strong>
-                    { " on the Devices tab. To re-add it, first put the device back into \
-                       pairing mode." }
-                </p>
-                <div class="buttons">
-                    <button class="button is-link"
-                        onclick={link.callback(|_| Msg::SelectTab(Tab::Devices))}>
-                        { "Go to Devices" }
-                    </button>
-                    <button class="button is-warning is-light"
-                        onclick={link.callback(|_| Msg::CommissionAnyway)}>
-                        { "Commission anyway" }
-                    </button>
-                    <button class="button is-text"
-                        onclick={link.callback(|_| Msg::DismissRecommission)}>
-                        { "Dismiss" }
-                    </button>
-                </div>
-            </div>
-        }
-    }
-
-    /// The commission's progress: the in-flight step, or how it ended.
-    fn view_progress(&self) -> Html {
-        let Some(last) = self.steps.last() else {
-            return html! {};
-        };
-
-        let phase = phase_name(last.step);
-        let (label, bar_class) = match &last.status {
-            api::StepStatus::Failed { message } => {
-                (format!("{phase} failed: {message}"), "is-danger")
-            }
-            _ if self.running => (format!("{phase}…"), "is-primary"),
-            _ => ("Done".to_string(), "is-success"),
-        };
-
-        html! {
-            <div class="box">
-                <p class="has-text-weight-medium mb-2">{ label }</p>
-                {
-                    if self.running {
-                        // No value: an indeterminate (animated) bar.
-                        html! { <progress class={classes!("progress", bar_class)} /> }
-                    } else {
-                        html! { <progress class={classes!("progress", bar_class)} value="1" max="1" /> }
-                    }
-                }
-            </div>
-        }
-    }
-
-    fn view_result(&self) -> Html {
-        match &self.result {
-            Some(wire::Response::Commissioned(result)) => html! {
-                <div class="notification is-success is-light">
-                    { format!(
-                        "Commissioned as node {} — see the Devices tab.",
-                        display::hex_u64(result.handle.node_id)
-                    ) }
-                </div>
-            },
-            Some(wire::Response::Error { message }) => html! {
-                <div class="notification is-danger is-light">{ format!("Server error: {message}") }</div>
-            },
-            // Device responses (Devices / Peek / Ok) and Discovered are routed to
-            // their own state in `Msg::Done`, not shown here.
-            Some(_) | None => html! {},
-        }
-    }
-
-    // --- Devices tab ------------------------------------------------------
-
-    /// The devices on our fabric, each with its live health and its actions.
-    fn view_devices_tab(&self, link: &html::Scope<Self>) -> Html {
-        let filter = self.tag_filter.trim().to_lowercase();
-        let visible: Vec<&api::DeviceInfo> = self
-            .stored
-            .iter()
-            .filter(|d| {
-                filter.is_empty() || d.tags.iter().any(|t| t.to_lowercase().contains(&filter))
-            })
-            .collect();
-
-        html! {
-            <div class="box">
-                <div class="level is-mobile">
-                    <div class="level-left">
-                        <h2 class="title is-5">{ "Devices" }</h2>
-                    </div>
-                    <div class="level-right buttons">
-                        <button class={classes!("button", "is-small",
-                            (self.loading == Some(Loading::List)).then_some("is-loading"))}
-                            disabled={self.busy_stored}
-                            onclick={link.callback(|_| Msg::ListDevices)}>
-                            { "Refresh" }
+                <header class="appbar">
+                    <div class="appbar-inner">
+                        <button class="appbar-burger" aria-label="Menu"
+                            onclick={link.callback(|_| Msg::ToggleDrawer)}>
+                            { icon(Icon::Menu, 22) }
                         </button>
-                        <button class="button is-small is-link is-light"
-                            disabled={self.busy_stored}
-                            title="Add the devices on our fabric missing from the list, and refresh the others"
-                            onclick={link.callback(|_| Msg::Sync)}>
-                            { "Sync" }
-                        </button>
-                    </div>
-                </div>
-
-                {
-                    if self.stored.is_empty() {
-                        html! {}
-                    } else {
-                        html! {
-                            <div class="field">
-                                <div class="control has-icons-left">
-                                    <input class="input" placeholder="filter by tag…"
-                                        value={self.tag_filter.clone()}
-                                        oninput={link.callback(|e: InputEvent| Msg::TagFilter(input_value(e)))} />
-                                    <span class="icon is-small is-left">{ "🔎" }</span>
-                                </div>
-                            </div>
-                        }
-                    }
-                }
-
-                { for self.stored_status.iter().map(|s| html!{
-                    <div class="notification is-light"><pre class="result">{ s.clone() }</pre></div>
-                }) }
-
-                {
-                    if self.stored.is_empty() {
-                        html! {
-                            <p class="has-text-grey">
-                                { "No devices on our fabric yet. Commission one on the Commission tab." }
-                            </p>
-                        }
-                    } else if visible.is_empty() {
-                        html! {
-                            <p class="has-text-grey">
-                                { format!("No devices tagged like \"{}\".", self.tag_filter.trim()) }
-                            </p>
-                        }
-                    } else {
-                        html! { <>{ for visible.into_iter().map(|d| self.view_device_card(d, link)) }</> }
-                    }
-                }
-
-                { self.view_logs_modal(link) }
-                { self.view_network_modal(link) }
-            </div>
-        }
-    }
-
-    fn view_device_card(&self, d: &api::DeviceInfo, link: &html::Scope<Self>) -> Html {
-        let node_id = d.handle.node_id;
-        let refresh = link.callback(move |_| Msg::Refresh(node_id));
-        let identify = link.callback(move |_| Msg::Identify(node_id));
-        let logs = link.callback(move |_| Msg::OpenLogs(node_id));
-        let network = link.callback(move |_| Msg::OpenNetwork(node_id));
-        let remember = link.callback(move |_| Msg::Remember(node_id));
-        let decommission = link.callback(move |_| Msg::Decommission(node_id));
-        let save_tags = link.callback(move |_| Msg::SaveTags(node_id));
-        let on_tags = link.callback(move |e: InputEvent| Msg::TagsInput(node_id, input_value(e)));
-
-        // This device's live subscription (auto-created; `None` only very briefly).
-        let live = self.subs.get(&node_id);
-
-        // Offline per its subscription; until that is live or offline, per the
-        // last sync. Only Refresh and the actions not needing the device remain.
-        let offline = match live.map(|sub| sub.conn) {
-            Some(SubConn::Live { .. }) => false,
-            Some(SubConn::Offline) => true,
-            _ => d.online == Some(false),
-        };
-
-        let title = d.title();
-
-        let tag_text = self
-            .tag_inputs
-            .get(&node_id)
-            .cloned()
-            .unwrap_or_else(|| d.tags.join(", "));
-
-        html! {
-            <div class="card mb-4">
-                <div class="card-content">
-                    <div class="card-head mb-2">
-                        <p class="title is-6 mb-0">
-                            { network_icon(d.network) }
-                            { title }
-                        </p>
-                        <div class="tags mb-0">
-                            { if !d.remembered {
-                                html!{ <span class="tag is-light"
-                                    title="No record is kept: it cannot be tagged, and is listed only while on our fabric">
-                                    { "not remembered" }</span> }
-                              } else { html!{} } }
-                            { if offline {
-                                html!{ <span class="tag is-danger is-light"
-                                    title="Not answering; Refresh checks it now">
-                                    { "offline" }</span> }
-                              } else { html!{} } }
-                            <span class="tag is-light mono">
-                                { format!("fab {} · {}", d.handle.fabric_index, display::hex_u64(node_id)) }
-                            </span>
-                        </div>
-                    </div>
-
-                    <div class="mb-3">
-                        <p class="is-size-7 mb-0">
-                            <span class="has-text-grey">{ "Vendor " }</span>
-                            <span class="has-text-weight-semibold">
-                                { d.vendor().unwrap_or_else(|| "unknown".into()) }
-                            </span>
-                            { if d.is_test_vendor() {
-                                html!{ <span class="tag is-warning is-light is-rounded ml-2">{ "TEST" }</span> }
-                              } else { html!{} } }
-                            { for d.product().map(|product| html! {
-                                <>
-                                    <span class="has-text-grey">{ " · Product " }</span>
-                                    { product }
-                                </>
-                            }) }
-                        </p>
-                        <p class="is-size-7 has-text-grey">{ versions_line(&d.fingerprint) }</p>
-                    </div>
-
-                    {
-                        if d.tags.is_empty() {
-                            html! {}
-                        } else {
-                            html! {
-                                <div class="tags mb-2">
-                                    { for d.tags.iter().map(|t| html!{
-                                        <span class="tag is-info is-light">{ t.clone() }</span>
-                                    }) }
-                                </div>
-                            }
-                        }
-                    }
-
-                    {
-                        if d.remembered {
-                            html! {
-                                <div class="field has-addons mb-2">
-                                    <div class="control is-expanded">
-                                        <input class="input is-small" placeholder="comma,separated tags"
-                                            value={tag_text} oninput={on_tags} />
-                                    </div>
-                                    <div class="control">
-                                        <button class="button is-small" disabled={self.busy_stored} onclick={save_tags}>
-                                            { "Save tags" }
-                                        </button>
-                                    </div>
-                                </div>
-                            }
-                        } else {
-                            html! {}
-                        }
-                    }
-
-                    <div class="buttons are-small">
-                        <button
-                            class={classes!("button", "is-link", "is-light",
-                                (self.loading == Some(Loading::Device(node_id))).then_some("is-loading"))}
-                            disabled={self.busy_stored} onclick={refresh}>
-                            { "Refresh" }
-                        </button>
-                        <button class="button is-warning is-light" disabled={self.busy_stored || offline}
-                            onclick={identify}>
-                            { "Identify" }
-                        </button>
-                        <button class="button is-light" disabled={offline} onclick={network}>
-                            { "Network" }
-                        </button>
-                        <button class="button is-light" disabled={offline} onclick={logs}>
-                            { "Logs" }
-                        </button>
-                        { if d.remembered { html!{} } else { html!{
-                            <button class="button is-info is-light" disabled={self.busy_stored}
-                                title="Keep a record of it, so it can be tagged and stays listed while offline"
-                                onclick={remember}>
-                                { "Remember" }
-                            </button>
-                        } } }
-                        <button class="button is-danger is-light" disabled={self.busy_stored} onclick={decommission}>
-                            { "Decommission" }
-                        </button>
-                    </div>
-
-                    { self.view_device_update(d, offline, link) }
-
-                    // Every listed device is watched automatically — the panel is
-                    // always shown (it renders "connecting…" until the first report).
-                    { self.view_live_health(live) }
-                </div>
-            </div>
-        }
-    }
-
-    /// The images a device can update to: for its vendor and product, and newer
-    /// than what it runs.
-    fn applicable<'a>(
-        &'a self,
-        d: &'a api::DeviceInfo,
-    ) -> impl Iterator<Item = &'a api::OtaImageInfo> + 'a {
-        let fp = &d.fingerprint;
-
-        self.ota_images.iter().filter(move |image| {
-            fp.vendor_id
-                .is_none_or(|vid| image.vendor_id == 0 || image.vendor_id == vid)
-                && fp
-                    .product_id
-                    .is_none_or(|pid| image.product_id == 0 || image.product_id == pid)
-                && fp.software_version.is_none_or(|v| image.version > v)
-        })
-    }
-
-    /// A device card's OTA update controls, when there is an image for it.
-    fn view_device_update(
-        &self,
-        d: &api::DeviceInfo,
-        offline: bool,
-        link: &html::Scope<Self>,
-    ) -> Html {
-        let node_id = d.handle.node_id;
-        let images: Vec<_> = self.applicable(d).collect();
-        let status = self.ota_status.get(&node_id);
-
-        if images.is_empty() && status.is_none() {
-            return html! {};
-        }
-
-        let chosen = self
-            .ota_choice
-            .get(&node_id)
-            .cloned()
-            .or_else(|| images.first().map(|image| image.name.clone()));
-
-        let on_choose = link.callback(move |e: Event| Msg::OtaChoose(node_id, select_value(e)));
-        let update = link.callback(move |_| Msg::OtaUpdate(node_id));
-
-        html! {
-            <div class="mb-2">
-                if !images.is_empty() {
-                    <div class="field has-addons mb-1">
-                        <div class="control">
-                            <div class="select is-small">
-                                <select onchange={on_choose}>
-                                    { for images.iter().map(|image| html! {
-                                        <option value={image.name.clone()}
-                                            selected={chosen.as_deref() == Some(image.name.as_str())}>
-                                            { format!("{} ({})", image.version_str, image.version) }
-                                        </option>
-                                    }) }
-                                </select>
-                            </div>
-                        </div>
-                        <div class="control">
-                            <button class="button is-small is-primary is-light" disabled={offline}
-                                onclick={update}>
-                                { "Update" }
-                            </button>
-                        </div>
-                    </div>
-                }
-                { for status.map(|status| html! {
-                    <p class="is-size-7 has-text-grey">{ status.clone() }</p>
-                }) }
-            </div>
-        }
-    }
-
-    /// The Updates tab: upload, list and delete OTA images.
-    fn view_updates_tab(&self, link: &html::Scope<Self>) -> Html {
-        let on_file = link.batch_callback(|e: Event| picked_file(e).map(Msg::OtaFile));
-        let refresh = link.callback(|_| Msg::OtaImages);
-
-        html! {
-            <div class="box">
-                <div class="field">
-                    <label class="label">{ "Upload an OTA image (.ota)" }</label>
-                    <div class="control">
-                        <input class="input" type="file" accept=".ota" onchange={on_file} />
-                    </div>
-                    <p class="help">
-                        { "Its header and digest are checked; devices then find it under Update, if it is newer than what they run." }
-                    </p>
-                </div>
-
-                <table class="table is-fullwidth is-narrow">
-                    <thead>
-                        <tr>
-                            <th>{ "Image" }</th>
-                            <th>{ "Vendor" }</th>
-                            <th>{ "Product" }</th>
-                            <th>{ "Version" }</th>
-                            <th>{ "Size" }</th>
-                            <th></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        { for self.ota_images.iter().map(|image| {
-                            let name = image.name.clone();
-                            let delete = link.callback(move |_| Msg::OtaDelete(name.clone()));
-
-                            html! {
-                                <tr>
-                                    <td>{ image.name.clone() }</td>
-                                    <td>{ display::vendor_label(image.vendor_id, None) }</td>
-                                    <td>{ display::product_label(image.vendor_id, image.product_id, None) }</td>
-                                    <td>{ format!("{} ({})", image.version_str, image.version) }</td>
-                                    <td>{ format!("{} KiB", image.size / 1024) }</td>
-                                    <td>
-                                        <button class="button is-small is-danger is-light" onclick={delete}>
-                                            { "Delete" }
-                                        </button>
-                                    </td>
-                                </tr>
-                            }
-                        }) }
-                    </tbody>
-                </table>
-
-                <button class="button is-small" onclick={refresh}>{ "Refresh" }</button>
-            </div>
-        }
-    }
-
-    /// The live-health panel shown under every device card: a small grid of the
-    /// diagnostic metrics from the merged running view, plus a live/reconnecting
-    /// status and the update count. `None` while the subscription is still being
-    /// set up (shown as connecting).
-    /// Full-screen popup to retrieve, read and download a device's logs.
-    fn view_logs_modal(&self, link: &html::Scope<Self>) -> Html {
-        let Some(logs) = &self.logs else {
-            return html! {};
-        };
-
-        let title = self
-            .stored
-            .iter()
-            .find(|d| d.handle.node_id == logs.node_id)
-            .map(api::DeviceInfo::title)
-            .unwrap_or_else(|| format!("node {}", display::hex_u64(logs.node_id)));
-
-        let intent_button = |intent: api::LogIntent| {
-            let active = logs.intent == Some(intent);
-            html! {
-                <button
-                    class={classes!("button", active.then_some("is-link"), (active && logs.loading).then_some("is-loading"))}
-                    disabled={logs.loading}
-                    onclick={link.callback(move |_| Msg::FetchLogs(intent))}>
-                    { log_intent_name(intent) }
-                </button>
-            }
-        };
-
-        html! {
-            <div class="modal is-active">
-                <div class="modal-background"></div>
-                <div class="modal-card is-fullscreen">
-                    <header class="modal-card-head">
-                        <p class="modal-card-title">{ format!("Logs — {title}") }</p>
-                        <button class="delete is-large" aria-label="close"
-                            onclick={link.callback(|_| Msg::CloseLogs)}></button>
-                    </header>
-                    <section class="modal-card-body">
-                        <div class="app container">
-                            <div class="buttons">
-                                { intent_button(api::LogIntent::EndUserSupport) }
-                                { intent_button(api::LogIntent::NetworkDiag) }
-                                { intent_button(api::LogIntent::CrashLogs) }
-                            </div>
-
-                            // The page's error banner is hidden behind the popup.
-                            { for self.error.iter().map(|e| html!{
-                                <div class="notification is-danger is-light">
-                                    <strong>{ "Error: " }</strong>{ e.clone() }
-                                </div>
-                            }) }
-                            { self.view_log(logs) }
-                        </div>
-                    </section>
-                </div>
-            </div>
-        }
-    }
-
-    /// Full-screen popup with a device's networking.
-    fn view_network_modal(&self, link: &html::Scope<Self>) -> Html {
-        let Some(view) = &self.network_view else {
-            return html! {};
-        };
-
-        let title = self
-            .stored
-            .iter()
-            .find(|d| d.handle.node_id == view.node_id)
-            .map(api::DeviceInfo::title)
-            .unwrap_or_else(|| format!("node {}", display::hex_u64(view.node_id)));
-
-        network::view_modal(view, &title, self.error.as_deref(), link)
-    }
-
-    /// A retrieved log: its text, or its size if it is binary, with a download.
-    fn view_log(&self, logs: &LogsView) -> Html {
-        use base64::Engine as _;
-
-        let (Some(intent), Some(data)) = (logs.intent, &logs.data) else {
-            let hint = if logs.loading {
-                "Retrieving the log…"
-            } else {
-                "Pick the log to retrieve."
-            };
-            return html! { <p class="has-text-grey">{ hint }</p> };
-        };
-
-        let log = base64::engine::general_purpose::STANDARD
-            .decode(data)
-            .unwrap_or_default();
-        if log.is_empty() {
-            return html! {
-                <p class="has-text-grey">{ format!("The device has no {} log.", log_intent_name(intent)) }</p>
-            };
-        }
-
-        let size = log.len();
-        let body = match String::from_utf8(log) {
-            Ok(text) => html! { <pre class="result">{ text }</pre> },
-            Err(_) => {
-                html! { <p>{ format!("{size} bytes of binary data — download it to inspect.") }</p> }
-            }
-        };
-        let file_name = format!("node-{:016x}-{}.log", logs.node_id, log_intent_file(intent));
-
-        html! {
-            <>
-                <div class="level is-mobile">
-                    <div class="level-left">
-                        <span class="has-text-grey">{ format!("{} log, {size} bytes", log_intent_name(intent)) }</span>
-                    </div>
-                    <div class="level-right">
-                        <a class="button is-small" download={file_name}
-                            href={format!("data:application/octet-stream;base64,{data}")}>
-                            { "Download" }
+                        <a class="brand" onclick={link.callback(|_| Msg::SelectTab(Tab::Devices))}>
+                            <span class="brand-mark">{ icon(Icon::Logo, 20) }</span>
+                            <span class="brand-name">{ "matter-peek" }</span>
                         </a>
+                        <nav class="appbar-nav">
+                            { for pages.into_iter().map(|page| link_to("appbar-link", page)) }
+                        </nav>
                     </div>
-                </div>
-                { body }
+                </header>
+
+                <div class={classes!("drawer-backdrop", self.drawer_open.then_some("is-open"))}
+                    onclick={link.callback(|_| Msg::ToggleDrawer)}></div>
+                <aside class={classes!("drawer", self.drawer_open.then_some("is-open"))}>
+                    <div class="drawer-head">
+                        <span class="brand-mark">{ icon(Icon::Logo, 22) }</span>
+                        <div>
+                            <p class="brand-name">{ "matter-peek" }</p>
+                            <p class="drawer-tagline">{ "The Matter diagnostics tool" }</p>
+                        </div>
+                    </div>
+                    <nav class="drawer-nav">
+                        { for pages.into_iter().map(|page| link_to("drawer-link", page)) }
+                    </nav>
+                </aside>
             </>
         }
     }
 
-    fn view_live_health(&self, sub: Option<&LiveSub>) -> Html {
-        let default = LiveSub::default();
-        let sub = sub.unwrap_or(&default);
-        // Each metric as a labelled cell; `—` when the device doesn't report it.
-        let metric = |label: &str, value: String| -> Html {
-            html! {
-                <div class="has-text-centered">
-                    <p class="heading">{ label.to_string() }</p>
-                    <p class="title is-6 mono">{ value }</p>
-                </div>
-            }
+    /// The status line of device operations, at the bottom.
+    fn view_status(&self, link: &html::Scope<Self>) -> Html {
+        let Some(status) = &self.stored_status else {
+            return html! {};
         };
-        let g = sub.health.general.unwrap_or_default();
-        let sw = sub.health.software.unwrap_or_default();
-
-        let (status, status_class) = match sub.conn {
-            SubConn::Connecting => ("◌ connecting…".to_string(), "tag is-light"),
-            SubConn::Live { max_int_secs } => (
-                format!(
-                    "● subscribed · reports at least every {max_int_secs} s · {} report(s)",
-                    sub.updates
-                ),
-                "tag is-success is-light",
-            ),
-            SubConn::Offline => (
-                format!("○ offline · retrying · {} report(s)", sub.updates),
-                "tag is-danger is-light",
-            ),
-            SubConn::Reconnecting => (
-                format!("◌ reconnecting… · {} report(s)", sub.updates),
-                "tag is-warning is-light",
-            ),
-        };
+        let seq = self.status_seq;
 
         html! {
-            <div class="box mt-2 p-3">
-                <div class="health-head mb-2">
-                    <p class="heading mb-0">{ "Live health" }</p>
-                    <span class={classes!(status_class, "is-wrappable")}>{ status }</span>
-                </div>
-                <div class="health-grid">
-                    { metric("Uptime", g.up_time_secs.map(display::duration).unwrap_or_else(|| "—".into())) }
-                    { metric("Reboots", opt_str(g.reboot_count)) }
-                    { metric("Op. hours", opt_str(g.total_operational_hours)) }
-                    { metric("Heap free", opt_str(sw.current_heap_free)) }
-                    { metric("Heap used", opt_str(sw.current_heap_used)) }
-                    { metric("Heap peak", opt_str(sw.current_heap_high_watermark)) }
-                </div>
+            <div class="snackbar">
+                if self.busy_stored {
+                    <span class="loader"></span>
+                } else {
+                    <span class="snackbar-icon">{ icon(Icon::CheckCircle, 18) }</span>
+                }
+                <span class="snackbar-text">{ status.clone() }</span>
+                <button class="snackbar-close" aria-label="Dismiss"
+                    onclick={link.callback(move |_| Msg::ClearStatus(seq))}>
+                    { icon(Icon::Close, 16) }
+                </button>
             </div>
         }
     }
-}
 
-/// A metric value or an em-dash placeholder when the device doesn't report it.
-fn opt_str<T: std::fmt::Display>(v: Option<T>) -> String {
-    v.map(|x| x.to_string()).unwrap_or_else(|| "—".into())
-}
+    /// The confirmation of a destructive action.
+    fn view_ask(&self, link: &html::Scope<Self>) -> Html {
+        let Some(ask) = &self.ask else {
+            return html! {};
+        };
 
-/// An icon for the kind of network a device is on.
-fn network_icon(kind: Option<api::NetworkKind>) -> Html {
-    let Some(glyph) = network::kind_icon(kind) else {
-        return html! {};
-    };
-    let label = kind.map(|kind| kind.label()).unwrap_or_default();
+        let (title, text, action) = match ask {
+            Ask::Decommission(node_id) => {
+                let title = self
+                    .stored
+                    .iter()
+                    .find(|d| d.handle.node_id == *node_id)
+                    .map(api::DeviceInfo::title)
+                    .unwrap_or_else(|| format!("node {}", display::hex_u64(*node_id)));
+                (
+                    format!("Decommission {title}?"),
+                    "The device leaves our fabric and this list; the other ecosystems it is in \
+                     keep it. To get it back, commission it again."
+                        .to_string(),
+                    "Decommission",
+                )
+            }
+            Ask::DeleteImage(name) => (
+                format!("Delete {name}?"),
+                "Devices can no longer update to this image.".to_string(),
+                "Delete",
+            ),
+        };
 
-    html! {
-        <span class="icon mr-1 has-text-grey" title={label}>
-            { network::icon(glyph, 18) }
-        </span>
+        ui::confirm_dialog(
+            &title,
+            &text,
+            action,
+            true,
+            link.callback(|_| Msg::AskConfirmed),
+            link.callback(|_| Msg::AskCancelled),
+        )
     }
-}
-
-/// A device card's hardware and software versions.
-fn versions_line(fp: &api::Fingerprint) -> String {
-    format!(
-        "Hardware version {} · Software version {}",
-        opt_str(fp.hardware_version),
-        opt_str(fp.software_version),
-    )
 }
 
 /// The notice for a just-remembered device that may be a unit already listed.
@@ -2294,12 +1518,6 @@ fn send_request(link: html::Scope<App>, request: wire::Request) {
 
 /// The size of an upload chunk, before base64.
 const UPLOAD_CHUNK_LEN: u64 = 256 * 1024;
-
-const UPLOAD_NOTICE: &str = "Uploading the OTA image";
-
-fn upload_notice(percent: u8) -> String {
-    format!("{UPLOAD_NOTICE}: {percent}%")
-}
 
 /// Upload an OTA image file in chunks, on its own connection.
 /// The file picked in a file input.

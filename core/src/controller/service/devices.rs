@@ -9,7 +9,7 @@ use embassy_time::{with_timeout, Duration, Timer};
 use log::{info, warn};
 
 use rs_matter::crypto::Crypto;
-use rs_matter::error::Error;
+use rs_matter::error::{Error, ErrorCode};
 use rs_matter::persist::KvBlobStore;
 
 use crate::api::{
@@ -146,7 +146,12 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         self.controller
             .retrieve_logs(dev.handle, intent)
             .await
-            .map_err(|e| failed("retrieving the logs failed", e))
+            .map_err(|e| match e.code() {
+                ErrorCode::ClusterNotFound | ErrorCode::EndpointNotFound => {
+                    PeekError::failed("the device offers no diagnostic logs")
+                }
+                _ => failed("retrieving the logs failed", e),
+            })
     }
 
     /// Blink a listed device (Identify cluster) on its application endpoint.
