@@ -1,8 +1,7 @@
 //! Local persistence for the controller (world (a): fabric/creds + device
 //! identity + tags).
 //!
-//! Built on rs-matter's `KvBlobStore` — **no SQL** (see
-//! `docs/phase1-persistence.md`). Two things persist:
+//! Built on rs-matter's `KvBlobStore` — **no SQL**. Two things persist:
 //!
 //! - **Our controller fabric** (RCAC/NOC/IPK/operational key): saved via
 //!   rs-matter's [`FabricPersist`] after commission, reloaded on startup via

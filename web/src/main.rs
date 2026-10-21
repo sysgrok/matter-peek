@@ -59,6 +59,15 @@ enum SubConn {
     Reconnecting,
 }
 
+/// A Refresh request in flight.
+#[derive(Clone, Copy, PartialEq)]
+enum Loading {
+    /// Of the device list.
+    List,
+    /// Of one device.
+    Device(u64),
+}
+
 /// Which top-level tab is showing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -191,6 +200,8 @@ struct App {
     discovering: bool,
     /// A device op (list / peek / identify / …) is in flight.
     busy_stored: bool,
+    /// Which Refresh button's request that is, for its spinner.
+    loading: Option<Loading>,
     discovered: Vec<proto::DiscoveredDevice>,
     discovered_ble: Vec<proto::BleDevice>,
     /// The devices on our fabric.
@@ -264,6 +275,7 @@ impl Component for App {
             discover_open: false,
             discovering: false,
             busy_stored: false,
+            loading: None,
             discovered: Vec::new(),
             discovered_ble: Vec::new(),
             stored: Vec::new(),
@@ -293,6 +305,7 @@ impl Component for App {
                 // the Devices tab with an empty list.
                 if tab == Tab::Devices && self.stored.is_empty() && !self.busy_stored {
                     self.busy_stored = true;
+                    self.loading = Some(Loading::List);
                     self.stored_status = None;
                     send_request(ctx.link().clone(), proto::Request::ListDevices);
                 }
@@ -446,6 +459,7 @@ impl Component for App {
             }
             Msg::ListDevices => {
                 self.busy_stored = true;
+                self.loading = Some(Loading::List);
                 self.stored_status = None;
                 self.error = None;
                 send_request(ctx.link().clone(), proto::Request::ListDevices);
@@ -464,6 +478,7 @@ impl Component for App {
                 // (not a status line). Useful for the values the subscription
                 // doesn't push on every change (e.g. the live-computed uptime).
                 self.busy_stored = true;
+                self.loading = Some(Loading::Device(node_id));
                 self.error = None;
                 send_request(ctx.link().clone(), proto::Request::PeekDevice { node_id });
                 true
@@ -639,6 +654,7 @@ impl Component for App {
                 self.running = false;
                 self.discovering = false;
                 self.busy_stored = false;
+                self.loading = None;
                 if let Some(logs) = self.logs.as_mut() {
                     logs.loading = false;
                 }
@@ -725,6 +741,7 @@ impl Component for App {
                         }
                         self.result = Some(other);
                         self.busy_stored = true;
+                        self.loading = Some(Loading::List);
                         send_request(ctx.link().clone(), proto::Request::ListDevices);
                         self.tab = Tab::Devices;
                     }
@@ -736,6 +753,7 @@ impl Component for App {
                 self.running = false;
                 self.discovering = false;
                 self.busy_stored = false;
+                self.loading = None;
                 self.error = Some(e);
                 true
             }
@@ -1472,7 +1490,8 @@ impl App {
                         <h2 class="title is-5">{ "Devices" }</h2>
                     </div>
                     <div class="level-right buttons">
-                        <button class={classes!("button", "is-small", self.busy_stored.then_some("is-loading"))}
+                        <button class={classes!("button", "is-small",
+                            (self.loading == Some(Loading::List)).then_some("is-loading"))}
                             disabled={self.busy_stored}
                             onclick={link.callback(|_| Msg::ListDevices)}>
                             { "Refresh" }
@@ -1632,7 +1651,8 @@ impl App {
 
                     <div class="buttons are-small">
                         <button
-                            class={classes!("button", "is-link", "is-light", self.busy_stored.then_some("is-loading"))}
+                            class={classes!("button", "is-link", "is-light",
+                                (self.loading == Some(Loading::Device(node_id))).then_some("is-loading"))}
                             disabled={self.busy_stored} onclick={refresh}>
                             { "Refresh" }
                         </button>

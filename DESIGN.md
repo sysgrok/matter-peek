@@ -1,400 +1,289 @@
-# Matter "Peek"" Controller — Design & Plan
+# matter-peek — Design
 
-> **matter-peek** A vendor-agnostic Matter
-> diagnostic tool for installers/technicians: commission into one or more
-> devices, read their health via the standard diagnostic clusters, pull
-> **DiagnosticLogs** (crash dumps / logs) over BDX, examine other device state.
-> Future: consent-gated upload of logs & core dumps to a vendor cloud.
+> **matter-peek** is a vendor-agnostic, local Matter controller for installers,
+> technicians and developers: commission devices (over IP or Bluetooth LE), keep
+> an inventory of them, watch their health live, pull their diagnostic logs,
+> update their firmware and decommission them — from a web UI, a command line or
+> an AI agent, all through one API.
 
 ---
 
 ## 1. Goals & non-goals
 
 ### Goals
-- **Peek into device health** via standard Matter diagnostic clusters:
-  General (`gen_diag`), Software (`sw_diag`), Thread (`thread_diag`),
-  Wi-Fi (`wifi_diag`), Ethernet (`eth_diag`), plus the **Diagnostic Logs**
-  cluster (`diag_logs`) — `RetrieveLogsRequest` for `EndUserSupport`,
-  `NetworkDiag`, and `CrashLogs` intents, streamed via **BDX**.
-- **Vendor-agnostic**: works against any certified Matter device by relying
-  only on standard clusters. (Proprietary, encrypted crash-dump *payloads*
-  remain opaque for other vendors' devices — but the generic
-  retrieve/transport mechanism still works everywhere.)
-- **Both fabric models**, selectable per session (see §5):
-  - *Persistent*: commission once, keep the device on our fabric, manage it
-    locally with tags + filtering + Identify-blink.
-  - *Ephemeral*: throwaway fabric per fetch, `RemoveFabric` self-destruct.
-- **Lock-step core + web UI**: the web UI is the first validation surface,
-  runnable on the dev desktop, so UI requirements drive the core's API shape.
-- **Mobile-ready core**: the same core compiles into a native lib behind
-  UniFFI for eventual SwiftUI (iOS) and Jetpack Compose (Android) UIs.
+- **A local Matter controller** on our own fabric:
+  - commission over IP or BLE (handing Wi-Fi or Thread credentials to the
+    device), from a manual code or a QR code (also from a picture);
+  - an **inventory** of the devices on our fabric, with local tags;
+  - **live health** via subscriptions to the diagnostic clusters, and one-shot
+    reads;
+  - **Diagnostic Logs** (end-user support, network, crash) inline or over BDX;
+  - Identify, **OTA updates** (we are the devices' OTA Provider), decommission.
+- **Vendor-agnostic**: only standard clusters, so it works with any certified
+  device. Proprietary log payloads stay opaque, but are still transported.
+- **One API, many front-ends**: whatever the web UI can do is in the API, and
+  the CLI and the MCP server expose the same. The CLI grows into a
+  `chip-tool`-like tool for humans and scripts; the MCP server is the same for
+  AI agents (which know `chip-tool`, not matter-peek).
+- **Portable**: the Matter-facing core is `no_std` + `alloc`. Desktop first
+  (Linux), then mobile (iOS, Android), possibly embedded (an esp32 hosting the
+  controller and its web UI).
 
-### Non-goals (initially)
-- No persistent vendor cloud / log-upload backend yet (consent-gated upload
-  is a later phase; the core will expose a clean seam for it).
-- No Home Assistant integration (explicitly out of scope).
-- No re-implementation of the Matter stack — we build a thin controller
-  wrapper over `rs-matter`.
-- No proprietary crash-dump *decoding* (we transport the bytes; per-vendor
-  parsers are a later, pluggable concern).
+### Non-goals (for now)
+- A vendor cloud: consent-gated upload of logs and crash dumps comes later.
+- Home Assistant integration.
+- Re-implementing the Matter stack: this is a thin controller over `rs-matter`;
+  what it lacks is added upstream.
+- Decoding proprietary crash dumps (later, as per-vendor plugins).
 
 ---
 
-## 2. Why Option A (native core), not Wasm-in-browser
+## 2. Why a native core, not Wasm-in-browser
 
-Matter is fundamentally raw-socket: mDNS/DNS-SD needs UDP multicast for
-discovery; PASE/CASE/BDX need raw UDP (and optionally TCP). A browser/Wasm
-sandbox cannot open those sockets. So the **core must be native** with direct
-OS socket access. This is also what `rs-matter` already targets.
-
-The "web" requirement is about the **UI**, not the core's compilation target.
-We therefore keep the core native and put a thin boundary between it and the
-web UI (next section). This preserves the exact same core for the mobile
-UniFFI path.
+Matter needs raw sockets: UDP (and TCP) for PASE/CASE/IM/BDX, multicast for
+mDNS, and Bluetooth LE for commissioning. A browser sandbox has none of them, so
+the controller is native and the web UI is a client of it. The same native
+controller serves the CLI, the MCP server and, later, mobile apps.
 
 ---
 
-## 3. Architecture overview
+## 3. Architecture
 
 ```
-            ┌──────────────────────────────────────────────────────┐
-            │                    UI layer (per platform)            │
-            │                                                       │
-  desktop → │  Web UI (Yew/Wasm OR plain TS) ── WS/HTTP+JSON ─┐     │
-            │                                                 │     │
-  iOS     → │  SwiftUI ───────────────── UniFFI ──────────┐   │     │
-  Android → │  Jetpack Compose ───────── UniFFI ──────────┤   │     │
-            └─────────────────────────────────────────────┼───┼─────┘
-                                                           │   │
-                                          ┌────────────────▼───▼──────────┐
-                                          │   matter-peek-core (Rust)     │
-                                          │   - Session/Controller mgr    │
-                                          │   - Commissioning (PASE→CASE) │
-                                          │   - Diagnostics readers       │
-                                          │   - DiagnosticLogs + BDX recv │
-                                          │   - Local store (tags/devices)│
-                                          │   - Upload seam (future)      │
-                                          └───────────────┬───────────────┘
-                                                          │ rs-matter
-                                                          ▼
-                                              Matter devices (UDP/mDNS/BDX)
+  Web UI (Yew/Wasm) ──── WS/JSON ────┐
+  MCP server (stdio) ─── WS/JSON ────┤
+  CLI ── WS/JSON (--server) ─────────┤
+      └─ in process (channels) ──────┤
+  mobile (later) ── UniFFI, in process ─┤
+                                        ▼
+                ┌──────────────────────────────────────────┐
+                │ the API: matter-peek-proto               │
+                │   Request / Response / Event (serde)     │
+                ├──────────────────────────────────────────┤
+                │ the service: rpc::actor                  │
+                │   device inventory + sync, commissioning,│
+                │   subscription hub, OTA images, logs, …  │
+                ├──────────────────────────────────────────┤
+                │ matter-peek-core (no_std + alloc)        │
+                │   Controller: commission (IP/BLE),       │
+                │   discover, read/subscribe health, logs, │
+                │   identify, decommission, OTA Provider   │
+                │   node; CA; KV-backed store              │
+                └──────────────────┬───────────────────────┘
+                                   │ rs-matter
+                                   ▼
+                     Matter devices (UDP / mDNS / BTP / BDX)
 ```
 
-### Core ↔ UI boundary: my recommendation
+### The API is the message protocol
 
-**Recommendation: a local RPC server (WebSocket + JSON) hosted by the native
-core, with the web UI as a plain browser client.** Rationale:
+The API is `proto`: requests answered by one response each, plus events streamed
+in between (commissioning steps, health reports, subscription states, OTA
+progress). It is `no_std` + `alloc` and depends only on `serde`, so the native
+server, the Wasm UI and any future shell share it.
 
-1. **The web UI runs unmodified in a normal browser on your desktop** — no
-   Tauri shell, no Wasm socket gymnastics. Fastest iteration loop.
-2. **The RPC contract becomes the canonical core API spec.** The UniFFI
-   surface for mobile is then a near-mechanical mirror of the same
-   request/response/event vocabulary (commands + a streamed event channel).
-   We design the API *once*, in terms the UI actually needs.
-3. **Events/streaming fall out naturally.** Commissioning progress, BDX
-   download progress, subscription reports, and device-state changes are all
-   server→UI push events over the same WS — which maps cleanly to UniFFI
-   callback interfaces / async streams on mobile.
-4. **Language-agnostic UI choice.** Yew (Rust→Wasm) *or* a plain TS/React
-   frontend can consume the same WS API. We can start with whichever is
-   fastest and not be locked in. (Yew is fine here precisely because it only
-   speaks WS/JSON — it never needs raw sockets.)
+| Area | Requests |
+|---|---|
+| Commissioning | `Commission` (IP or BLE, network credentials, `remember`), `Cancel`, `ReadQrImage`, `Discover` (mDNS + BLE) |
+| Inventory | `ListDevices`, `Sync`, `Remember`, `SetTags`, `Decommission` |
+| Health | `PeekDevice` (one-shot), `Subscribe` / `Unsubscribe` (live) |
+| Device | `RetrieveLogs`, `Identify` |
+| OTA | `OtaImages`, `OtaUploadBegin` / `Chunk` / `End`, `OtaDelete`, `OtaUpdate` |
 
-Trade-off vs. Tauri: Tauri would let the Yew UI call Rust via `invoke` with no
-network hop, but the boundary would be Tauri-specific and would *not* mirror
-the mobile UniFFI surface — defeating the lock-step goal. The WS/JSON contract
-is the more reusable artifact. (If we later want a single-binary desktop app,
-we can still wrap the same core + a bundled web UI in Tauri/Wry without
-changing the contract.)
+There is no Rust-trait facade over the core: every front-end speaks `proto`, so
+every operation has exactly one implementation (the service) and the front-ends
+cannot drift apart.
 
-> Net: **one core, two transports** — WS/JSON for web/desktop, UniFFI for
-> mobile — both projections of the same internal `Controller` API.
+### The service
 
----
+`rpc::actor` implements the API. One actor task owns the Matter stack
+(single-threaded: `rs_matter::Matter` is not `Send`) and runs, side by side:
+- the transport pump (UDP and BTP chained on one stack),
+- the mDNS backend (permanently, for operational resolves),
+- our own node (OTA Provider, BDX, inbound subscription reports),
+- the command loop (one command at a time, plus a periodic sync),
+- the subscriptions (detached, so they never block commands).
 
-## 4. What `rs-matter` already gives us (verified in-tree)
+A client reaches it through a `rpc::client::Connection`: over a WebSocket to a
+running `matter-peek-server`, or in process (`connect_in_process`), which spawns
+the actor and the same dispatch without a network hop. The store
+(`<data dir>/matter-peek`) is locked, so only one process holds it at a time.
 
-The controller side is **already present** — we are wrapping, not building:
+### The core
 
-| Need | rs-matter API | Location |
+`matter-peek-core` wraps rs-matter's controller-side primitives behind
+`Controller`: commission (with an orphan-fabric sweep before AddNOC), BLE
+commissioning (`ble` feature), discovery, health reads and subscriptions,
+diagnostic logs, identify, decommission, OTA announcements, and our node. Plus
+the controller CA and `ControllerStore`, generic over rs-matter's `KvBlobStore`.
+Its types (`core::model`) carry no serde; `rpc::convert` maps them to `proto`.
+
+### Front-ends
+
+| Front-end | Binary | Reaches the service |
 |---|---|---|
-| Commission (PASE → ArmFailSafe → CSR → AddNOC) | `Commissioner::commission()` | `onboard.rs` |
-| Finalize over CASE | `Commissioner::complete_via_case()` | `onboard.rs` |
-| Decommission / fabric cleanup | `RemoveFabric` (OperationalCredentials) | `dm/clusters` |
-| IM client (Read/Write/Invoke/Subscribe) | `im::client` (`ImClient` ext trait on `Exchange`) | `im/client.rs` |
-| Per-cluster typed clients | codegen `*Client` traits | `dm/clusters/*` |
-| Diagnostic clusters | `gen_diag`, `sw_diag`, `thread_diag`, `wifi_diag`, `eth_diag` | `dm/clusters/*` |
-| Diagnostic logs receive over BDX | `diag_logs::client::{DiagLogsBdxHandler, DiagLogsReceiver}` + `bdx::BdxReader` | `dm/clusters/diag_logs/`, `bdx.rs` |
-| Desktop crypto | `rustcrypto` / `openssl` backend | `crypto/backend/*` |
+| Web UI (Yew/Wasm, Bulma) | `trunk serve` | WebSocket |
+| CLI | `matter-peek` | `--server <url>`, or in process |
+| MCP server | `matter-peek-mcp` | WebSocket (read-only unless `--allow-mutate`) |
+| Server | `matter-peek-server` | hosts the service, `ws://127.0.0.1:8087` |
 
-Reference flows live in `tests/commissioning.rs`, `tests/case.rs`,
-`tests/diag_logs.rs`, `tests/bdx.rs` — these are our implementation templates.
-
-**Open questions to resolve during the spike** (not blockers, but unknowns):
-- mDNS browse/resolve for commissionable + operational discovery from the
-  controller side on desktop (Linux): confirm the discovery path and how it
-  interacts with host avahi (cf. prior hub-flakiness notes).
-- Subscription *post-establishment* report listening — `im/client.rs` notes
-  that establishment is covered but server-initiated reports need a listener
-  layered on top. We need that for live health dashboards (vs. one-shot reads).
-- App-to-app commissioning payload ingestion shape (mobile only; desktop uses
-  manual code / QR for now).
+The MCP protocol layer (JSON-RPC, tool catalog, tool ⇄ `proto` mapping) is
+`no_std`, behind an injected `Dispatch`; the stdio shell is the `std` part.
 
 ---
 
-## 5. Fabric lifetime as a per-session policy
+## 4. Behavior worth knowing
 
-The core exposes fabric lifetime as a **policy**, not a baked-in mode:
+### Devices and the fabric
+- One persistent controller fabric. Node IDs come from a persisted counter that
+  every successful commissioning bumps; they are never reused.
+- A device is **remembered** (a record is kept: taggable, listed while offline)
+  or not (listed only while it is on our fabric). `Remember` promotes one.
+- **Sync** browses our fabric over mDNS: it adds the devices on it that are
+  missing from the list, refreshes the others' identity and online state, and
+  drops unremembered devices that are gone. The server syncs at start and every
+  5 minutes.
+- **Decommission** sends `RemoveFabric` over CASE, retried for up to 30 s, and
+  drops the device either way (with a warning if it could not be reached);
+  `force` skips contacting it.
+- Before AddNOC, commissioning removes any fabric on the device that has our
+  root key (left over from a lost store), so fabric slots don't leak.
 
-```rust
-enum FabricPolicy {
-    /// Commission, keep the NOC on our fabric, persist device identity
-    /// locally. Repeat access is a cheap CASE session.
-    Persistent,
-    /// Commission on a throwaway fabric, do the work, then RemoveFabric
-    /// (self-destruct). No local identity persisted.
-    Ephemeral,
-}
-```
+### Commissioning
+- Over IP: PASE, AddNOC, then CASE to finish. Over BLE: PASE over BTP, the
+  network credentials (Wi-Fi or Thread), ConnectNetwork, then CASE over IP.
+- The PASE session stays open until commissioning completes, and on failure the
+  fail-safe is disarmed over it (the device then accepts PASE again).
+- Concurrent vs. non-concurrent connection is read from General Commissioning
+  `SupportsConcurrentConnection`. Devices may get this wrong, so a missing
+  ConnectNetwork answer falls through to CASE, which decides.
+- Discovery lists only devices in commissioning mode (mDNS `CM` ≠ 0), plus
+  commissionable BLE advertisements.
 
-- **Persistent** path needs: local device store (NodeID, serial/UniqueID,
-  user tags), Identify-cluster blink for physical disambiguation, and
-  **re-sync handling**:
-  - *Device forgot us* (factory reset): CASE fails → flag offline → prompt
-    re-share → on re-commission, match by `BasicInformation` serial/UniqueID
-    and overwrite the stale record (no duplicate).
-  - *We forgot device* (DB wiped / reinstall): before `AddNOC`, read the
-    `Fabrics` list over the PASE session and `RemoveFabric` any fabric whose
-    root public key matches ours (orphan cleanup) — prevents fabric-slot leak.
-- **Ephemeral** path needs none of the above but accepts the "too broken to
-  pair" risk and ~10–30 s pairing latency per fetch.
+### Health subscriptions
+- One subscription per device (General + Software Diagnostics), shared by every
+  watching connection; a late joiner gets the state and merged health so far.
+  It stops with its last watcher.
+- We ask for at most 20 s between reports; devices may choose longer (sleepy
+  devices pick their idle duration).
+- A device is **offline** when no report arrived within the max interval plus
+  two MRP round trips of a report. Re-establishing is retried with a 2–60 s
+  backoff; a successful `PeekDevice` retries at once.
 
-Both share the same commission/diagnostic/log-fetch primitives; only the
-before/after lifecycle differs.
-
----
-
-## 6. Proposed crate / workspace layout
-
-```
-matter-peek/                         (cargo workspace)
-├── Cargo.toml
-├── DESIGN.md                        (this file)
-├── core/                            # matter-peek-core — the reusable lib
-│   ├── controller/                  #   commission, CASE, decommission
-│   ├── diagnostics/                 #   typed reads of each diag cluster
-│   ├── logs/                        #   DiagnosticLogs + BDX receiver
-│   ├── store/                       #   device/tag persistence (sqlx/rusqlite)
-│   ├── model/                       #   UI-facing DTOs (serde) — the contract
-│   └── api/                         #   Controller facade (the single API)
-├── rpc/                             # WS/HTTP+JSON server over core::api
-├── uniffi/                          # UniFFI wrapper over core::api (later)
-├── cli/                             # thin CLI for spikes / headless testing
-├── web/                             # web UI (Yew or TS) — WS/JSON client
-└── (ios/, android/  — later)
-```
-
-- `core::model` (serde DTOs) + `core::api` (the `Controller` facade) are the
-  **single source of truth**. `rpc`, `uniffi`, and `cli` are all thin
-  adapters over `core::api`. This is what keeps web and mobile in lock-step.
-- `rs-matter` is consumed by `core` only. UI layers never see `rs-matter`
-  types — they see `core::model` DTOs.
-
-### `core` is `no_std` + `alloc`
-
-`matter-peek-core` carries no `std` dependency, so it can run on embedded
-targets (a future esp32-with-PSRAM could host matter-peek + a web UI) as well as
-desktop/mobile. Verified by cross-compiling `core --no-default-features` for
-`riscv32imac-unknown-none-elf` (bare metal).
-
-What this required (and the rules that keep it true):
-- `#![no_std]` + `extern crate alloc`; addresses use `core::net`, collections
-  `alloc`.
-- `core` depends on `rs-matter` with `default-features = false` (rs-matter's
-  `os` feature ⇒ `std`); the hosted path is re-enabled only via `core`'s **`std`
-  feature**, which every desktop mDNS backend (`mdns-avahi`/`-resolve`/`-astro`)
-  and the `mdns-builtin` socket backend pull in. An embedded build leaves `std`
-  off and brings its own backend.
-- **`core` never creates sockets or opens files**: the transport socket is built
-  by the binary (`bind_controller_socket` lives in `cli`/`rpc`), and the KV
-  backend is injected — `ControllerStore<S>` is generic over rs-matter's
-  `no_std` `KvBlobStore` trait (`DirKvBlobStore` on desktop; NVS/flash on
-  embedded).
-- Remaining embedded-integration work (not a `core` concern): platform RNG for
-  the crypto backend (esp provides a `getrandom` source) and an esp-native mDNS
-  backend or `BuiltinMdns`.
-
-`proto` is likewise **`no_std` + `alloc`** (verified on the same bare-metal
-target) — it's the wire contract shared by *every* adapter (desktop WS, Wasm web
-client, future esp), so it must be portable.
-
-### Transport adapters: desktop now, embedded later (not by no_std-ifying `rpc`)
-
-The current `rpc` crate is the **desktop/hosted** adapter — a WS server on
-`async-tungstenite`/`async-net`/`async-executor` (all `std`). It is *intended*
-to be `std`; making it `no_std` is the wrong move, because an on-device esp build
-needs a **different** stack (`edge-http` + `edge-ws` over `edge-nal`/esp-hal,
-`mbedtls` for TLS), not no_std versions of tungstenite.
-
-So the embedded story is a *sibling adapter*, not a port:
-- `rpc` (now) — desktop WS server, `std`. Unchanged.
-- `rpc-embedded` (future, when esp32s3 is real) — `no_std` adapter over
-  `edge-http`/`edge-ws`. Both are thin translators between WS/HTTP frames and
-  `core::Controller` + `proto`.
-- To avoid duplicating the shared logic (the actor: command dispatch, the
-  `Discover`/`RunVertical` handlers, proto↔core conversions), that logic should
-  later be factored into a `no_std` `rpc-core` consumed by both shells. The
-  current `actor.rs` is already mostly `core` calls + `proto` — only socket-bind
-  and the WS server are `std` — so the split is cheap when needed. **Deferred
-  until esp hardware exists to validate against.**
+### OTA
+We are the devices' OTA Provider: images are stored as files (uploaded in
+chunks over the API), `OtaUpdate` announces us to the device, and the device
+queries and downloads over BDX, reported as `OtaProgress` events.
 
 ---
 
-## 7. The core API (sketch — drives both transports)
+## 5. What rs-matter provides
 
-```rust
-// Commands (UI → core)
-trait Controller {
-    async fn discover(&self, filter: DiscoveryFilter) -> Vec<DiscoveredDevice>;
-    async fn commission(&self, payload: SetupPayload, policy: FabricPolicy)
-        -> Result<DeviceHandle>;
-    async fn decommission(&self, dev: DeviceHandle) -> Result<()>;
+| Need | rs-matter |
+|---|---|
+| Commissioning | `onboard::Commissioner` (`commission`, `complete_via_case`, `disarm_fail_safe`, `end_pase`) |
+| Discovery | `Transport::browse` over the mDNS backends (Avahi, systemd-resolved, Bonjour, builtin) |
+| BLE | `Btp`, BlueZ `scan` / `run_central` |
+| IM client | `im::client` (read, subscribe, invoke) + the generated cluster clients |
+| Reports to a controller | `ReportDataHandler` |
+| Diagnostic logs | `diag_logs` client + `bdx` |
+| OTA Provider | `ota_prov` cluster + BDX handler, `ota` image header |
+| QR / manual codes | `pairing` (incl. `qr-scan` from pixels) |
+| Persistence | `KvBlobStore`, `DirKvBlobStore` |
 
-    async fn read_health(&self, dev: DeviceHandle, which: DiagSet) -> DeviceHealth;
-    async fn subscribe_health(&self, dev: DeviceHandle, which: DiagSet) -> SubId;
-
-    async fn retrieve_logs(&self, dev: DeviceHandle, intent: LogIntent)
-        -> Result<LogTransfer>;   // progress streamed as events
-
-    async fn identify(&self, dev: DeviceHandle, secs: u16) -> Result<()>; // blink
-    // tags / store
-    async fn set_tags(&self, dev: DeviceHandle, tags: Vec<String>);
-    async fn list_devices(&self, filter: TagFilter) -> Vec<StoredDevice>;
-}
-
-// Events (core → UI), streamed over WS / UniFFI callbacks
-enum Event {
-    CommissionProgress { dev: DeviceHandle, step: CommStep, pct: u8 },
-    LogProgress { transfer: TransferId, received: u64, total: Option<u64> },
-    HealthReport { dev: DeviceHandle, report: DeviceHealth },
-    DeviceState { dev: DeviceHandle, state: Reachability },
-}
-```
-
-The DTOs (`DeviceHealth`, `DiagSet`, `LogIntent`, …) live in `core::model`
-and are the same on every transport.
+matter-peek follows rs-matter `main` and patches it in the workspace until the
+pieces it uses are released.
 
 ---
 
-## 8. Phased plan
+## 6. Portability
 
-**Phase 0 — Vertical spike (validate the core primitives).** *(✅ done — live-validated against rs-matter's `system_tests` accessory; both inline and multi-block BDX log paths proven)*
-A headless Rust CLI (`cli/`) against a real or simulated device:
-commission (ephemeral) → read `sw_diag` + `gen_diag` → retrieve `CrashLogs`
-over BDX → `RemoveFabric`. Proves every hard primitive end-to-end on the dev
-desktop before any API/UI design hardens. Templates: `tests/commissioning.rs`,
-`tests/diag_logs.rs`, `examples/src/bin/system_tests.rs`.
+### `core`, `proto` and `mcp` are `no_std` + `alloc`
 
-Note on the BDX receive: `retrieve_logs` runs a `Responder` wrapping
-`Bdx::new(DiagLogsBdxHandler::new(&receiver))` *concurrently* with sending the
-`RetrieveLogsRequest`, because the device opens a separate BDX upload exchange
-back to the controller while the request is still in flight. Small logs instead
-ride back inline in the response's `log_content` — both paths are handled.
-(Discovery/mDNS is still stubbed — the CLI takes an explicit peer address.)
+They build for bare-metal targets (`riscv32imac-unknown-none-elf`; `core` with
+`--no-default-features`). The rules that keep it so:
+- `#![no_std]` + `extern crate alloc`; `core::net` addresses, `alloc`
+  collections.
+- `core` depends on rs-matter without default features; its `std` feature (pulled
+  in by the hosted mDNS backends and `ble`) re-enables rs-matter's `os`.
+- `core` never creates sockets or opens files: the binary binds the socket and
+  injects the KV store.
 
-**Phase 1 — Core API + RPC + minimal web UI (lock-step).** *(in progress — vertical slice working)*
-Done: the `proto/` wire contract (serde, wasm-friendly), the `rpc/` server (an
-**actor** task owning a per-command Matter stack + transport pump, behind a
-WS/JSON `async-tungstenite`/`async-net` server on one `LocalExecutor`), and a
-Yew/Wasm `web/` UI that runs the full vertical and renders streamed step events
-+ the result. Validated end-to-end (browser-shaped frames → WS → actor → core →
-live `system_tests` device → response, incl. 5000-byte multi-block BDX log)
-via the `rpc` `ws_client` example.
+### Desktop
 
-Chosen contract shape: `ClientMsg{req_id, Request}` → `ServerMsg::{Response,
-Event}`; the first op is `RunVertical{peer_addr, setup_code, policy}`. This is the
-artifact the UniFFI mobile surface will mirror.
+Linux today: the server enables the Avahi backend and BlueZ (`ble`). macOS needs
+the Bonjour backend (`mdns-astro`) selectable from the server, and has no BLE
+central yet; Windows would use the builtin mDNS backend.
 
-**mDNS discovery** is now wired (`core::discovery`): `Controller::discover`
-runs the compiled-in backend concurrently with
-`Transport::browse_commissionable`. Backend is chosen by **cargo feature**
-(`mdns-avahi` default, `mdns-resolve`, `mdns-astro`, `mdns-builtin`) — OS-native
-daemons preferred, `BuiltinMdns` is a fallback (running our own responder on
-:5353 alongside a system daemon is a same-host-test hack, not a deployment
-mode). The CLI takes `discover` (or no addr) to browse instead of an explicit
-address. **Validated**: against the `system_tests` accessory advertising via
-Avahi, `discover` correctly resolves the device + commissionable id over DBus.
+### Mobile (proposed)
 
-Resolved the LAN-PASE issue at its real root, in **rs-matter** (which we
-maintain). Cause: a dual-stack IPv6 socket reports an IPv4 peer's packets to
-`recv_from` as `::ffff:a.b.c.d`, but the same peer is stored on the session as a
-plain `V4` address; `Address` derives `Eq` over the `SocketAddr` *family
-included*, so session lookup (`peer_addr == rx_peer`) failed → "PAKE session not
-found". Fix: rs-matter canonicalizes IPv4-mapped-IPv6 → true IPv4
-(`Address::canonical`, via `IpAddr::to_canonical`) at both the receive boundary
-(UDP/TCP `recv_from`) and session-address storage, so the derived `Eq` matches
-regardless of socket family. matter-peek keeps a single dual-stack `[::]:0`
-socket (no per-family socket, no `::ffff` mapping). Validated: full
-`discover → commission → diagnostics → 5 KB BDX log → RemoveFabric` over the real
-LAN interface against an Avahi-advertising IPv4 `system_tests` accessory.
+The API is already a message protocol with an in-process transport, so mobile
+binds to the same service rather than to the core:
+1. Move the service (actor, conversions, in-process client) out of `rpc` into
+   its own crate, with the store directory, socket and backends injected; `rpc`
+   keeps the WebSocket server.
+2. A `uniffi` crate over it: a session with an async `call(Request) -> Response`
+   and an event callback; UniFFI derives on the `proto` types behind a feature.
+3. Platform pieces behind it:
+   - BLE: a GATT central in Swift (CoreBluetooth) / Kotlin, feeding BTP through
+     `Btp::process_incoming` / `process_outgoing` (public in rs-matter).
+   - mDNS: Bonjour (`mdns-astro`) on iOS; the builtin backend with a
+     `MulticastLock` on Android, or an `NsdManager` backend.
+   - iOS: the local network permission and `NSBonjourServices`; subscriptions
+     only while in the foreground.
+4. UI: SwiftUI / Jetpack Compose, or first the existing web UI in a WebView
+   talking to the in-process service.
+5. Later: the Apple MatterSupport / Google Home Mobile SDK hand-off.
 
-Also fixed (same rs-matter branch): mDNS discovery now **prefers IPv6, falling
-back to IPv4**, across all four backends. rs-matter already had a central
-`score_ip_address` (link-local → ULA → global IPv6 → IPv4) but the backends
-deposited only one address, so the scorer never saw the alternative. Now: avahi
-resolves both families (INET6+INET) and deposits both; resolve/astro deposit all
-resolved addresses; zeroconf (one address per callback) is handled in the
-transport rendezvous, which keeps the better-scoring address across deposits.
-Validated: discovery now resolves the device's ULA IPv6 (`fdb5:…`) rather than
-IPv4; the canonicalization fix still covers genuinely IPv4-only devices.
+### Embedded (later)
 
-(rs-matter changes are on a local `canonicalize-peer-addr` branch — peer-address
-canonicalization + IPv6-preferring discovery; matter-peek patches `rs-matter` to
-the local clone until they land on `next`.)
+An esp32 could host the service with an `edge-http`/`edge-ws` shell instead of
+the desktop one. That needs the service itself `no_std`: today it uses `std`
+collections, files (store lock, OTA images), `UdpSocket` and the `image` crate,
+so it is a real port, not a re-shelling. Deferred until there is hardware to
+validate against.
 
-Discovery is now **surfaced in the web UI**: a `Discover` proto op (with optional
-discriminator filter) → the actor's `discover_all` loops `browse_commissionable`
-with an `exclude` set to enumerate up to N devices → a `Discovered` pick-list. The
-Yew UI shows a "Discover devices" button + discriminator field and renders the
-results with a "Use" button that fills the peer address. Validated end-to-end via
-the `ws_client discover` example: returns both LAN devices, IPv6-preferred (our
-accessory's ULA + the other device's link-local `fe80::`).
+---
 
-Still to do in Phase 1: `Persistent` policy + local store + tags + Identify-blink
-+ re-sync handling.
+## 7. Roadmap
 
-**Phase 2 — Health dashboard + subscriptions.**
-Live diagnostics via subscription report listening; tag-based filtering UI;
-uptime / crash-count stats computed in core.
+**Done**: commissioning over IP and BLE (Wi-Fi), discovery, QR from a picture;
+inventory with remember, tags and sync; one-shot and live health; diagnostic
+logs; identify; OTA Provider and updates; decommission; web UI, CLI and MCP on
+one API.
 
-**Phase 3 — Mobile via UniFFI.**
-`uniffi/` over the same `core::api`; SwiftUI + Jetpack Compose UIs;
-Google Home Mobile SDK / Apple MatterSupport app-to-app handoff for
-frictionless commissioning.
+**Next**
+- Network diagnostics (Ethernet, Wi-Fi, Thread; network interfaces) and network
+  management (the networks a device knows; add / remove / update), then
+  migrating devices to a new Wi-Fi.
+- Device types (and card icons) and a data-model browser: endpoints, clusters,
+  attributes, commands. Needs id → name tables from rs-matter's codegen, and
+  subscriptions per set of paths rather than one fixed set.
+- Sharing a device: opening a basic or enhanced commissioning window and showing
+  its pairing code and QR code.
+- Commissioning progress (percent and stage) from rs-matter's `Commissioner`,
+  with questions back to the user (attestation failed or test device: continue?
+  a retryable step failed: retry?).
+- BLE commissioning onto Thread (in the API, not yet tried on a device).
 
-**Phase 4 — Consent-gated cloud upload.**
-Implement the `core` upload seam: push fetched logs/core-dumps to a vendor
-endpoint over HTTPS with explicit user consent. Pluggable per-vendor crash
+**Platforms**: the service crate split, then mobile (above); macOS desktop.
+
+**Later**: consent-gated upload of logs and crash dumps; per-vendor crash
 parsers.
 
 ---
 
-## 9. Key risks / things to watch
-- **mDNS on Linux desktop** colliding with host avahi (see prior project
-  notes on hub flakiness) — validate discovery early in Phase 0.
-- **Subscription post-establishment reports** need a listener abstraction on
-  top of `im::client` — confirm feasibility before promising a live dashboard.
-- **"Too broken to pair"** devices under the ephemeral model — document the
-  limitation; recommend persistent policy for flaky hardware.
-- **Fabric-slot exhaustion** — orphan cleanup before `AddNOC` is mandatory in
-  the persistent path.
-- **UniFFI async** bridging for long-running commission/BDX flows — proven by
-  Mozilla but worth a spike before Phase 3.
+## 8. Risks
 
----
-
-## 10. Immediate next step
-Per decision: this document first. On approval, proceed to **Phase 0** (the
-vertical spike) to de-risk the core primitives before committing the API shape.
-```
-```
+- **rs-matter `main`**: matter-peek depends on unreleased rs-matter, patched in
+  the workspace.
+- **mDNS** behaves differently per host daemon; operational resolves need the
+  backend running all the time.
+- **Devices that misreport** their commissioning flow or reporting behavior;
+  the flows fall back rather than trust them.
+- **Fabric slots**: the orphan sweep reclaims ours; clearing the store without
+  decommissioning still strands them on devices that are offline at the time.
+- **The service** keeps growing in one file (`actor.rs`); split it when it moves
+  to its own crate.
+- **UniFFI** async calls and callback interfaces for long flows: spike before
+  committing the mobile shape.

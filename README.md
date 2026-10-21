@@ -6,7 +6,7 @@ via the standard diagnostic clusters, and pull **Diagnostic Logs** (crash dumps
 / logs) over BDX.
 
 Built as a native Rust core over [`rs-matter`](https://github.com/project-chip/rs-matter),
-with a web UI for desktop validation and (later) native mobile UIs via UniFFI.
+with a web UI, a CLI and an MCP server on one API, and (later) mobile apps via UniFFI.
 
 See [`DESIGN.md`](DESIGN.md) for the full architecture and roadmap.
 
@@ -26,7 +26,7 @@ rpc/    matter-peek-rpc — the API over the core: the actor, the WS server
 cli/    the command line, over the API (binary: matter-peek)
 mcp/    the MCP server for AI agents, over the API (binary: matter-peek-mcp)
 web/    matter-peek-web — Yew/Wasm web UI (WS/JSON client; separate wasm crate)
-uniffi/ mobile bindings over the core           (Phase 3)
+uniffi/ mobile bindings over the API            (later)
 ```
 
 Everything goes through the API. The web UI and the MCP server talk to a

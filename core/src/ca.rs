@@ -5,7 +5,7 @@
 //! working, *and* the CA **signing key** so it can still mint NOCs for *new*
 //! devices after a restart.
 //!
-//! Division of persistence (see `docs/phase1-persistence.md`):
+//! Division of persistence:
 //! - The **fabric** (operational key, NOC, RCAC, ICAC, IPK) is persisted by
 //!   rs-matter itself (`Matter::load_persist` / `FabricPersist`). It is enough to
 //!   re-address commissioned devices over CASE.
