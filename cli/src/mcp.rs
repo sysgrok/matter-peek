@@ -86,25 +86,35 @@ pub async fn serve(server: Option<String>, allow_mutate: bool) -> io::Result<()>
         if allow_mutate { "ENABLED" } else { "disabled" }
     );
 
-    stdio_loop(&dispatch(server)?, Caps { allow_mutate }).await
+    stdio_loop(&dispatch(server).await?, Caps { allow_mutate }).await
 }
 
 /// The API, for an agent: through the server at `server`, else through a
 /// controller started in this process now, so that a store held by another
-/// process fails here and the device list syncs before the first tool call.
-pub(crate) fn dispatch(server: Option<String>) -> io::Result<ApiDispatch> {
-    let conn = match &server {
-        Some(_) => None,
+/// process fails here, and synced, so that the first tool call sees the
+/// devices on our fabric that are not remembered too.
+pub(crate) async fn dispatch(server: Option<String>) -> io::Result<ApiDispatch> {
+    let Some(url) = server else {
         // Long-lived, like a server: keep the device list in sync.
-        None => Some(Rc::new(client::connect_in_process(PeekConfig {
+        let conn = client::connect_in_process(PeekConfig {
             store_dir: None,
             periodic_sync: true,
-        })?)),
+        })?;
+        let dispatch = ApiDispatch {
+            url: None,
+            conn: RefCell::new(Some(Rc::new(conn))),
+        };
+
+        if let Err(e) = dispatch.dispatch(wire::Request::Sync).await {
+            warn!("the first sync failed: {e}");
+        }
+
+        return Ok(dispatch);
     };
 
     Ok(ApiDispatch {
-        url: server,
-        conn: RefCell::new(conn),
+        url: Some(url),
+        conn: RefCell::new(None),
     })
 }
 

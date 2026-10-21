@@ -19,7 +19,6 @@ use matter_peek_core::api::agent::openai::OpenAi;
 use matter_peek_core::api::agent::{Agent, AgentListener, Http, Provider, Think, ToolCall, Usage};
 use matter_peek_core::api::mcp::{Caps, Dispatch};
 use matter_peek_core::api::platform::data_dir;
-use matter_peek_core::api::wire;
 
 use crate::mcp;
 
@@ -55,18 +54,11 @@ pub async fn chat(server: Option<String>, args: ChatArgs) -> io::Result<()> {
     let caps = Caps {
         allow_mutate: args.allow_mutate,
     };
-    let embedded = server.is_none();
-    let dispatch = mcp::dispatch(server)?;
-
     let terminal = Terminal::new(args.show_thinking, args.verbose);
-    if embedded {
-        // A controller started now lists only the remembered devices until a
-        // sync finds the others.
+    if server.is_none() {
         terminal.note("Looking for the devices on our fabric…");
-        if let Err(e) = dispatch.dispatch(wire::Request::Sync).await {
-            terminal.note(&format!("The sync failed: {e}"));
-        }
     }
+    let dispatch = mcp::dispatch(server).await?;
 
     let mut agent = Agent::new(provider, dispatch, caps, args.think);
 

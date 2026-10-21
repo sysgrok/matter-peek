@@ -94,6 +94,10 @@ Claude Desktop (`claude_desktop_config.json`):
 Add `"--allow-mutate"` to `args` only when the agent may change devices, and
 `"--server", "ws://127.0.0.1:8087"` (before `mcp`) to go through a running server.
 
+To see what a strong model makes of the tools alone, `scripts/claude-eval.sh`
+runs Claude Code with only these tools: no auto-memory, CLAUDE.md, user
+settings or Claude Code tools of its own.
+
 ### Chat (an AI agent in the terminal)
 
 `matter-peek chat` asks an AI model about the devices: the model looks into
