@@ -15,13 +15,6 @@
 //! - UniFFI bindings (mobile — later).
 //!
 //! See `DESIGN.md` at the workspace root for the full architecture.
-//!
-//! ## Status: Phase 0 (vertical spike)
-//!
-//! Only the `controller::commission` primitive is wired end-to-end so far,
-//! against an externally-running Matter accessory. `diagnostics` and `logs`
-//! carry the intended signatures over the real `rs-matter` APIs and are filled
-//! in next.
 
 #![no_std]
 

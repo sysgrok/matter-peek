@@ -52,16 +52,16 @@ pub enum ServerMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    /// Run the full Phase 0 vertical against a manually-addressed device:
-    /// commission → read health → retrieve `CrashLogs` → decommission.
-    /// Progress arrives as [`Event`]s; the final [`Response::Vertical`] carries
-    /// the assembled result.
-    RunVertical {
-        /// e.g. `"[::1]:5540"`.
+    /// **Commission** the device at `peer_addr` onto our fabric. It is listed
+    /// from then on; `remember` also keeps a record of it (see
+    /// [`Request::Remember`]). Progress arrives as [`Event::Step`]s; the final
+    /// [`Response::Commissioned`] carries the result.
+    Commission {
+        /// e.g. `"[fdb5::1]:5540"`.
         peer_addr: String,
         /// The device's passcode, manual pairing code or QR code payload.
         setup_code: String,
-        policy: FabricPolicy,
+        remember: bool,
     },
     /// Browse the local network for commissionable devices via mDNS, returning a
     /// pick-list. Optional `discriminator` narrows to a single device (useful
@@ -75,17 +75,20 @@ pub enum Request {
         /// Stop after this many matches (the UI caps the list).
         max: u8,
     },
-    /// List the devices the controller has persistently commissioned (from the
-    /// local store). The basis for the persistent-fabric device list UI.
+    /// List the devices on our fabric: the remembered ones (also while offline),
+    /// plus the others commissioned or found by a sync since the server started.
+    /// Answered with [`Response::Devices`].
     ListDevices,
-    /// Re-address an already-commissioned (persisted) device by its NodeID over a
-    /// fresh CASE session — no re-commissioning — and read its health (+ optional
-    /// `CrashLogs`). Returns [`Response::Peek`].
-    PeekDevice { node_id: u64, with_logs: bool },
-    /// Ask a persisted device to physically identify itself (blink/beep) for
+    /// Re-address a listed device by its NodeID over a fresh CASE session — no
+    /// re-commissioning — and read its health. Returns [`Response::Peek`].
+    PeekDevice { node_id: u64 },
+    /// Retrieve a diagnostic log of the given kind from a listed device.
+    /// Answered with [`Response::Logs`].
+    RetrieveLogs { node_id: u64, intent: LogIntent },
+    /// Ask a listed device to physically identify itself (blink/beep) for
     /// `secs` seconds via the Identify cluster — the "which unit is this?" UX.
     Identify { node_id: u64, secs: u16 },
-    /// Start a **live health subscription** to a persisted device. Answered
+    /// Start a **live health subscription** to a listed device. Answered
     /// **immediately** with [`Response::Subscribed`]; the health data then streams
     /// independently as [`Event::HealthReport`] frames (keyed by `node_id`), and
     /// connection health as [`Event::SubscriptionState`], until a matching
@@ -102,33 +105,36 @@ pub enum Request {
     /// Idempotent — unsubscribing a device that isn't subscribed still succeeds.
     /// Answered with [`Response::Ok`].
     Unsubscribe { node_id: u64 },
-    /// **Decommission** a persisted device: `RemoveFabric` our fabric on the
-    /// device (over CASE) and drop it from the local store. Answered with the
-    /// refreshed [`Response::Devices`] list.
+    /// **Decommission** a listed device: `RemoveFabric` our fabric on the device
+    /// (over CASE) and drop it from the list, and its record if remembered.
+    /// Answered with the refreshed [`Response::Devices`] list.
     ///
-    /// The device is contacted over CASE, retried a few times. If it stays
-    /// unreachable, its record is kept as pending removal, which a
-    /// [`Request::Sync`] completes once the device advertises again. `force`
-    /// drops the record without contacting the device; a device that still holds
-    /// our fabric then shows up again on the next sync.
+    /// The device is contacted over CASE, retried for up to 30 s. It leaves the
+    /// list even if it stays unreachable, or with `force` is not contacted at
+    /// all; a device that still holds our fabric then shows up again on the
+    /// next [`Request::Sync`].
     Decommission { node_id: u64, force: bool },
-    /// Re-sync the device list with the devices on our fabric: adopt the ones we
-    /// have no record of, refresh the others' identity, complete pending
-    /// removals, and note which are online. Also runs periodically. Answered with
-    /// the refreshed [`Response::Devices`] list.
+    /// Re-sync the device list with the devices on our fabric: list the ones
+    /// not listed yet, refresh the others' identity, and note which are online.
+    /// Records are not created; see [`Request::Remember`]. Also runs at startup
+    /// and periodically. Answered with the refreshed [`Response::Devices`] list.
     Sync,
-    /// Replace the local tag set of a stored device (controller-local metadata
-    /// for filtering/grouping; never touches the device). The server normalizes
-    /// (trim / drop empties / de-dup) and answers with the refreshed
+    /// **Remember** a listed device: keep a record of it, so it can be tagged
+    /// and stays listed while offline and across restarts. Answered with the
+    /// refreshed [`Response::Devices`] list.
+    Remember { node_id: u64 },
+    /// Replace the local tag set of a remembered device (controller-local
+    /// metadata for filtering/grouping; never touches the device). The server
+    /// normalizes (trim / drop empties / de-dup) and answers with the refreshed
     /// [`Response::Devices`] list.
     SetTags { node_id: u64, tags: Vec<String> },
-    /// Request cancellation of the in-flight vertical (commission flow). Handled
+    /// Request cancellation of the in-flight commission. Handled
     /// out-of-band (it does not queue behind the running command): the server
-    /// sets a cancel flag the vertical polls at phase boundaries. Cancellation
+    /// sets a cancel flag the commission polls at phase boundaries. Cancellation
     /// only takes effect at a *safe* point — before the device fabric is
     /// installed it aborts cleanly; once installed, the device is decommissioned
     /// (RemoveFabric) so nothing is left orphaned. Answered immediately with
-    /// [`Response::Ok`]; the cancelled vertical itself replies
+    /// [`Response::Ok`]; the cancelled commission itself replies
     /// [`Response::Cancelled`].
     Cancel,
     /// List the stored OTA images. Answered with [`Response::OtaImages`].
@@ -149,7 +155,7 @@ pub enum Request {
     OtaUploadEnd { upload_id: u32 },
     /// Delete stored OTA image `name`. Answered with [`Response::OtaImages`].
     OtaDelete { name: String },
-    /// Update a stored device to OTA image `name`: allow it that image, and
+    /// Update a listed device to OTA image `name`: allow it that image, and
     /// announce us to it as its OTA Provider. Answered with [`Response::Ok`] once
     /// announced; progress follows as [`Event::OtaProgress`] frames.
     OtaUpdate { node_id: u64, name: String },
@@ -159,18 +165,17 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {
-    /// The vertical completed (possibly with per-step soft failures recorded in
-    /// the payload — e.g. logs unavailable on a device that has none).
-    Vertical(VerticalResult),
+    /// The commission completed.
+    Commissioned(CommissionResult),
     /// Devices found by a [`Request::Discover`] (possibly empty).
     Discovered { devices: Vec<DiscoveredDevice> },
-    /// The controller's persistently-commissioned devices (from the store).
+    /// The devices on our fabric (see [`Request::ListDevices`]).
     ///
     /// `notice` carries a non-fatal remark about the operation that produced the
     /// list — e.g. that a decommission dropped the record locally without being
     /// able to reach the device. `None` for a plain listing.
     Devices {
-        devices: Vec<StoredDeviceInfo>,
+        devices: Vec<DeviceInfo>,
         #[serde(default)]
         notice: Option<String>,
     },
@@ -178,11 +183,17 @@ pub enum Response {
     Peek {
         handle: DeviceHandle,
         health: DeviceHealth,
-        crash_log_bytes: Option<usize>,
+    },
+    /// A log retrieved by [`Request::RetrieveLogs`], base64-encoded in `data`;
+    /// empty if the device has none of that kind.
+    Logs {
+        node_id: u64,
+        intent: LogIntent,
+        data: String,
     },
     /// A [`Request::Identify`] / other fire-and-forget op succeeded.
     Ok,
-    /// The in-flight vertical was cancelled at a safepoint. `decommissioned` is
+    /// The in-flight commission was cancelled at a safepoint. `decommissioned` is
     /// `true` if the device had already been given our fabric and was therefore
     /// cleaned up (RemoveFabric) on the way out; `false` if cancellation landed
     /// before any device state was created.
@@ -208,10 +219,10 @@ pub enum Response {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
-    /// A step of the vertical started / finished.
+    /// A step of a commission started / finished.
     Step {
         req_id: ReqId,
-        step: VerticalStep,
+        step: CommissionStep,
         status: StepStatus,
     },
     /// A live health snapshot from an active subscription, keyed by `node_id`
@@ -284,11 +295,17 @@ pub enum SubscriptionState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum VerticalStep {
+pub enum CommissionStep {
     Commission,
-    ReadHealth,
-    RetrieveLogs,
-    Decommission,
+}
+
+/// The kinds of diagnostic log a device may keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogIntent {
+    EndUserSupport,
+    NetworkDiag,
+    CrashLogs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -303,13 +320,6 @@ pub enum StepStatus {
 // Domain payloads (mirror matter-peek-core's model, with serde)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FabricPolicy {
-    Persistent,
-    Ephemeral,
-}
-
 /// Identifies a commissioned device on our fabric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceHandle {
@@ -322,16 +332,16 @@ pub struct DeviceHandle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveredDevice {
     /// Operational address as a string (e.g. `"[fdb5:…]:5540"`), ready to feed
-    /// back into [`Request::RunVertical`].
+    /// back into [`Request::Commission`].
     pub addr: String,
     /// The commissionable instance id from the advertisement (stable per device
     /// while its commissioning window is open).
     pub commissionable_id: u64,
 }
 
-/// A device the controller has persistently commissioned (from the local store).
+/// A device on our fabric, as listed by [`Response::Devices`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StoredDeviceInfo {
+pub struct DeviceInfo {
     pub handle: DeviceHandle,
     /// BasicInformation `UniqueID` (stable across resets).
     pub unique_id: String,
@@ -354,15 +364,14 @@ pub struct StoredDeviceInfo {
     /// Per-model numeric fingerprint (vendor/product/hw/sw), for display + the
     /// re-match link suggestion.
     pub fingerprint: Fingerprint,
-    /// Local user tags for filtering/grouping.
+    /// Local user tags for filtering/grouping; only a remembered device has any.
     pub tags: Vec<String>,
     /// Whether the device advertised on our fabric at the last sync; `None`
     /// before the first one.
     #[serde(default)]
     pub online: Option<bool>,
-    /// Our fabric is to be removed from it once it is reachable again.
-    #[serde(default)]
-    pub pending_removal: bool,
+    /// Whether we keep a record of the device (see [`Request::Remember`]).
+    pub remembered: bool,
 }
 
 /// The numeric BasicInformation fingerprint, mirrored for the wire.
@@ -374,17 +383,12 @@ pub struct Fingerprint {
     pub software_version: Option<u32>,
 }
 
-/// The full result of a vertical run, as shown in the UI.
+/// The result of a commission, as shown in the UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerticalResult {
+pub struct CommissionResult {
     pub handle: DeviceHandle,
-    pub health: DeviceHealth,
-    /// Size in bytes of the retrieved `CrashLogs`, if retrieval succeeded.
-    pub crash_log_bytes: Option<usize>,
-    /// Whether the fabric was removed afterward (ephemeral policy).
-    pub decommissioned: bool,
-    /// Set when the just-commissioned device's *per-model fingerprint* matched an
-    /// existing stored device (but no per-unit id did): the `node_id` of that
+    /// Set when the just-remembered device's *per-model fingerprint* matched an
+    /// existing remembered device (but no per-unit id did): the `node_id` of that
     /// existing device, offered to the UI as a "link these?" suggestion. `None`
     /// when the device was an exact re-match (auto-merged) or genuinely new.
     pub rematch_candidate: Option<u64>,

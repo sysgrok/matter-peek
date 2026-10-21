@@ -39,6 +39,8 @@ matter-peek-proto = { path = "../proto" }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 log = { version = "0.4", default-features = false }
+# OTA image uploads go to the actor base64-encoded.
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 
 # --- std binary glue (behind the `std` feature). ---
 # MCP-over-stdio is just JSON-RPC 2.0 over newline-delimited stdin/stdout; the

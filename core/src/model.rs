@@ -8,20 +8,6 @@ use core::num::NonZeroU8;
 
 extern crate alloc;
 
-/// How long the controller's fabric (NOC) lives on the device.
-///
-/// Both models share the same commission / read / fetch primitives; only the
-/// before/after lifecycle differs. See `DESIGN.md` §5.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FabricPolicy {
-    /// Commission once and keep the NOC on the device. Repeat access is a cheap
-    /// CASE session. Requires local identity persistence + re-sync handling.
-    Persistent,
-    /// Commission on a throwaway fabric, do the work, then `RemoveFabric`
-    /// (self-destruct). Nothing persisted locally.
-    Ephemeral,
-}
-
 /// Which diagnostic clusters to read in a health snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiagSet {
@@ -65,10 +51,10 @@ pub struct DeviceHandle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommissionOutcome {
     pub handle: DeviceHandle,
-    pub policy: FabricPolicy,
 }
 
-/// A persistently-commissioned device, as held in the local store.
+/// A device on our fabric, as the controller knows it: from the local store
+/// when remembered, else from this run only.
 ///
 /// Identity (`unique_id`/`serial_number`) is read from BasicInformation at
 /// commission time and is what lets us re-match a device after a factory reset
@@ -93,9 +79,6 @@ pub struct StoredDevice {
     pub fingerprint: DeviceFingerprint,
     /// Local user tags for filtering/grouping.
     pub tags: alloc::vec::Vec<alloc::string::String>,
-    /// Our fabric is to be removed from the device, which could not be reached
-    /// when asked; a sync does it once the device advertises again.
-    pub pending_removal: bool,
 }
 
 /// Device identity read from the BasicInformation cluster at commission time.
@@ -276,7 +259,6 @@ mod tests {
             product_name: "".to_string(),
             fingerprint,
             tags: vec!["keep-me".to_string()],
-            pending_removal: false,
         }
     }
 

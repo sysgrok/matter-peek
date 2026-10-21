@@ -24,6 +24,7 @@ use core::cell::RefCell;
 use core::num::NonZeroU8;
 
 use embassy_futures::select::{select, Either};
+use embassy_time::{with_timeout, Duration};
 
 use log::{debug, info};
 
@@ -31,9 +32,9 @@ use rs_matter::bdx::{Bdx, BdxReader};
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::decl::diagnostic_logs::DiagnosticLogsClient as _;
 use rs_matter::dm::clusters::diag_logs::client::{DiagLogsBdxHandler, DiagLogsReceiver};
-use rs_matter::dm::clusters::diag_logs::{IntentEnum, TransferProtocolEnum};
+use rs_matter::dm::clusters::diag_logs::{IntentEnum, StatusEnum, TransferProtocolEnum};
 use rs_matter::dm::EndptId;
-use rs_matter::error::Error;
+use rs_matter::error::{Error, ErrorCode};
 use rs_matter::respond::Responder;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::utils::sync::Notification;
@@ -46,6 +47,9 @@ use alloc::vec::Vec;
 
 /// The root node endpoint, where the Diagnostic Logs cluster lives.
 const ROOT_ENDPOINT: EndptId = 0;
+
+/// How long to wait for a log the device is to push over BDX.
+const BDX_PUSH_TIMEOUT_SECS: u64 = 60;
 
 /// The file designator we name in the request; the device echoes it back on the
 /// BDX transfer so the receiver can correlate.
@@ -160,26 +164,34 @@ async fn request_and_collect<C: Crypto>(
         })
         .await?;
 
-    // Inline content (small logs ride back in the response itself).
+    // A small log rides back in the response itself. `Success` with no content
+    // means the device is pushing it over BDX instead.
     let inline = {
         let resp = handle.response()?;
-        let content = resp.log_content()?;
-        if content.is_empty() {
-            None
-        } else {
-            Some(content.to_vec())
+        match resp.status()? {
+            StatusEnum::NoLogs => Ok(Some(Vec::new())),
+            StatusEnum::Busy => Err(ErrorCode::Busy),
+            StatusEnum::Denied => Err(ErrorCode::UnsupportedAccess),
+            _ => {
+                let content = resp.log_content()?;
+                Ok((!content.is_empty()).then(|| content.to_vec()))
+            }
         }
     };
     handle.complete().await?;
 
-    if let Some(bytes) = inline {
+    if let Some(bytes) = inline? {
         info!("retrieved {} bytes inline", bytes.len());
         return Ok(bytes);
     }
 
-    // Otherwise the device pushes over BDX; wait for the receiver to drain it.
     debug!("no inline content; awaiting BDX push");
-    receiver.done.wait().await;
+    with_timeout(
+        Duration::from_secs(BDX_PUSH_TIMEOUT_SECS),
+        receiver.done.wait(),
+    )
+    .await
+    .map_err(|_| Error::from(ErrorCode::RxTimeout))?;
     let bytes = receiver.data.borrow().clone();
     info!("retrieved {} bytes over BDX", bytes.len());
     Ok(bytes)

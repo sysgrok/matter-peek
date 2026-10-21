@@ -49,9 +49,9 @@ pub fn handle(h: core::DeviceHandle) -> proto::DeviceHandle {
     }
 }
 
-/// A stored device for the wire; `online` is whether it advertised on our fabric
-/// at the last sync (`None` before the first one).
-pub fn stored_device(d: core::StoredDevice, online: Option<bool>) -> proto::StoredDeviceInfo {
+/// A device for the wire; `online` is whether it advertised on our fabric at the
+/// last sync (`None` before the first one), `remembered` whether it has a record.
+pub fn device(d: core::StoredDevice, online: Option<bool>, remembered: bool) -> proto::DeviceInfo {
     let vid = d.fingerprint.vendor_id;
 
     // Resolve a ready-to-show vendor label once, server-side, so the UI needs no
@@ -68,7 +68,7 @@ pub fn stored_device(d: core::StoredDevice, online: Option<bool>) -> proto::Stor
     };
     let is_test_vendor = vid.map(core::vendors::is_test_vendor).unwrap_or(false);
 
-    proto::StoredDeviceInfo {
+    proto::DeviceInfo {
         handle: handle(d.handle),
         unique_id: d.unique_id,
         serial_number: d.serial_number,
@@ -85,14 +85,15 @@ pub fn stored_device(d: core::StoredDevice, online: Option<bool>) -> proto::Stor
         },
         tags: d.tags,
         online,
-        pending_removal: d.pending_removal,
+        remembered,
     }
 }
 
-pub fn policy(p: proto::FabricPolicy) -> core::FabricPolicy {
-    match p {
-        proto::FabricPolicy::Persistent => core::FabricPolicy::Persistent,
-        proto::FabricPolicy::Ephemeral => core::FabricPolicy::Ephemeral,
+pub fn log_intent(intent: proto::LogIntent) -> core::LogIntent {
+    match intent {
+        proto::LogIntent::EndUserSupport => core::LogIntent::EndUserSupport,
+        proto::LogIntent::NetworkDiag => core::LogIntent::NetworkDiag,
+        proto::LogIntent::CrashLogs => core::LogIntent::CrashLogs,
     }
 }
 

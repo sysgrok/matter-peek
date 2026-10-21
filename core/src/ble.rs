@@ -60,7 +60,7 @@ use rs_matter::utils::zbus::Connection;
 use rs_matter::Matter;
 
 use crate::ca::ControllerCa;
-use crate::model::{CommissionOutcome, DeviceHandle, FabricPolicy};
+use crate::model::{CommissionOutcome, DeviceHandle};
 
 /// Fail-safe duration armed for the whole BLE→Thread flow.
 ///
@@ -112,7 +112,6 @@ pub use rs_matter::dm::clusters::net_comm::WirelessCreds;
 ///   device's actual network type. Pass `None` for an Ethernet device, which is
 ///   already on its network and needs no network commissioning at all.
 /// - `udp`: a bound UDP socket for phase B (the IP transport). `[::]:0` works.
-/// - `policy`: recorded on the outcome (ephemeral self-destruct is the caller's).
 #[allow(clippy::too_many_arguments)]
 pub async fn commission_ble<C, S>(
     matter: &Matter<'_>,
@@ -124,7 +123,6 @@ pub async fn commission_ble<C, S>(
     device_node_id: u64,
     creds: Option<&WirelessCreds<'_>>,
     udp: &S,
-    policy: FabricPolicy,
 ) -> Result<CommissionOutcome, Error>
 where
     C: Crypto,
@@ -242,7 +240,6 @@ where
             fabric_index: controller_fab_idx,
             node_id: phase1.device_node_id,
         },
-        policy,
     })
 }
 

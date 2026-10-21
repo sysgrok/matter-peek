@@ -1,11 +1,11 @@
 //! matter-peek web UI (Yew/Wasm).
 //!
-//! A WS/JSON client over the [`matter_peek_proto`] contract. Phase 1 slice:
-//! enter a peer address + setup code, run the full vertical (commission → health
-//! → CrashLogs → decommission) on the RPC server, and render streamed step
-//! events plus the final result.
+//! A WS/JSON client over the [`matter_peek_proto`] contract: the devices on our
+//! fabric with their live health, logs and updates; commissioning (with mDNS
+//! discovery); and the OTA images.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 use futures::{SinkExt, StreamExt};
 use gloo_net::websocket::{futures::WebSocket, Message};
@@ -19,7 +19,7 @@ const WS_URL: &str = "ws://127.0.0.1:8087";
 
 #[derive(Clone, PartialEq)]
 struct StepLine {
-    step: proto::VerticalStep,
+    step: proto::CommissionStep,
     status: proto::StepStatus,
 }
 
@@ -55,9 +55,8 @@ enum SubConn {
 /// Which top-level tab is showing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
-    Discover,
-    Commission,
     Devices,
+    Commission,
     Updates,
 }
 
@@ -69,27 +68,36 @@ enum Msg {
     PeerAddr(String),
     SetupCode(String),
     DiscoverFilter(String),
-    Persistent(bool),
-    Run,
+    /// Whether to remember the device being commissioned.
+    SetRemember(bool),
+    Commission,
     /// Proceed with a commission despite the "already commissioned this address"
     /// warning (the user confirmed).
-    RunAnyway,
-    /// Dismiss the re-commission warning without running.
+    CommissionAnyway,
+    /// Dismiss the re-commission warning without commissioning.
     DismissRecommission,
     /// User clicked Cancel (or the timeout fired) — request server-side cancel.
     Cancel,
+    /// Open the discovery popup and scan.
+    OpenDiscover,
+    CloseDiscover,
     Discover,
     PickDevice(String),
     ListDevices,
     /// Re-sync the device list with the devices on our fabric.
     Sync,
-    /// Re-read a stored device's health now (one-shot) and update its card panel.
+    /// Re-read a device's health now (one-shot) and update its card panel.
     Refresh(u64),
     Identify(u64),
-    /// Decommission a stored device (RemoveFabric + drop the local record).
+    /// Keep a record of a device, so it can be tagged.
+    Remember(u64),
+    /// Decommission a device (RemoveFabric + drop it from the list).
     Decommission(u64),
-    /// Drop a device pending removal from the list, without contacting it.
-    Forget(u64),
+    /// Open the logs popup of a device.
+    OpenLogs(u64),
+    CloseLogs,
+    /// Retrieve a log of the device whose logs popup is open.
+    FetchLogs(proto::LogIntent),
     /// A live health update arrived for a subscribed device (node_id, health).
     /// Deltas are merged into that device's running view.
     HealthReport(u64, proto::DeviceHealth),
@@ -133,24 +141,25 @@ struct App {
     setup_code: String,
     /// Discovery filter: a discriminator or a setup code (empty = any).
     discover_filter: String,
-    /// Commission persistently (keep the device on our fabric + in the store)
-    /// rather than the throwaway ephemeral fabric.
-    persistent: bool,
+    /// Remember the device being commissioned (keep a record of it).
+    remember: bool,
     running: bool,
+    /// The discovery popup is showing.
+    discover_open: bool,
     discovering: bool,
-    /// A persistent-device op (list / peek / identify) is in flight.
+    /// A device op (list / peek / identify / …) is in flight.
     busy_stored: bool,
     discovered: Vec<proto::DiscoveredDevice>,
-    /// The controller's persistently-commissioned devices (from the store).
-    stored: Vec<proto::StoredDeviceInfo>,
+    /// The devices on our fabric.
+    stored: Vec<proto::DeviceInfo>,
     /// Per-device tag-input text (node_id → comma-separated edit buffer). Seeded
     /// from the device's current tags when the list arrives.
     tag_inputs: HashMap<u64, String>,
-    /// Filter the stored list to devices whose tags contain this substring.
+    /// Filter the device list to devices whose tags contain this substring.
     tag_filter: String,
     steps: Vec<StepLine>,
     result: Option<proto::Response>,
-    /// Transient status line for stored-device ops (peek result / identify ack).
+    /// Transient status line for device ops (list size / identify ack).
     stored_status: Option<String>,
     /// Live health subscriptions, keyed by device `node_id`. Multiple devices can
     /// be watched at once, each with its own running panel. An entry exists for as
@@ -176,7 +185,19 @@ struct App {
     ota_choice: HashMap<u64, String>,
     /// How each device's update goes (node_id → status line).
     ota_status: HashMap<u64, String>,
+    /// The logs popup, when open.
+    logs: Option<LogsView>,
     error: Option<String>,
+}
+
+/// The logs popup of one device.
+struct LogsView {
+    node_id: u64,
+    /// The log being retrieved or shown.
+    intent: Option<proto::LogIntent>,
+    loading: bool,
+    /// The retrieved log, base64-encoded as it came.
+    data: Option<String>,
 }
 
 impl Component for App {
@@ -185,12 +206,13 @@ impl Component for App {
 
     fn create(_ctx: &Context<Self>) -> Self {
         Self {
-            tab: Tab::Discover,
-            peer_addr: "[::1]:5540".into(),
+            tab: Tab::Devices,
+            peer_addr: String::new(),
             setup_code: "20202021".into(),
             discover_filter: String::new(),
-            persistent: false,
+            remember: false,
             running: false,
+            discover_open: false,
             discovering: false,
             busy_stored: false,
             discovered: Vec::new(),
@@ -208,6 +230,7 @@ impl Component for App {
             ota_images: Vec::new(),
             ota_choice: HashMap::new(),
             ota_status: HashMap::new(),
+            logs: None,
             error: None,
         }
     }
@@ -272,53 +295,41 @@ impl Component for App {
             }
             Msg::PeerAddr(v) => {
                 self.peer_addr = v;
-                false
+                true
             }
             Msg::SetupCode(v) => {
                 self.setup_code = v;
-                false
+                true
             }
             Msg::DiscoverFilter(v) => {
                 self.discover_filter = v;
                 false
             }
-            Msg::Persistent(v) => {
-                self.persistent = v;
+            Msg::SetRemember(v) => {
+                self.remember = v;
                 false
             }
+            Msg::OpenDiscover => {
+                self.discover_open = true;
+                if !self.discovering {
+                    self.start_discover(ctx);
+                }
+                true
+            }
+            Msg::CloseDiscover => {
+                self.discover_open = false;
+                true
+            }
             Msg::Discover => {
-                // Up to 4 digits is a discriminator; anything else a setup code,
-                // which the Commission tab then uses too.
-                let filter = self.discover_filter.trim();
-                let (discriminator, setup_code) = if filter.is_empty() {
-                    (None, None)
-                } else if filter.len() <= 4 && filter.bytes().all(|b| b.is_ascii_digit()) {
-                    (filter.parse::<u16>().ok(), None)
-                } else {
-                    self.setup_code = filter.to_string();
-                    (None, Some(filter.to_string()))
-                };
-                self.discovering = true;
-                self.discovered.clear();
-                self.error = None;
-                send_request(
-                    ctx.link().clone(),
-                    proto::Request::Discover {
-                        discriminator,
-                        setup_code,
-                        max: 16,
-                    },
-                );
+                self.start_discover(ctx);
                 true
             }
             Msg::PickDevice(addr) => {
-                // Fill the peer address from the picked device and jump to the
-                // Commission tab so the user can run the vertical.
                 self.peer_addr = addr;
-                self.tab = Tab::Commission;
+                self.discover_open = false;
                 true
             }
-            Msg::Run => {
+            Msg::Commission => {
                 // Guard: re-commissioning the device we *just* commissioned is
                 // almost always a mistake — its commissioning window has closed,
                 // so PASE will hang. Warn + require confirmation instead.
@@ -329,7 +340,7 @@ impl Component for App {
                 }
                 self.start_commission(ctx)
             }
-            Msg::RunAnyway => {
+            Msg::CommissionAnyway => {
                 self.confirm_recommission = false;
                 self.start_commission(ctx)
             }
@@ -338,12 +349,12 @@ impl Component for App {
                 true
             }
             Msg::Cancel => {
-                // Only meaningful while a vertical is in flight.
+                // Only meaningful while a commission is in flight.
                 if !self.running {
                     return false;
                 }
                 // Fire-and-forget the cancel on its own WS connection; the
-                // running vertical replies `Cancelled` on its original one.
+                // running commission replies `Cancelled` on its original one.
                 send_cancel();
                 true
             }
@@ -362,31 +373,48 @@ impl Component for App {
                 send_request(ctx.link().clone(), proto::Request::Sync);
                 true
             }
-            Msg::Forget(node_id) => {
-                self.busy_stored = true;
-                self.error = None;
-                self.notice = None;
-                self.subs.remove(&node_id);
-                send_request(
-                    ctx.link().clone(),
-                    proto::Request::Decommission {
-                        node_id,
-                        force: true,
-                    },
-                );
-                true
-            }
             Msg::Refresh(node_id) => {
                 // One-shot re-read — the result updates this device's card panel
                 // (not a status line). Useful for the values the subscription
                 // doesn't push on every change (e.g. the live-computed uptime).
                 self.busy_stored = true;
                 self.error = None;
+                send_request(ctx.link().clone(), proto::Request::PeekDevice { node_id });
+                true
+            }
+            Msg::Remember(node_id) => {
+                self.busy_stored = true;
+                self.error = None;
+                send_request(ctx.link().clone(), proto::Request::Remember { node_id });
+                true
+            }
+            Msg::OpenLogs(node_id) => {
+                self.error = None;
+                self.logs = Some(LogsView {
+                    node_id,
+                    intent: None,
+                    loading: false,
+                    data: None,
+                });
+                true
+            }
+            Msg::CloseLogs => {
+                self.logs = None;
+                true
+            }
+            Msg::FetchLogs(intent) => {
+                let Some(logs) = self.logs.as_mut() else {
+                    return false;
+                };
+                logs.intent = Some(intent);
+                logs.loading = true;
+                logs.data = None;
+                self.error = None;
                 send_request(
                     ctx.link().clone(),
-                    proto::Request::PeekDevice {
-                        node_id,
-                        with_logs: false,
+                    proto::Request::RetrieveLogs {
+                        node_id: logs.node_id,
+                        intent,
                     },
                 );
                 true
@@ -412,7 +440,7 @@ impl Component for App {
                 self.notice = None;
                 // The "you just commissioned this" guard is now stale: we are
                 // giving the device up, so re-commissioning it is the expected
-                // next step, not a mistake to warn about. Left set, `Msg::Run`
+                // next step, not a mistake to warn about. Left set, `Msg::Commission`
                 // would keep swallowing the click and only show the warning.
                 self.last_commissioned_addr = None;
                 // Stop watching it locally (the server tears the subscription down too).
@@ -449,18 +477,19 @@ impl Component for App {
                             sub.conn = SubConn::Reconnecting;
                         }
                     }
-                    // Terminal. If the device is still stored we want it watched,
-                    // so mark it reconnecting and re-subscribe; only drop the panel
-                    // if the device is gone from the store.
+                    // Terminal. A device we still watch and still store gets
+                    // re-subscribed; one we stopped watching (e.g. being
+                    // decommissioned) or that is gone from the store is dropped.
                     proto::SubscriptionState::Stopped => {
                         let still_stored = self.stored.iter().any(|d| d.handle.node_id == node_id);
-                        if still_stored {
-                            if let Some(sub) = self.subs.get_mut(&node_id) {
+                        match self.subs.get_mut(&node_id) {
+                            Some(sub) if still_stored => {
                                 sub.conn = SubConn::Reconnecting;
+                                self.sub_send(&proto::Request::Subscribe { node_id });
                             }
-                            self.sub_send(&proto::Request::Subscribe { node_id });
-                        } else {
-                            self.subs.remove(&node_id);
+                            _ => {
+                                self.subs.remove(&node_id);
+                            }
                         }
                     }
                 }
@@ -525,10 +554,13 @@ impl Component for App {
                 self.running = false;
                 self.discovering = false;
                 self.busy_stored = false;
+                if let Some(logs) = self.logs.as_mut() {
+                    logs.loading = false;
+                }
                 match resp {
                     proto::Response::Discovered { devices } => self.discovered = devices,
                     proto::Response::Devices { devices, notice } => {
-                        self.stored_status = Some(format!("{} stored device(s)", devices.len()));
+                        self.stored_status = Some(format!("{} device(s)", devices.len()));
                         // A non-fatal remark about whatever produced this list —
                         // e.g. a decommission that dropped the record locally but
                         // could not reach the device to free its fabric slot.
@@ -536,14 +568,14 @@ impl Component for App {
                             self.notice = notice;
                         }
                         // Seed each device's tag-edit buffer from its (normalized)
-                        // stored tags, so the input reflects server truth.
+                        // tags, so the input reflects server truth.
                         self.tag_inputs = devices
                             .iter()
                             .map(|d| (d.handle.node_id, d.tags.join(", ")))
                             .collect();
                         self.stored = devices;
                         // A dashboard watches everything: auto-subscribe every
-                        // stored device (and drop panels for any that vanished).
+                        // listed device (and drop panels for any that vanished).
                         self.sync_subscriptions(ctx);
                     }
                     proto::Response::Peek { handle, health, .. } => {
@@ -580,25 +612,26 @@ impl Component for App {
                             "Commission cancelled before the device was modified.".into()
                         });
                     }
-                    // A persistent commission populates the store; refresh the
-                    // list and surface it on the Devices tab.
-                    other @ proto::Response::Vertical(_) => {
-                        // A persistent (kept) device's commissioning window is now
-                        // closed — remember its address to guard a re-commission.
-                        if self.persistent {
-                            if let proto::Response::Vertical(v) = &other {
-                                if !v.decommissioned {
-                                    self.last_commissioned_addr =
-                                        Some(self.peer_addr.trim().to_string());
-                                }
+                    proto::Response::Logs { node_id, data, .. } => {
+                        if let Some(logs) = self.logs.as_mut().filter(|l| l.node_id == node_id) {
+                            logs.data = Some(data);
+                        }
+                    }
+                    // The device is listed now: refresh the list and surface it on
+                    // the Devices tab.
+                    other @ proto::Response::Commissioned(_) => {
+                        // Its commissioning window is closed now — remember its
+                        // address to guard a re-commission.
+                        self.last_commissioned_addr = Some(self.peer_addr.trim().to_string());
+                        if let proto::Response::Commissioned(result) = &other {
+                            if let Some(node_id) = result.rematch_candidate {
+                                self.notice = Some(rematch_notice(node_id));
                             }
                         }
                         self.result = Some(other);
-                        if self.persistent {
-                            self.busy_stored = true;
-                            send_request(ctx.link().clone(), proto::Request::ListDevices);
-                            self.tab = Tab::Devices;
-                        }
+                        self.busy_stored = true;
+                        send_request(ctx.link().clone(), proto::Request::ListDevices);
+                        self.tab = Tab::Devices;
                     }
                     proto::Response::Error { message } => self.error = Some(message),
                 }
@@ -606,6 +639,7 @@ impl Component for App {
             }
             Msg::Error(e) => {
                 self.running = false;
+                self.discovering = false;
                 self.busy_stored = false;
                 self.error = Some(e);
                 true
@@ -639,14 +673,20 @@ impl Component for App {
 
                     {
                         match self.tab {
-                            Tab::Discover => self.view_discover_tab(link),
-                            Tab::Commission => self.view_commission_tab(link),
                             Tab::Devices => self.view_devices_tab(link),
+                            Tab::Commission => self.view_commission_tab(link),
                             Tab::Updates => self.view_updates_tab(link),
                         }
                     }
                 </main>
             </>
+        }
+    }
+
+    fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
+        // The app opens on the Devices tab; load it as if the user picked it.
+        if first_render {
+            ctx.link().send_message(Msg::SelectTab(Tab::Devices));
         }
     }
 }
@@ -741,12 +781,7 @@ impl App {
     /// every stored device (a dashboard is live by default), and drop any panel
     /// for a device that's no longer stored. Opens the persistent WS if needed.
     fn sync_subscriptions(&mut self, ctx: &Context<Self>) {
-        let stored_ids: Vec<u64> = self
-            .stored
-            .iter()
-            .filter(|d| !d.pending_removal)
-            .map(|d| d.handle.node_id)
-            .collect();
+        let stored_ids: Vec<u64> = self.stored.iter().map(|d| d.handle.node_id).collect();
         if stored_ids.is_empty() {
             return;
         }
@@ -773,7 +808,38 @@ impl App {
         }
     }
 
-    /// Kick off the commission vertical (shared by `Run` and `RunAnyway`).
+    /// Scan for commissionable devices, narrowed by the discovery filter.
+    fn start_discover(&mut self, ctx: &Context<Self>) {
+        // Up to 4 digits is a discriminator; anything else a setup code, which
+        // the commission form then uses too.
+        let filter = self.discover_filter.trim();
+        let (discriminator, setup_code) = if filter.is_empty() {
+            (None, None)
+        } else if filter.len() <= 4 && filter.bytes().all(|b| b.is_ascii_digit()) {
+            (filter.parse::<u16>().ok(), None)
+        } else {
+            self.setup_code = filter.to_string();
+            (None, Some(filter.to_string()))
+        };
+        self.discovering = true;
+        self.discovered.clear();
+        self.error = None;
+        send_request(
+            ctx.link().clone(),
+            proto::Request::Discover {
+                discriminator,
+                setup_code,
+                max: 16,
+            },
+        );
+    }
+
+    /// Whether the commission form holds a usable peer address and setup code.
+    fn can_commission(&self) -> bool {
+        self.peer_addr.trim().parse::<SocketAddr>().is_ok() && valid_setup_code(&self.setup_code)
+    }
+
+    /// Kick off a commission (shared by `Commission` and `CommissionAnyway`).
     fn start_commission(&mut self, ctx: &Context<Self>) -> bool {
         let setup_code = self.setup_code.trim().to_string();
         if setup_code.is_empty() {
@@ -786,19 +852,14 @@ impl App {
         self.notice = None;
         self.error = None;
 
-        let policy = if self.persistent {
-            proto::FabricPolicy::Persistent
-        } else {
-            proto::FabricPolicy::Ephemeral
-        };
-        let req = proto::Request::RunVertical {
+        let req = proto::Request::Commission {
             peer_addr: self.peer_addr.trim().to_string(),
             setup_code,
-            policy,
+            remember: self.remember,
         };
         send_request(ctx.link().clone(), req);
 
-        // Safety net: auto-cancel if the vertical runs too long. When the timer
+        // Safety net: auto-cancel if the commission runs too long. When the timer
         // fires we only act if still `running` (a completed run cleared it).
         let link = ctx.link().clone();
         spawn_local(async move {
@@ -822,63 +883,84 @@ impl App {
         html! {
             <div class="tabs is-boxed is-medium">
                 <ul>
-                    { tab(Tab::Discover, "Discover") }
-                    { tab(Tab::Commission, "Commission") }
                     { tab(Tab::Devices, "Devices") }
+                    { tab(Tab::Commission, "Commission") }
                     { tab(Tab::Updates, "Updates") }
                 </ul>
             </div>
         }
     }
 
-    // --- Discover tab -----------------------------------------------------
+    // --- Discover popup ---------------------------------------------------
 
-    fn view_discover_tab(&self, link: &html::Scope<Self>) -> Html {
+    /// Full-screen list of the commissionable devices; picking one fills the
+    /// peer address.
+    fn view_discover_modal(&self, link: &html::Scope<Self>) -> Html {
+        if !self.discover_open {
+            return html! {};
+        }
         html! {
-            <div class="box">
-                <h2 class="title is-5">{ "Find commissionable devices" }</h2>
-                <div class="field is-grouped">
-                    <div class="control">
-                        <input class="input" placeholder="discriminator or setup code (any)"
-                            value={self.discover_filter.clone()}
-                            oninput={link.callback(|e: InputEvent| Msg::DiscoverFilter(input_value(e)))} />
-                    </div>
-                    <div class="control">
-                        <button class={classes!("button", "is-primary", self.discovering.then_some("is-loading"))}
-                            disabled={self.discovering || self.running}
-                            onclick={link.callback(|_| Msg::Discover)}>
-                            { "Discover" }
-                        </button>
-                    </div>
-                </div>
+            <div class="modal is-active">
+                <div class="modal-background"></div>
+                <div class="modal-card is-fullscreen">
+                    <header class="modal-card-head">
+                        <p class="modal-card-title">{ "Commissionable devices" }</p>
+                        <button class="delete is-large" aria-label="close"
+                            onclick={link.callback(|_| Msg::CloseDiscover)}></button>
+                    </header>
+                    <section class="modal-card-body">
+                        <div class="app container">
+                            <div class="field is-grouped">
+                                <div class="control is-expanded">
+                                    <input class="input" placeholder="discriminator or setup code (any)"
+                                        value={self.discover_filter.clone()}
+                                        oninput={link.callback(|e: InputEvent| Msg::DiscoverFilter(input_value(e)))} />
+                                </div>
+                                <div class="control">
+                                    <button class={classes!("button", "is-primary", self.discovering.then_some("is-loading"))}
+                                        disabled={self.discovering || self.running}
+                                        onclick={link.callback(|_| Msg::Discover)}>
+                                        { "Rescan" }
+                                    </button>
+                                </div>
+                            </div>
 
-                { self.view_discovered(link) }
+                            // The page's error banner is hidden behind the popup.
+                            { for self.error.iter().map(|e| html!{
+                                <div class="notification is-danger is-light">
+                                    <strong>{ "Error: " }</strong>{ e.clone() }
+                                </div>
+                            }) }
+                            { self.view_discovered(link) }
+                        </div>
+                    </section>
+                </div>
             </div>
         }
     }
 
     fn view_discovered(&self, link: &html::Scope<Self>) -> Html {
         if self.discovered.is_empty() {
-            return html! {
-                <p class="has-text-grey">{ "No devices found yet. Click Discover to scan the local network." }</p>
+            let text = if self.discovering {
+                "Scanning the local network…"
+            } else {
+                "No commissionable devices found."
             };
+            return html! { <p class="has-text-grey">{ text }</p> };
         }
         html! {
             <table class="table is-fullwidth is-hoverable">
                 <thead>
-                    <tr><th>{ "Address" }</th><th>{ "Commissionable id" }</th><th></th></tr>
+                    <tr><th>{ "Address" }</th><th>{ "Commissionable id" }</th></tr>
                 </thead>
                 <tbody>
                     { for self.discovered.iter().map(|d| {
                         let addr = d.addr.clone();
                         let onclick = link.callback(move |_| Msg::PickDevice(addr.clone()));
                         html! {
-                            <tr>
+                            <tr class="is-clickable" title="Use this device" {onclick}>
                                 <td class="mono">{ d.addr.clone() }</td>
                                 <td class="mono">{ format!("{:#018x}", d.commissionable_id) }</td>
-                                <td class="has-text-right">
-                                    <button class="button is-small is-link is-light" {onclick}>{ "Use" }</button>
-                                </td>
                             </tr>
                         }
                     }) }
@@ -890,24 +972,52 @@ impl App {
     // --- Commission tab ---------------------------------------------------
 
     fn view_commission_tab(&self, link: &html::Scope<Self>) -> Html {
+        // Flag what is typed but unusable; leave an empty field neutral.
+        let addr_invalid = !self.peer_addr.trim().is_empty()
+            && self.peer_addr.trim().parse::<SocketAddr>().is_err();
+        let code_invalid =
+            !self.setup_code.trim().is_empty() && !valid_setup_code(&self.setup_code);
+
         html! {
             <>
                 { self.view_recommission_warning(link) }
+                { self.view_discover_modal(link) }
                 <div class="box">
                     <h2 class="title is-5">{ "Commission a device" }</h2>
 
                     <div class="field">
                         <label class="label">{ "Peer address" }</label>
-                        <div class="control">
-                            <input class="input mono" value={self.peer_addr.clone()}
-                                oninput={link.callback(|e: InputEvent| Msg::PeerAddr(input_value(e)))} />
+                        <div class="field has-addons">
+                            <div class="control is-expanded">
+                                <input class={classes!("input", "mono", addr_invalid.then_some("is-danger"))}
+                                    placeholder="[IPv6]:port or IPv4:port"
+                                    value={self.peer_addr.clone()}
+                                    oninput={link.callback(|e: InputEvent| Msg::PeerAddr(input_value(e)))} />
+                            </div>
+                            <div class="control">
+                                <button class="button is-link"
+                                    title="Find commissionable devices on the local network"
+                                    disabled={self.running}
+                                    onclick={link.callback(|_| Msg::OpenDiscover)}>
+                                    <span class="icon">
+                                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+                                            width="18" height="18" fill="none" stroke="currentColor"
+                                            stroke-width="2.5" stroke-linecap="round">
+                                            <circle cx="10.5" cy="10.5" r="6.5" />
+                                            <line x1="15.5" y1="15.5" x2="21" y2="21" />
+                                        </svg>
+                                    </span>
+                                    <span>{ "Discover" }</span>
+                                </button>
+                            </div>
                         </div>
                     </div>
 
                     <div class="field">
                         <label class="label">{ "Setup code" }</label>
                         <div class="control">
-                            <input class="input mono" value={self.setup_code.clone()}
+                            <input class={classes!("input", "mono", code_invalid.then_some("is-danger"))}
+                                value={self.setup_code.clone()}
                                 oninput={link.callback(|e: InputEvent| Msg::SetupCode(input_value(e)))} />
                         </div>
                         <p class="help">{ "Passcode, manual pairing code or MT: QR code payload." }</p>
@@ -915,12 +1025,12 @@ impl App {
 
                     <div class="field">
                         <label class="checkbox">
-                            <input type="checkbox" checked={self.persistent}
-                                onchange={link.callback(|e: Event| Msg::Persistent(checkbox_checked(e)))} />
-                            { " Persistent" }
+                            <input type="checkbox" checked={self.remember}
+                                onchange={link.callback(|e: Event| Msg::SetRemember(checkbox_checked(e)))} />
+                            { " Remember" }
                         </label>
                         <p class="help">
-                            { "Keep the device on our fabric + in the store (else commission on a throwaway fabric and self-destruct)." }
+                            { "Keep a record of the device, so it can be tagged and stays listed while offline. Either way, it stays on our fabric." }
                         </p>
                     </div>
 
@@ -928,9 +1038,9 @@ impl App {
                         <div class="field is-grouped">
                             <div class="control">
                                 <button class={classes!("button", "is-primary", self.running.then_some("is-loading"))}
-                                    disabled={self.running}
-                                    onclick={link.callback(|_| Msg::Run)}>
-                                    { "Run vertical" }
+                                    disabled={self.running || !self.can_commission()}
+                                    onclick={link.callback(|_| Msg::Commission)}>
+                                    { "Commission" }
                                 </button>
                             </div>
                             {
@@ -978,7 +1088,7 @@ impl App {
                         { "Go to Devices" }
                     </button>
                     <button class="button is-warning is-light"
-                        onclick={link.callback(|_| Msg::RunAnyway)}>
+                        onclick={link.callback(|_| Msg::CommissionAnyway)}>
                         { "Commission anyway" }
                     </button>
                     <button class="button is-text"
@@ -990,90 +1100,61 @@ impl App {
         }
     }
 
-    /// A real progress bar with the active-phase label behind it. The vertical
-    /// emits a `Step` per phase; we count finished phases for the bar value and
-    /// name the in-flight phase.
+    /// The commission's progress: the in-flight step, or how it ended.
     fn view_progress(&self) -> Html {
-        if self.steps.is_empty() {
+        let Some(last) = self.steps.last() else {
             return html! {};
-        }
-
-        // Total phases: ephemeral runs 4 (incl. Decommission), persistent 3.
-        let total: u32 = if self.persistent { 3 } else { 4 };
-        let done = self
-            .steps
-            .iter()
-            .filter(|s| s.status == proto::StepStatus::Done)
-            .count() as u32;
-        let failed = self
-            .steps
-            .iter()
-            .any(|s| matches!(s.status, proto::StepStatus::Failed { .. }));
-
-        // The phase label: the last step's name + state.
-        let (label, bar_class) = match self.steps.last() {
-            Some(s) => {
-                let phase = phase_name(s.step);
-                match &s.status {
-                    proto::StepStatus::Started => (format!("{phase}…"), "is-primary"),
-                    proto::StepStatus::Done if done >= total && !self.running => {
-                        ("Done".to_string(), "is-success")
-                    }
-                    proto::StepStatus::Done => (format!("{phase} done"), "is-primary"),
-                    proto::StepStatus::Failed { message } => {
-                        (format!("{phase} failed: {message}"), "is-danger")
-                    }
-                }
-            }
-            None => ("Working…".to_string(), "is-primary"),
         };
-        let bar_class = if failed { "is-danger" } else { bar_class };
-        let value = done.min(total);
+
+        let phase = phase_name(last.step);
+        let (label, bar_class) = match &last.status {
+            proto::StepStatus::Failed { message } => {
+                (format!("{phase} failed: {message}"), "is-danger")
+            }
+            _ if self.running => (format!("{phase}…"), "is-primary"),
+            _ => ("Done".to_string(), "is-success"),
+        };
 
         html! {
             <div class="box">
-                <div class="level is-mobile mb-2">
-                    <div class="level-left"><span class="has-text-weight-medium">{ label }</span></div>
-                    <div class="level-right"><span class="has-text-grey is-size-7">{ format!("{value}/{total}") }</span></div>
-                </div>
-                <progress class={classes!("progress", bar_class)}
-                    value={value.to_string()} max={total.to_string()}>
-                    { format!("{value}/{total}") }
-                </progress>
+                <p class="has-text-weight-medium mb-2">{ label }</p>
+                {
+                    if self.running {
+                        // No value: an indeterminate (animated) bar.
+                        html! { <progress class={classes!("progress", bar_class)} /> }
+                    } else {
+                        html! { <progress class={classes!("progress", bar_class)} value="1" max="1" /> }
+                    }
+                }
             </div>
         }
     }
 
     fn view_result(&self) -> Html {
         match &self.result {
-            Some(proto::Response::Vertical(v)) => html! {
-                <div class="box">
-                    <h3 class="title is-6">{ "Result" }</h3>
-                    { for v.rematch_candidate.map(|node_id| html!{
-                        <div class="notification is-info is-light">
-                            { format!("↳ Possible match: same model as stored device 0x{node_id:016x} — open Devices to confirm/link.") }
-                        </div>
-                    }) }
-                    <pre class="result">{ format_result(v) }</pre>
+            Some(proto::Response::Commissioned(result)) => html! {
+                <div class="notification is-success is-light">
+                    { format!(
+                        "Commissioned as node 0x{:016x} — see the Devices tab.",
+                        result.handle.node_id
+                    ) }
                 </div>
             },
             Some(proto::Response::Error { message }) => html! {
                 <div class="notification is-danger is-light">{ format!("Server error: {message}") }</div>
             },
-            // Stored-device responses (Devices / Peek / Ok) and Discovered are
-            // routed to their own state in `Msg::Done`, not shown here.
+            // Device responses (Devices / Peek / Ok) and Discovered are routed to
+            // their own state in `Msg::Done`, not shown here.
             Some(_) | None => html! {},
         }
     }
 
     // --- Devices tab ------------------------------------------------------
 
-    /// The persistently-commissioned device list, with per-device Peek / Identify
-    /// actions. The basis for the persistent-fabric workflow: commission once
-    /// (Persistent), then re-address devices over CASE without re-commissioning.
+    /// The devices on our fabric, each with its live health and its actions.
     fn view_devices_tab(&self, link: &html::Scope<Self>) -> Html {
         let filter = self.tag_filter.trim().to_lowercase();
-        let visible: Vec<&proto::StoredDeviceInfo> = self
+        let visible: Vec<&proto::DeviceInfo> = self
             .stored
             .iter()
             .filter(|d| {
@@ -1085,7 +1166,7 @@ impl App {
             <div class="box">
                 <div class="level is-mobile">
                     <div class="level-left">
-                        <h2 class="title is-5">{ "Stored devices" }</h2>
+                        <h2 class="title is-5">{ "Devices" }</h2>
                     </div>
                     <div class="level-right buttons">
                         <button class={classes!("button", "is-small", self.busy_stored.then_some("is-loading"))}
@@ -1095,7 +1176,7 @@ impl App {
                         </button>
                         <button class="button is-small is-link is-light"
                             disabled={self.busy_stored}
-                            title="Add the devices on our fabric missing from the list, refresh the others, and finish pending removals"
+                            title="Add the devices on our fabric missing from the list, and refresh the others"
                             onclick={link.callback(|_| Msg::Sync)}>
                             { "Sync" }
                         </button>
@@ -1127,48 +1208,39 @@ impl App {
                     if self.stored.is_empty() {
                         html! {
                             <p class="has-text-grey">
-                                { "No stored devices yet. Commission one with \"Persistent\" checked." }
+                                { "No devices on our fabric yet. Commission one on the Commission tab." }
                             </p>
                         }
                     } else if visible.is_empty() {
                         html! {
                             <p class="has-text-grey">
-                                { format!("No stored devices tagged like \"{}\".", self.tag_filter.trim()) }
+                                { format!("No devices tagged like \"{}\".", self.tag_filter.trim()) }
                             </p>
                         }
                     } else {
                         html! { <>{ for visible.into_iter().map(|d| self.view_device_card(d, link)) }</> }
                     }
                 }
+
+                { self.view_logs_modal(link) }
             </div>
         }
     }
 
-    fn view_device_card(&self, d: &proto::StoredDeviceInfo, link: &html::Scope<Self>) -> Html {
+    fn view_device_card(&self, d: &proto::DeviceInfo, link: &html::Scope<Self>) -> Html {
         let node_id = d.handle.node_id;
         let refresh = link.callback(move |_| Msg::Refresh(node_id));
         let identify = link.callback(move |_| Msg::Identify(node_id));
+        let logs = link.callback(move |_| Msg::OpenLogs(node_id));
+        let remember = link.callback(move |_| Msg::Remember(node_id));
         let decommission = link.callback(move |_| Msg::Decommission(node_id));
-        let forget = link.callback(move |_| Msg::Forget(node_id));
         let save_tags = link.callback(move |_| Msg::SaveTags(node_id));
         let on_tags = link.callback(move |e: InputEvent| Msg::TagsInput(node_id, input_value(e)));
 
         // This device's live subscription (auto-created; `None` only very briefly).
         let live = self.subs.get(&node_id);
 
-        // Prefer a human label: the user-set NodeLabel, else the device's own
-        // ProductName, else the stable identifiers, else the raw node id.
-        let title = if !d.node_label.is_empty() {
-            d.node_label.clone()
-        } else if !d.product_name.is_empty() {
-            d.product_name.clone()
-        } else if !d.unique_id.is_empty() {
-            format!("uid {}", d.unique_id)
-        } else if !d.serial_number.is_empty() {
-            format!("sn {}", d.serial_number)
-        } else {
-            format!("node 0x{node_id:016x}")
-        };
+        let title = device_title(d);
 
         let tag_text = self
             .tag_inputs
@@ -1184,11 +1256,12 @@ impl App {
                             <p class="title is-6 mb-0">{ title }</p>
                         </div>
                         <div class="level-right tags">
-                            { if d.pending_removal {
-                                html!{ <span class="tag is-danger is-light"
-                                    title="Our fabric will be removed from it once it is back online">
-                                    { "removal pending" }</span> }
-                              } else if d.online == Some(false) {
+                            { if !d.remembered {
+                                html!{ <span class="tag is-light"
+                                    title="No record is kept: it cannot be tagged, and is listed only while on our fabric">
+                                    { "not remembered" }</span> }
+                              } else { html!{} } }
+                            { if d.online == Some(false) {
                                 html!{ <span class="tag is-light"
                                     title="Not advertising on our fabric at the last sync">
                                     { "offline" }</span> }
@@ -1226,17 +1299,25 @@ impl App {
                         }
                     }
 
-                    <div class="field has-addons mb-2">
-                        <div class="control is-expanded">
-                            <input class="input is-small" placeholder="comma,separated tags"
-                                value={tag_text} oninput={on_tags} />
-                        </div>
-                        <div class="control">
-                            <button class="button is-small" disabled={self.busy_stored} onclick={save_tags}>
-                                { "Save tags" }
-                            </button>
-                        </div>
-                    </div>
+                    {
+                        if d.remembered {
+                            html! {
+                                <div class="field has-addons mb-2">
+                                    <div class="control is-expanded">
+                                        <input class="input is-small" placeholder="comma,separated tags"
+                                            value={tag_text} oninput={on_tags} />
+                                    </div>
+                                    <div class="control">
+                                        <button class="button is-small" disabled={self.busy_stored} onclick={save_tags}>
+                                            { "Save tags" }
+                                        </button>
+                                    </div>
+                                </div>
+                            }
+                        } else {
+                            html! {}
+                        }
+                    }
 
                     <div class="buttons are-small">
                         <button
@@ -1247,22 +1328,24 @@ impl App {
                         <button class="button is-warning is-light" disabled={self.busy_stored} onclick={identify}>
                             { "Identify" }
                         </button>
-                        { if d.pending_removal {
-                            html!{ <button class="button is-danger is-light" disabled={self.busy_stored}
-                                title="Drop it from the list now; if it still holds our fabric, a sync lists it again"
-                                onclick={forget}>
-                                { "Forget" }
-                            </button> }
-                          } else {
-                            html!{ <button class="button is-danger is-light" disabled={self.busy_stored} onclick={decommission}>
-                                { "Decommission" }
-                            </button> }
-                          } }
+                        <button class="button is-light" onclick={logs}>
+                            { "Logs" }
+                        </button>
+                        { if d.remembered { html!{} } else { html!{
+                            <button class="button is-info is-light" disabled={self.busy_stored}
+                                title="Keep a record of it, so it can be tagged and stays listed while offline"
+                                onclick={remember}>
+                                { "Remember" }
+                            </button>
+                        } } }
+                        <button class="button is-danger is-light" disabled={self.busy_stored} onclick={decommission}>
+                            { "Decommission" }
+                        </button>
                     </div>
 
                     { self.view_device_update(d, link) }
 
-                    // Every stored device is watched automatically — the panel is
+                    // Every listed device is watched automatically — the panel is
                     // always shown (it renders "connecting…" until the first report).
                     { self.view_live_health(live) }
                 </div>
@@ -1274,7 +1357,7 @@ impl App {
     /// than what it runs.
     fn applicable<'a>(
         &'a self,
-        d: &'a proto::StoredDeviceInfo,
+        d: &'a proto::DeviceInfo,
     ) -> impl Iterator<Item = &'a proto::OtaImageInfo> + 'a {
         let fp = &d.fingerprint;
 
@@ -1289,7 +1372,7 @@ impl App {
     }
 
     /// A device card's OTA update controls, when there is an image for it.
-    fn view_device_update(&self, d: &proto::StoredDeviceInfo, link: &html::Scope<Self>) -> Html {
+    fn view_device_update(&self, d: &proto::DeviceInfo, link: &html::Scope<Self>) -> Html {
         let node_id = d.handle.node_id;
         let images: Vec<_> = self.applicable(d).collect();
         let status = self.ota_status.get(&node_id);
@@ -1403,6 +1486,111 @@ impl App {
     /// diagnostic metrics from the merged running view, plus a live/reconnecting
     /// status and the update count. `None` while the subscription is still being
     /// set up (shown as connecting).
+    /// Full-screen popup to retrieve, read and download a device's logs.
+    fn view_logs_modal(&self, link: &html::Scope<Self>) -> Html {
+        let Some(logs) = &self.logs else {
+            return html! {};
+        };
+
+        let title = self
+            .stored
+            .iter()
+            .find(|d| d.handle.node_id == logs.node_id)
+            .map(device_title)
+            .unwrap_or_else(|| format!("node 0x{:016x}", logs.node_id));
+
+        let intent_button = |intent: proto::LogIntent| {
+            let active = logs.intent == Some(intent);
+            html! {
+                <button
+                    class={classes!("button", active.then_some("is-link"), (active && logs.loading).then_some("is-loading"))}
+                    disabled={logs.loading}
+                    onclick={link.callback(move |_| Msg::FetchLogs(intent))}>
+                    { log_intent_name(intent) }
+                </button>
+            }
+        };
+
+        html! {
+            <div class="modal is-active">
+                <div class="modal-background"></div>
+                <div class="modal-card is-fullscreen">
+                    <header class="modal-card-head">
+                        <p class="modal-card-title">{ format!("Logs — {title}") }</p>
+                        <button class="delete is-large" aria-label="close"
+                            onclick={link.callback(|_| Msg::CloseLogs)}></button>
+                    </header>
+                    <section class="modal-card-body">
+                        <div class="app container">
+                            <div class="buttons">
+                                { intent_button(proto::LogIntent::EndUserSupport) }
+                                { intent_button(proto::LogIntent::NetworkDiag) }
+                                { intent_button(proto::LogIntent::CrashLogs) }
+                            </div>
+
+                            // The page's error banner is hidden behind the popup.
+                            { for self.error.iter().map(|e| html!{
+                                <div class="notification is-danger is-light">
+                                    <strong>{ "Error: " }</strong>{ e.clone() }
+                                </div>
+                            }) }
+                            { self.view_log(logs) }
+                        </div>
+                    </section>
+                </div>
+            </div>
+        }
+    }
+
+    /// A retrieved log: its text, or its size if it is binary, with a download.
+    fn view_log(&self, logs: &LogsView) -> Html {
+        use base64::Engine as _;
+
+        let (Some(intent), Some(data)) = (logs.intent, &logs.data) else {
+            let hint = if logs.loading {
+                "Retrieving the log…"
+            } else {
+                "Pick the log to retrieve."
+            };
+            return html! { <p class="has-text-grey">{ hint }</p> };
+        };
+
+        let log = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap_or_default();
+        if log.is_empty() {
+            return html! {
+                <p class="has-text-grey">{ format!("The device has no {} log.", log_intent_name(intent)) }</p>
+            };
+        }
+
+        let size = log.len();
+        let body = match String::from_utf8(log) {
+            Ok(text) => html! { <pre class="result">{ text }</pre> },
+            Err(_) => {
+                html! { <p>{ format!("{size} bytes of binary data — download it to inspect.") }</p> }
+            }
+        };
+        let file_name = format!("node-{:016x}-{}.log", logs.node_id, log_intent_file(intent));
+
+        html! {
+            <>
+                <div class="level is-mobile">
+                    <div class="level-left">
+                        <span class="has-text-grey">{ format!("{} log, {size} bytes", log_intent_name(intent)) }</span>
+                    </div>
+                    <div class="level-right">
+                        <a class="button is-small" download={file_name}
+                            href={format!("data:application/octet-stream;base64,{data}")}>
+                            { "Download" }
+                        </a>
+                    </div>
+                </div>
+                { body }
+            </>
+        }
+    }
+
     fn view_live_health(&self, sub: Option<&LiveSub>) -> Html {
         let default = LiveSub::default();
         let sub = sub.unwrap_or(&default);
@@ -1510,33 +1698,44 @@ fn fingerprint_line(fp: &proto::Fingerprint) -> String {
     )
 }
 
-fn format_result(v: &proto::VerticalResult) -> String {
-    let mut s = String::new();
-    s.push_str(&format!(
-        "device: fabric_index={} node_id=0x{:016x}\n",
-        v.handle.fabric_index, v.handle.node_id
-    ));
-    if let Some(g) = &v.health.general {
-        s.push_str(&format!(
-            "general: up_time_secs={:?} reboot_count={:?} total_operational_hours={:?}\n",
-            g.up_time_secs, g.reboot_count, g.total_operational_hours
-        ));
+/// The notice for a just-remembered device that may be a unit already listed.
+fn rematch_notice(node_id: u64) -> String {
+    format!(
+        "Possible match: the device is the same model as device 0x{node_id:016x} — \
+         check the Devices tab whether they are the same unit."
+    )
+}
+
+/// A human label for a device: the user-set NodeLabel, else the device's own
+/// ProductName, else the stable identifiers, else the raw node id.
+fn device_title(d: &proto::DeviceInfo) -> String {
+    if !d.node_label.is_empty() {
+        d.node_label.clone()
+    } else if !d.product_name.is_empty() {
+        d.product_name.clone()
+    } else if !d.unique_id.is_empty() {
+        format!("uid {}", d.unique_id)
+    } else if !d.serial_number.is_empty() {
+        format!("sn {}", d.serial_number)
+    } else {
+        format!("node 0x{:016x}", d.handle.node_id)
     }
-    if let Some(sw) = &v.health.software {
-        s.push_str(&format!(
-            "software: heap_free={:?} heap_used={:?} heap_high_watermark={:?}\n",
-            sw.current_heap_free, sw.current_heap_used, sw.current_heap_high_watermark
-        ));
+}
+
+fn log_intent_name(intent: proto::LogIntent) -> &'static str {
+    match intent {
+        proto::LogIntent::EndUserSupport => "End-user support",
+        proto::LogIntent::NetworkDiag => "Network diagnostics",
+        proto::LogIntent::CrashLogs => "Crash",
     }
-    s.push_str(&format!("crash_log_bytes: {:?}\n", v.crash_log_bytes));
-    s.push_str(&format!("decommissioned: {}\n", v.decommissioned));
-    if let Some(node_id) = v.rematch_candidate {
-        s.push_str(&format!(
-            "↳ possible match: same model as stored device 0x{node_id:016x} — \
-             check Stored devices to confirm/link\n"
-        ));
+}
+
+fn log_intent_file(intent: proto::LogIntent) -> &'static str {
+    match intent {
+        proto::LogIntent::EndUserSupport => "support",
+        proto::LogIntent::NetworkDiag => "network",
+        proto::LogIntent::CrashLogs => "crash",
     }
-    s
 }
 
 /// Open a WS, send the request, and pump server frames back as component
@@ -1771,7 +1970,7 @@ fn ota_progress_text(progress: &proto::OtaProgress) -> String {
 }
 
 /// Fire-and-forget a `Cancel` on its own short-lived WS connection. The running
-/// vertical (on its original connection) replies `Cancelled` when it next polls
+/// commission (on its original connection) replies `Cancelled` when it next polls
 /// the server's cancel flag at a safepoint.
 fn send_cancel() {
     spawn_local(async move {
@@ -1789,13 +1988,49 @@ fn send_cancel() {
     });
 }
 
-/// Human-readable name for a vertical phase.
-fn phase_name(step: proto::VerticalStep) -> &'static str {
+/// Whether `code` is a usable setup code: a passcode, a manual pairing code or
+/// an `MT:` QR code payload. Checks the form only; the server parses it in full.
+fn valid_setup_code(code: &str) -> bool {
+    /// The fewest base38 characters a QR code payload (11 bytes) takes.
+    const MIN_QR_PAYLOAD_LEN: usize = 19;
+    /// Passcodes the spec rules out, besides 0 and those above 99999998.
+    const INVALID_PASSCODES: [u32; 10] = [
+        11111111, 22222222, 33333333, 44444444, 55555555, 66666666, 77777777, 88888888, 12345678,
+        87654321,
+    ];
+
+    let code = code.trim();
+
+    if let Some(payload) = code.strip_prefix("MT:") {
+        return payload.len() >= MIN_QR_PAYLOAD_LEN
+            && payload
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b.is_ascii_uppercase() || b == b'-' || b == b'.');
+    }
+
+    let digits: String = code.chars().filter(|c| !matches!(c, '-' | ' ')).collect();
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+
+    match digits.len() {
+        1..=8 => digits
+            .parse::<u32>()
+            .is_ok_and(|p| (1..=99999998).contains(&p) && !INVALID_PASSCODES.contains(&p)),
+        // The first digit's bit 2 flags the VID/PID the 21-digit form carries
+        // (8 and 9 are reserved for future versions).
+        11 | 21 => {
+            verhoeff::validate(digits.as_str())
+                && (digits.as_bytes()[0] - b'0') >> 2 == u8::from(digits.len() == 21)
+        }
+        _ => false,
+    }
+}
+
+/// Human-readable name for a commission step.
+fn phase_name(step: proto::CommissionStep) -> &'static str {
     match step {
-        proto::VerticalStep::Commission => "Commissioning",
-        proto::VerticalStep::ReadHealth => "Reading health",
-        proto::VerticalStep::RetrieveLogs => "Retrieving logs",
-        proto::VerticalStep::Decommission => "Decommissioning",
+        proto::CommissionStep::Commission => "Commissioning",
     }
 }
 

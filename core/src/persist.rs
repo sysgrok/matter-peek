@@ -267,7 +267,9 @@ struct StoredDeviceWire {
     // (a missing trailing optional decodes to `None`). `None` ⇒ empty string.
     vendor_name: Option<String>,
     product_name: Option<String>,
-    // Appended LAST and `Option` too; `None` ⇒ `false`.
+    // Set by earlier versions on a device that was unreachable when
+    // decommissioned. Never written; such a record is dropped on load, and a
+    // sync lists the device again if it still holds our fabric.
     pending_removal: Option<bool>,
 }
 
@@ -291,7 +293,7 @@ impl StoredDeviceList {
                     // and round-trips `None` ⇄ empty string).
                     vendor_name: opt_str(&d.vendor_name),
                     product_name: opt_str(&d.product_name),
-                    pending_removal: d.pending_removal.then_some(true),
+                    pending_removal: None,
                 })
                 .collect(),
         }
@@ -300,6 +302,7 @@ impl StoredDeviceList {
     fn into_model(self) -> Vec<StoredDevice> {
         self.devices
             .into_iter()
+            .filter(|w| w.pending_removal != Some(true))
             .filter_map(|w| {
                 Some(StoredDevice {
                     handle: DeviceHandle {
@@ -320,7 +323,6 @@ impl StoredDeviceList {
                         software_version: w.fp_software_version,
                     },
                     tags: w.tags,
-                    pending_removal: w.pending_removal.unwrap_or(false),
                 })
             })
             .collect()
@@ -396,7 +398,6 @@ mod tests {
             product_name: "Widget".to_string(),
             fingerprint: fp(0x1234, 0x5678),
             tags: tags.iter().map(|t| t.to_string()).collect(),
-            pending_removal: false,
         }
     }
 
@@ -502,16 +503,16 @@ mod tests {
     }
 
     #[test]
-    fn pending_removal_round_trips() {
+    fn records_pending_removal_are_dropped_on_load() {
         let s = store();
-        let mut d = device(101, "sn-a", &[]);
-        d.pending_removal = true;
-        s.save_devices(&[d.clone(), device(102, "sn-b", &[])])
-            .unwrap();
+        let mut wire =
+            StoredDeviceList::from_model(&[device(101, "sn-a", &[]), device(102, "sn-b", &[])]);
+        wire.devices[0].pending_removal = Some(true);
+        Persist::new(&s.kv).store_tlv(DEVICES_KEY, wire).unwrap();
 
         let loaded = s.load_devices().unwrap();
-        assert!(loaded[0].pending_removal);
-        assert!(!loaded[1].pending_removal);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].handle.node_id, 102);
     }
 
     #[test]

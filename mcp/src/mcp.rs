@@ -6,10 +6,12 @@
 //! (the desktop shell implements it over the `matter-peek-rpc` actor). The
 //! single final [`matter_peek_proto::Response`] is rendered back as the tool
 //! result; streamed progress is not surfaced over MCP (a tool call is
-//! request/response).
+//! request/response), so neither are health subscriptions.
 //!
-//! **Safety:** read-only tools (discover / list / peek / identify) are always
-//! registered. Mutating tools (commission / set_tags / sync) are registered only when
+//! **Safety:** read-only tools (discover / list / peek / logs / identify / OTA
+//! images) are always registered. Mutating tools (commission / decommission /
+//! remember / set_tags / sync / OTA upload, delete and update) are registered
+//! only when
 //! [`Caps::allow_mutate`] is set — so an agent cannot commission or alter devices
 //! unless the human operator opted in (the shell sets this from `--allow-mutate`).
 
@@ -19,6 +21,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::future::Future;
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use serde_json::{json, Value};
 
 use matter_peek_proto as proto;
@@ -29,6 +33,21 @@ const SERVER_NAME: &str = "matter-peek";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The MCP protocol revision we speak.
 const PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// The tools that change devices or the stored state; see [`Caps`].
+const MUTATING_TOOLS: &[&str] = &[
+    "commission",
+    "decommission",
+    "remember",
+    "set_tags",
+    "sync",
+    "ota_upload",
+    "ota_delete",
+    "ota_update",
+];
+
+/// How much of an OTA image goes in one upload request.
+const UPLOAD_CHUNK_LEN: usize = 256 * 1024;
 
 /// Runs one [`proto::Request`] against the controller and yields its single final
 /// response. The protocol layer is agnostic to *how* — the desktop shell
@@ -42,9 +61,16 @@ pub trait Dispatch {
         &self,
         request: proto::Request,
     ) -> impl Future<Output = Result<proto::Response, String>>;
+
+    /// Read a local file, for `ota_upload`. A shell without files keeps this.
+    fn read_file(&self, path: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+        let message = format!("cannot read {path}: no file access");
+
+        async move { Err(message) }
+    }
 }
 
-/// Whether mutating tools (commission / set_tags / sync) are exposed.
+/// Whether the mutating tools ([`MUTATING_TOOLS`]) are exposed.
 #[derive(Clone, Copy)]
 pub struct Caps {
     pub allow_mutate: bool,
@@ -85,9 +111,11 @@ fn initialize_result() -> Value {
         "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
         "instructions":
             "Vendor-agnostic Matter diagnostic controller. Read-only tools \
-             (discover, list_devices, peek_device, identify) are always \
-             available. Commissioning and tag edits require the server to have \
-             been started with --allow-mutate."
+             (discover, list_devices, peek_device, retrieve_logs, identify, \
+             ota_images) are always available. The tools that change devices \
+             or the stored state (commission, decommission, remember, set_tags, \
+             sync, ota_upload, ota_delete, ota_update) require the server to \
+             have been started with --allow-mutate."
     })
 }
 
@@ -119,28 +147,45 @@ fn tool_list(caps: Caps) -> Vec<Value> {
         ),
         tool(
             "list_devices",
-            "List the devices this controller has persistently commissioned \
-             (from the local store), with their identity, fingerprint, and tags.",
+            "List the devices on our fabric, with their identity, fingerprint, \
+             tags, whether they are online and whether they are remembered. \
+             Remembered devices are listed also while offline; the others only \
+             once commissioned or found by a sync since the server started.",
             json!({ "type": "object", "properties": {} }),
         ),
         tool(
             "peek_device",
-            "Re-address an already-commissioned device by its node id over a \
-             fresh CASE session (no re-commissioning) and read its health \
-             diagnostics (uptime, reboot count, heap), plus optional crash-log \
-             size.",
+            "Re-address a listed device by its node id over a fresh CASE \
+             session (no re-commissioning) and read its health diagnostics \
+             (uptime, reboot count, heap).",
             json!({
                 "type": "object",
                 "properties": {
-                    "node_id": { "type": "integer", "description": "The device's node id on our fabric." },
-                    "with_logs": { "type": "boolean", "description": "Also retrieve crash logs (default false)." }
+                    "node_id": { "type": "integer", "description": "The device's node id on our fabric." }
+                },
+                "required": ["node_id"]
+            }),
+        ),
+        tool(
+            "retrieve_logs",
+            "Retrieve a diagnostic log from a listed device. Returns the log \
+             text, or its size if it is binary.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "integer" },
+                    "intent": {
+                        "type": "string",
+                        "enum": ["end_user_support", "network_diag", "crash_logs"],
+                        "description": "Which log (default crash_logs)."
+                    }
                 },
                 "required": ["node_id"]
             }),
         ),
         tool(
             "identify",
-            "Ask a stored device to physically identify itself (blink/beep) for \
+            "Ask a listed device to physically identify itself (blink/beep) for \
              a few seconds via the Identify cluster — to locate a unit.",
             json!({
                 "type": "object",
@@ -151,28 +196,61 @@ fn tool_list(caps: Caps) -> Vec<Value> {
                 "required": ["node_id"]
             }),
         ),
+        tool(
+            "ota_images",
+            "List the stored OTA images (name, vendor/product id, software \
+             version) that devices can be updated to.",
+            json!({ "type": "object", "properties": {} }),
+        ),
     ];
 
     if caps.allow_mutate {
         tools.push(tool(
             "commission",
-            "Commission a Matter device at the given address. With persistent=true \
-             the device is kept on our fabric and recorded in the store; with \
-             persistent=false it is commissioned on a throwaway fabric, diagnosed, \
-             then removed. MUTATING — alters the device's fabric table.",
+            "Commission a Matter device at the given address onto our fabric; \
+             it is listed from then on. With remember=true a record of it is \
+             also kept (see remember). MUTATING — alters the device's fabric \
+             table.",
             json!({
                 "type": "object",
                 "properties": {
                     "peer_addr": { "type": "string", "description": "e.g. \"192.168.1.20:5540\" or \"[fe80::1]:5540\"." },
                     "setup_code": { "type": "string", "description": "Setup passcode, manual pairing code or MT: QR code payload (default 20202021)." },
-                    "persistent": { "type": "boolean", "description": "Keep the device (true) or self-destruct after (false). Default false." }
+                    "remember": { "type": "boolean", "description": "Also keep a record of the device. Default false." }
                 },
                 "required": ["peer_addr"]
             }),
         ));
         tools.push(tool(
+            "decommission",
+            "Decommission a listed device: remove our fabric from it and drop it \
+             from the list. A device that cannot be reached within 30 s is only \
+             dropped from the list and still holds our fabric; sync lists it \
+             again once it is online. With force=true the device is not \
+             contacted at all. MUTATING — alters the device's fabric table.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "integer" },
+                    "force": { "type": "boolean", "description": "Drop it from the list without contacting the device. Default false." }
+                },
+                "required": ["node_id"]
+            }),
+        ));
+        tools.push(tool(
+            "remember",
+            "Keep a record of a listed device, so it can be tagged and stays \
+             listed while offline and across restarts. MUTATING — changes the \
+             stored device list.",
+            json!({
+                "type": "object",
+                "properties": { "node_id": { "type": "integer" } },
+                "required": ["node_id"]
+            }),
+        ));
+        tools.push(tool(
             "set_tags",
-            "Replace the local tags of a stored device (controller-local labels \
+            "Replace the local tags of a remembered device (controller-local labels \
              for grouping/filtering; never touches the device).",
             json!({
                 "type": "object",
@@ -186,10 +264,47 @@ fn tool_list(caps: Caps) -> Vec<Value> {
         tools.push(tool(
             "sync",
             "Re-sync the stored device list with the devices on our fabric: add \
-             the ones not listed, refresh the others' identity, and remove our \
-             fabric from those pending removal. MUTATING — may alter devices' \
-             fabric tables.",
+             the ones not listed and refresh the others' identity. MUTATING — \
+             changes the stored device list.",
             json!({ "type": "object", "properties": {} }),
+        ));
+        tools.push(tool(
+            "ota_upload",
+            "Store an OTA image file (.ota) from a path on this machine, so \
+             devices can be updated to it. MUTATING — changes the stored images.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path of the .ota file." }
+                },
+                "required": ["path"]
+            }),
+        ));
+        tools.push(tool(
+            "ota_delete",
+            "Delete a stored OTA image. MUTATING — changes the stored images.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "The image name, as ota_images lists it." }
+                },
+                "required": ["name"]
+            }),
+        ));
+        tools.push(tool(
+            "ota_update",
+            "Update a stored device to a stored OTA image: the device is told to \
+             fetch it from us. Returns once the device is told; it then \
+             downloads and applies the image on its own, which peek_device shows \
+             as the new software version. MUTATING — flashes the device.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "integer" },
+                    "name": { "type": "string", "description": "The image name, as ota_images lists it." }
+                },
+                "required": ["node_id", "name"]
+            }),
         ));
     }
 
@@ -217,24 +332,69 @@ async fn tools_call<D: Dispatch>(
         .ok_or((jsonrpc::INVALID_PARAMS, "missing tool name".to_string()))?;
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    let request = build_request(name, &args, caps)?;
-    let response = dispatch
-        .dispatch(request)
-        .await
-        .map_err(|e| (jsonrpc::INTERNAL_ERROR, e))?;
-    Ok(tool_result(&response))
-}
-
-/// Map a tool name + arguments to a [`proto::Request`], enforcing the mutate gate.
-fn build_request(name: &str, args: &Value, caps: Caps) -> Result<proto::Request, ToolErr> {
-    let mutating = matches!(name, "commission" | "set_tags" | "sync");
-    if mutating && !caps.allow_mutate {
+    if MUTATING_TOOLS.contains(&name) && !caps.allow_mutate {
         return Err((
             jsonrpc::INVALID_PARAMS,
             format!("tool '{name}' is disabled; start the server with --allow-mutate to enable it"),
         ));
     }
 
+    let response = if name == "ota_upload" {
+        ota_upload(&args, dispatch).await?
+    } else {
+        let request = build_request(name, &args)?;
+        call(dispatch, request).await?
+    };
+
+    Ok(tool_result(&response))
+}
+
+/// Run one request through `dispatch`.
+async fn call<D: Dispatch>(
+    dispatch: &D,
+    request: proto::Request,
+) -> Result<proto::Response, ToolErr> {
+    dispatch
+        .dispatch(request)
+        .await
+        .map_err(|e| (jsonrpc::INTERNAL_ERROR, e))
+}
+
+/// Upload the OTA image file at the `path` argument, chunk by chunk. Answers
+/// with the stored images, or with the first failure.
+async fn ota_upload<D: Dispatch>(args: &Value, dispatch: &D) -> Result<proto::Response, ToolErr> {
+    let path = arg_str(args, "path")?;
+    let image = dispatch
+        .read_file(&path)
+        .await
+        .map_err(|e| (jsonrpc::INVALID_PARAMS, e))?;
+
+    let size = image.len() as u64;
+    let upload_id = match call(dispatch, proto::Request::OtaUploadBegin { size }).await? {
+        proto::Response::OtaUploadStarted { upload_id } => upload_id,
+        other => return Ok(other),
+    };
+
+    let mut offset = 0;
+    for chunk in image.chunks(UPLOAD_CHUNK_LEN) {
+        let data = BASE64.encode(chunk);
+        let request = proto::Request::OtaUploadChunk {
+            upload_id,
+            offset,
+            data,
+        };
+
+        match call(dispatch, request).await? {
+            proto::Response::Ok => offset += chunk.len() as u64,
+            other => return Ok(other),
+        }
+    }
+
+    call(dispatch, proto::Request::OtaUploadEnd { upload_id }).await
+}
+
+/// Map a single-request tool name + arguments to a [`proto::Request`].
+fn build_request(name: &str, args: &Value) -> Result<proto::Request, ToolErr> {
     let req = match name {
         "discover" => proto::Request::Discover {
             discriminator: args
@@ -249,18 +409,43 @@ fn build_request(name: &str, args: &Value, caps: Caps) -> Result<proto::Request,
         },
         "list_devices" => proto::Request::ListDevices,
         "sync" => proto::Request::Sync,
+        "decommission" => proto::Request::Decommission {
+            node_id: arg_u64(args, "node_id")?,
+            force: args.get("force").and_then(Value::as_bool).unwrap_or(false),
+        },
+        "ota_images" => proto::Request::OtaImages,
+        "ota_delete" => proto::Request::OtaDelete {
+            name: arg_str(args, "name")?,
+        },
+        "ota_update" => proto::Request::OtaUpdate {
+            node_id: arg_u64(args, "node_id")?,
+            name: arg_str(args, "name")?,
+        },
         "peek_device" => proto::Request::PeekDevice {
             node_id: arg_u64(args, "node_id")?,
-            with_logs: args
-                .get("with_logs")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+        },
+        "retrieve_logs" => proto::Request::RetrieveLogs {
+            node_id: arg_u64(args, "node_id")?,
+            intent: match args.get("intent").and_then(Value::as_str) {
+                None | Some("crash_logs") => proto::LogIntent::CrashLogs,
+                Some("end_user_support") => proto::LogIntent::EndUserSupport,
+                Some("network_diag") => proto::LogIntent::NetworkDiag,
+                Some(other) => {
+                    return Err((
+                        jsonrpc::INVALID_PARAMS,
+                        format!("unknown log intent '{other}'"),
+                    ))
+                }
+            },
+        },
+        "remember" => proto::Request::Remember {
+            node_id: arg_u64(args, "node_id")?,
         },
         "identify" => proto::Request::Identify {
             node_id: arg_u64(args, "node_id")?,
             secs: args.get("secs").and_then(Value::as_u64).unwrap_or(3) as u16,
         },
-        "commission" => proto::Request::RunVertical {
+        "commission" => proto::Request::Commission {
             peer_addr: args
                 .get("peer_addr")
                 .and_then(Value::as_str)
@@ -271,15 +456,10 @@ fn build_request(name: &str, args: &Value, caps: Caps) -> Result<proto::Request,
                 .and_then(Value::as_str)
                 .unwrap_or("20202021")
                 .to_string(),
-            policy: if args
-                .get("persistent")
+            remember: args
+                .get("remember")
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                proto::FabricPolicy::Persistent
-            } else {
-                proto::FabricPolicy::Ephemeral
-            },
+                .unwrap_or(false),
         },
         "set_tags" => proto::Request::SetTags {
             node_id: arg_u64(args, "node_id")?,
@@ -305,18 +485,50 @@ fn arg_u64(args: &Value, key: &str) -> Result<u64, ToolErr> {
     ))
 }
 
+fn arg_str(args: &Value, key: &str) -> Result<String, ToolErr> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or((
+            jsonrpc::INVALID_PARAMS,
+            format!("missing or non-string '{key}'"),
+        ))
+}
+
 /// Render a [`proto::Response`] as an MCP `tools/call` result. The structured
-/// payload goes into a single text content block as pretty JSON (and `isError`
-/// is set for the error variant) — what MCP clients render and feed to the model.
+/// payload goes into a single text content block as pretty JSON, a retrieved log
+/// as its text (and `isError` is set for the error variant) — what MCP clients
+/// render and feed to the model.
 fn tool_result(response: &proto::Response) -> Value {
-    let (payload, is_error) = match response {
-        proto::Response::Error { message } => (json!({ "error": message }), true),
-        other => (serde_json::to_value(other).unwrap_or(json!({})), false),
+    let (text, is_error) = match response {
+        proto::Response::Error { message } => (pretty(&json!({ "error": message })), true),
+        proto::Response::Logs { intent, data, .. } => (log_text(*intent, data), false),
+        other => (
+            pretty(&serde_json::to_value(other).unwrap_or(json!({}))),
+            false,
+        ),
     };
 
-    let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
     json!({
         "content": [ { "type": "text", "text": text } ],
         "isError": is_error
     })
+}
+
+fn pretty(payload: &Value) -> String {
+    serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string())
+}
+
+/// A retrieved log for the model: its text, or its size if it is binary.
+fn log_text(intent: proto::LogIntent, data: &str) -> String {
+    match BASE64.decode(data) {
+        Ok(log) if log.is_empty() => format!("The device has no {intent:?} log."),
+        Ok(log) => String::from_utf8(log).unwrap_or_else(|e| {
+            format!(
+                "The {intent:?} log is {} bytes of binary data.",
+                e.as_bytes().len()
+            )
+        }),
+        Err(e) => format!("The {intent:?} log is not valid base64: {e}"),
+    }
 }

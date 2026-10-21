@@ -34,9 +34,7 @@ use rs_matter::im::client::ImClient as _;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::network::mdns::CommissionableFilter;
 
-use crate::model::{
-    CommissionOutcome, DeviceHandle, DeviceHealth, DiagSet, FabricPolicy, LogIntent,
-};
+use crate::model::{CommissionOutcome, DeviceHandle, DeviceHealth, DiagSet, LogIntent};
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -46,7 +44,8 @@ use alloc::vec::Vec;
 /// recovers — promptly, rather than hanging the actor for a minute. A reachable
 /// device commissions in well under a second; even a slow LAN is comfortably
 /// inside this. (Cancellation proper is cooperative at phase boundaries; this
-/// bounds the one phase a cancel can't reach into — see `vertical_flow`.)
+/// bounds the one phase a cancel can't reach into — see `commission_flow` in
+/// `matter-peek-rpc`.)
 const COMMISSION_TIMEOUT_SECS: u64 = 20;
 
 /// Per-fabric identity the controller installs on a device.
@@ -91,8 +90,8 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// the device NOC with `ca`.
     ///
     /// The controller fabric + CA must already exist (via
-    /// [`ControllerCa::bootstrap`](crate::ca::ControllerCa::bootstrap), once, for
-    /// either an ephemeral throwaway fabric or a persistent one). This drives
+    /// [`ControllerCa::bootstrap`](crate::ca::ControllerCa::bootstrap), once).
+    /// This drives
     /// [`Commissioner::commission`] (phase 1, over PASE) and
     /// [`Commissioner::complete_via_case`] (phase 2, over CASE).
     ///
@@ -101,9 +100,6 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// over mDNS — so an mDNS backend must be running concurrently (see
     /// [`run_mdns_backend`](crate::discovery::run_mdns_backend)), even when
     /// `peer_addr` was supplied by hand and no discovery was needed.
-    ///
-    /// `policy` is recorded on the outcome; `Ephemeral` self-destruct
-    /// (`RemoveFabric`) is performed by the caller after the work is done.
     #[allow(clippy::too_many_arguments)]
     pub async fn commission(
         &self,
@@ -112,7 +108,6 @@ impl<'a, C: Crypto> Controller<'a, C> {
         peer_addr: SocketAddr,
         passcode: u32,
         device_node_id: u64,
-        policy: FabricPolicy,
         live_node_ids: &[u64],
     ) -> Result<CommissionOutcome, Error> {
         match self
@@ -122,7 +117,6 @@ impl<'a, C: Crypto> Controller<'a, C> {
                 peer_addr,
                 passcode,
                 device_node_id,
-                policy,
                 live_node_ids,
                 || false,
             )
@@ -152,7 +146,6 @@ impl<'a, C: Crypto> Controller<'a, C> {
         peer_addr: SocketAddr,
         passcode: u32,
         device_node_id: u64,
-        policy: FabricPolicy,
         live_node_ids: &[u64],
         cancel: impl Fn() -> bool,
     ) -> Result<CommissionFlow, Error> {
@@ -275,7 +268,6 @@ impl<'a, C: Crypto> Controller<'a, C> {
                 fabric_index: controller_fab_idx,
                 node_id: phase1.device_node_id,
             },
-            policy,
         }))
     }
 
@@ -537,8 +529,8 @@ impl<'a, C: Crypto> Controller<'a, C> {
     }
 
     /// Read a device's stable identity (`UniqueID` / `SerialNumber` /
-    /// `NodeLabel`) from BasicInformation over a fresh CASE session. Used at
-    /// commission time to populate the persistent store.
+    /// `NodeLabel`) from BasicInformation over a fresh CASE session. Used to list
+    /// a device once commissioned or found on our fabric.
     pub async fn read_basic_info(&self, dev: DeviceHandle) -> crate::model::DeviceIdentity {
         crate::basic_info::read_basic_info(self.matter, self.crypto, dev.fabric_index, dev.node_id)
             .await
@@ -563,8 +555,8 @@ impl<'a, C: Crypto> Controller<'a, C> {
     }
 
     /// Remove our fabric from the device (`RemoveFabric`), self-destructing the
-    /// controller's NOC. This is the `Ephemeral` policy's teardown and also the
-    /// orphaned-fabric cleanup primitive.
+    /// controller's NOC. Decommissioning, and also the orphaned-fabric cleanup
+    /// primitive.
     ///
     /// `RemoveFabric` takes the device's own index of our fabric, which is
     /// unrelated to ours, so it is read first (`CurrentFabricIndex`).

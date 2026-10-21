@@ -1539,6 +1539,7 @@ name = "matter-peek-mcp"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "base64",
  "blocking",
  "embassy-time-queue-utils",
  "env_logger",
@@ -2237,7 +2238,7 @@ dependencies = [
 [[package]]
 name = "rs-matter"
 version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#3d3670b235bee0fe81c7b7ebde65345f1639b2b5"
+source = "git+https://github.com/project-chip/rs-matter#7d6c7059ea6f84303aea9440f3072bdbdc2c9533"
 dependencies = [
  "aes",
  "astro-dnssd",
@@ -2300,7 +2301,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-codegen"
 version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#3d3670b235bee0fe81c7b7ebde65345f1639b2b5"
+source = "git+https://github.com/project-chip/rs-matter#7d6c7059ea6f84303aea9440f3072bdbdc2c9533"
 dependencies = [
  "convert_case",
  "miette",
@@ -2319,7 +2320,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-macros"
 version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#3d3670b235bee0fe81c7b7ebde65345f1639b2b5"
+source = "git+https://github.com/project-chip/rs-matter#7d6c7059ea6f84303aea9440f3072bdbdc2c9533"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

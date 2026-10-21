@@ -4,8 +4,8 @@
 //! lifetime: on startup it loads any persisted controller fabric
 //! (`Matter::startup`) and ensures a CA ([`ControllerCa::ensure`]), then
 //! runs the transport pump concurrently with a command loop. Each command is
-//! serviced against the *shared* stack / CA / fabric, so persistently-
-//! commissioned devices can be re-addressed over CASE without re-commissioning.
+//! serviced against the *shared* stack / CA / fabric, so commissioned devices
+//! can be re-addressed over CASE without re-commissioning.
 //!
 //! The stack is `&'static` (via a `StaticCell`, fed `'static` device details) —
 //! this sidesteps the self-referential `Matter<'a>` lifetime entirely: a
@@ -23,7 +23,7 @@ use std::rc::Rc;
 
 use directories::ProjectDirs;
 use embassy_futures::select::{select, select4, Either, Either4};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use log::{error, info, warn};
@@ -50,7 +50,7 @@ use matter_peek_core::ota::{OtaEvent, OtaProvider, OtaStore as _, OtaVerifier};
 use matter_peek_core::persist::{kv_buf, ControllerStore};
 use matter_peek_core::setup_code::SetupCode;
 use matter_peek_core::subscribe::Reports;
-use matter_peek_core::{Controller, DeviceHandle, DiagSet, LogIntent};
+use matter_peek_core::{Controller, DeviceHandle, DeviceIdentity, DiagSet, StoredDevice};
 
 use matter_peek_proto as proto;
 
@@ -70,10 +70,11 @@ const SYNC_PERIOD_SECS: u64 = 300;
 /// lifetime is `'static` and it can be shared freely across tasks.
 static PERSIST_MATTER: StaticCell<Matter> = StaticCell::new();
 
-/// A cooperative cancel flag for the in-flight vertical, shared (single-threaded,
+/// A cooperative cancel flag for the in-flight commission, shared (single-threaded,
 /// so `Rc<Cell>` — no atomics) between the server's dispatch (which sets it when
 /// a [`proto::Request::Cancel`] arrives, bypassing the serial command queue) and
-/// the actor (whose vertical polls it at phase boundaries). See [`vertical_flow`].
+/// the actor (whose commission polls it at phase boundaries). See
+/// [`commission_flow`].
 pub type CancelFlag = Rc<Cell<bool>>;
 
 /// A unit of work handed to the actor, with the channels to report back on.
@@ -81,7 +82,7 @@ pub struct Command {
     pub req_id: proto::ReqId,
     pub request: proto::Request,
     /// Progress events for this command (per-command; the relay closes it when
-    /// the command's reply lands — used by the vertical's `Step` events).
+    /// the command's reply lands — used by the commission's `Step` events).
     pub events: async_channel::Sender<proto::Event>,
     /// The single final reply.
     pub reply: async_channel::Sender<proto::Response>,
@@ -186,6 +187,7 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
         uploads: RefCell::new(HashMap::new()),
         next_upload_id: Cell::new(1),
         online: RefCell::new(None),
+        transient: RefCell::new(Vec::new()),
     };
 
     // Four concurrent arms, for the actor's lifetime:
@@ -193,7 +195,7 @@ pub async fn run(rx: async_channel::Receiver<Command>, cancel: CancelFlag) {
     //   2. the command loop (services requests one at a time),
     //   3. the subscription driver (polls all live subscriptions concurrently), and
     //   4. the mDNS backend, which services **operational resolves** — CASE
-    //      re-addressing of a persisted device (subscribe / peek / decommission
+    //      re-addressing of a listed device (subscribe / peek / decommission
     //      after its secure session lapses) needs a running resolver; without it
     //      every such resolve times out with `NotFound`. (It also services
     //      discovery browses, so those must NOT start a second backend — the
@@ -328,8 +330,8 @@ struct ActorCtx<'a, C: Crypto> {
     ca: ControllerCa,
     fab_idx: NonZeroU8,
     store: ControllerStore<'a, DirKvBlobStore>,
-    /// Cooperative cancel flag for the in-flight vertical (set by the server's
-    /// dispatch, polled by [`vertical_flow`] at phase boundaries).
+    /// Cooperative cancel flag for the in-flight commission (set by the server's
+    /// dispatch, polled by [`commission_flow`] at phase boundaries).
     cancel: CancelFlag,
     /// Live health subscriptions, keyed by device `node_id`. The value is the
     /// **stop** sender: send `()` (or drop it) to make the subscription task's
@@ -348,6 +350,9 @@ struct ActorCtx<'a, C: Crypto> {
     /// The devices that advertised on our fabric at the last sync; `None`
     /// before the first one.
     online: RefCell<Option<HashSet<u64>>>,
+    /// The listed devices we keep no record of (not remembered): commissioned
+    /// without `remember`, or found by a sync, since the server started.
+    transient: RefCell<Vec<StoredDevice>>,
 }
 
 /// An OTA image file being uploaded in chunks: written as it arrives, and
@@ -425,11 +430,11 @@ async fn service<C: Crypto>(
     sub_submit: &async_channel::Sender<SubJob>,
 ) -> proto::Response {
     match &cmd.request {
-        proto::Request::RunVertical {
+        proto::Request::Commission {
             peer_addr,
             setup_code,
-            policy,
-        } => run_vertical(cmd, ctx, peer_addr, setup_code, *policy).await,
+            remember,
+        } => commission(cmd, ctx, peer_addr, setup_code, *remember).await,
         proto::Request::Discover {
             discriminator,
             setup_code,
@@ -437,8 +442,9 @@ async fn service<C: Crypto>(
         } => run_discover(ctx, *discriminator, setup_code.as_deref(), *max).await,
         proto::Request::ListDevices => list_devices(ctx),
         proto::Request::Sync => sync(ctx).await,
-        proto::Request::PeekDevice { node_id, with_logs } => {
-            peek_device(ctx, *node_id, *with_logs).await
+        proto::Request::PeekDevice { node_id } => peek_device(ctx, *node_id).await,
+        proto::Request::RetrieveLogs { node_id, intent } => {
+            retrieve_logs(ctx, *node_id, *intent).await
         }
         proto::Request::Identify { node_id, secs } => identify(ctx, *node_id, *secs).await,
         proto::Request::Subscribe { node_id } => subscribe(cmd, ctx, sub_submit, *node_id).await,
@@ -446,10 +452,11 @@ async fn service<C: Crypto>(
         proto::Request::Decommission { node_id, force } => {
             decommission(ctx, *node_id, *force).await
         }
+        proto::Request::Remember { node_id } => remember(ctx, *node_id),
         proto::Request::SetTags { node_id, tags } => set_tags(ctx, *node_id, tags),
         // `Cancel` is normally intercepted by the server (it sets the shared flag
-        // out-of-band rather than enqueuing). If one reaches here, no vertical is
-        // running — clear any stale flag and ack.
+        // out-of-band rather than enqueuing). If one reaches here, no commission
+        // is running — clear any stale flag and ack.
         proto::Request::Cancel => {
             ctx.cancel.set(false);
             proto::Response::Ok
@@ -655,10 +662,8 @@ async fn ota_update<C: Crypto>(
     node_id: u64,
     name: &str,
 ) -> proto::Response {
-    let Some(dev) = lookup_stored(ctx, node_id) else {
-        return proto::Response::Error {
-            message: format!("no stored device with node_id 0x{node_id:016x}"),
-        };
+    let Some(dev) = lookup_device(ctx, node_id) else {
+        return no_device(node_id);
     };
 
     if !ctx
@@ -797,7 +802,7 @@ async fn run_discover<C: Crypto>(
     proto::Response::Discovered { devices }
 }
 
-/// List the persistently-commissioned devices from the store.
+/// List the devices on our fabric (see [`proto::Request::ListDevices`]).
 fn list_devices<C: Crypto>(ctx: &ActorCtx<'_, C>) -> proto::Response {
     list_devices_with(ctx, None)
 }
@@ -806,14 +811,18 @@ fn list_devices<C: Crypto>(ctx: &ActorCtx<'_, C>) -> proto::Response {
 /// that produced the list (e.g. a decommission that could not reach the device).
 fn list_devices_with<C: Crypto>(ctx: &ActorCtx<'_, C>, notice: Option<String>) -> proto::Response {
     let online = ctx.online.borrow();
+    let transient = ctx.transient.borrow();
 
     match ctx.store.load_devices() {
-        Ok(devices) => proto::Response::Devices {
-            devices: devices
+        Ok(remembered) => proto::Response::Devices {
+            devices: remembered
                 .into_iter()
-                .map(|d| {
+                .map(|d| (d, true))
+                .chain(transient.iter().cloned().map(|d| (d, false)))
+                .map(|(d, remembered)| {
                     let node_id = d.handle.node_id;
-                    convert::stored_device(d, online.as_ref().map(|o| o.contains(&node_id)))
+                    let online = online.as_ref().map(|o| o.contains(&node_id));
+                    convert::device(d, online, remembered)
                 })
                 .collect(),
             notice,
@@ -824,49 +833,51 @@ fn list_devices_with<C: Crypto>(ctx: &ActorCtx<'_, C>, notice: Option<String>) -
     }
 }
 
-/// Re-address a persisted device by NodeID over CASE (no re-commission) and read
-/// its health (+ optional logs).
-async fn peek_device<C: Crypto>(
-    ctx: &ActorCtx<'_, C>,
-    node_id: u64,
-    with_logs: bool,
-) -> proto::Response {
-    let Some(dev) = lookup_stored(ctx, node_id) else {
-        return proto::Response::Error {
-            message: format!("no stored device with node_id 0x{node_id:016x}"),
-        };
+/// Re-address a listed device by NodeID over CASE (no re-commission) and read
+/// its health.
+async fn peek_device<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64) -> proto::Response {
+    let Some(dev) = lookup_device(ctx, node_id) else {
+        return no_device(node_id);
     };
 
     let health = ctx.controller.read_health(dev.handle, DiagSet::ALL).await;
-    let crash_log_bytes = if with_logs {
-        match ctx
-            .controller
-            .retrieve_logs(dev.handle, LogIntent::CrashLogs)
-            .await
-        {
-            Ok(log) => Some(log.len()),
-            Err(e) => {
-                warn!("peek node 0x{node_id:016x}: no crash logs: {e:?}");
-                None
-            }
-        }
-    } else {
-        None
-    };
 
     proto::Response::Peek {
         handle: convert::handle(dev.handle),
         health: convert::health(health),
-        crash_log_bytes,
     }
 }
 
-/// Blink a persisted device (Identify cluster) on its application endpoint.
+/// Retrieve a diagnostic log of a listed device.
+async fn retrieve_logs<C: Crypto>(
+    ctx: &ActorCtx<'_, C>,
+    node_id: u64,
+    intent: proto::LogIntent,
+) -> proto::Response {
+    let Some(dev) = lookup_device(ctx, node_id) else {
+        return no_device(node_id);
+    };
+
+    match ctx
+        .controller
+        .retrieve_logs(dev.handle, convert::log_intent(intent))
+        .await
+    {
+        Ok(log) => proto::Response::Logs {
+            node_id,
+            intent,
+            data: BASE64.encode(log),
+        },
+        Err(e) => proto::Response::Error {
+            message: format!("retrieving the logs failed: {e:?}"),
+        },
+    }
+}
+
+/// Blink a listed device (Identify cluster) on its application endpoint.
 async fn identify<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64, secs: u16) -> proto::Response {
-    let Some(dev) = lookup_stored(ctx, node_id) else {
-        return proto::Response::Error {
-            message: format!("no stored device with node_id 0x{node_id:016x}"),
-        };
+    let Some(dev) = lookup_device(ctx, node_id) else {
+        return no_device(node_id);
     };
     match ctx.controller.identify(dev.handle, 1, secs).await {
         Ok(()) => proto::Response::Ok,
@@ -876,7 +887,7 @@ async fn identify<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64, secs: u16) -> 
     }
 }
 
-/// Start a live health subscription to a persisted device and reply
+/// Start a live health subscription to a listed device and reply
 /// **immediately** — the subscription then runs as its own arm of the actor (see
 /// [`run_subscriptions`]), streaming `HealthReport` / `SubscriptionState` frames
 /// to the connection sink until [`unsubscribe`]d or the connection drops. Because
@@ -888,10 +899,8 @@ async fn subscribe<C: Crypto>(
     sub_submit: &async_channel::Sender<SubJob>,
     node_id: u64,
 ) -> proto::Response {
-    let Some(dev) = lookup_stored(ctx, node_id) else {
-        return proto::Response::Error {
-            message: format!("no stored device with node_id 0x{node_id:016x}"),
-        };
+    let Some(dev) = lookup_device(ctx, node_id) else {
+        return no_device(node_id);
     };
 
     // Already watching this device? No-op success (the existing subscription
@@ -954,7 +963,7 @@ fn unsubscribe<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64) -> proto::Respons
 }
 
 /// How many times to try reaching the device for `RemoveFabric` before giving
-/// up. A persisted device is addressed over CASE, which first needs an
+/// up. A listed device is addressed over CASE, which first needs an
 /// *operational mDNS resolve* — a device that is asleep, slow to answer, or
 /// re-announcing itself can miss one attempt and answer the next, so a single
 /// failure is not proof that it is gone.
@@ -962,6 +971,11 @@ const DECOMMISSION_ATTEMPTS: u32 = 3;
 
 /// Pause between those attempts, to give a slow resolve room to land.
 const DECOMMISSION_RETRY_DELAY_SECS: u64 = 2;
+
+/// How long those attempts may take in all. Each address of an unreachable
+/// device costs a full CASE timeout, and a cached advertisement can outlive the
+/// device.
+const DECOMMISSION_TIMEOUT_SECS: u64 = 30;
 
 /// `RemoveFabric` on the device, retried up to [`DECOMMISSION_ATTEMPTS`] times.
 /// `Err` carries the last failure, formatted, once every attempt is spent.
@@ -993,23 +1007,20 @@ async fn try_remove_fabric<C: Crypto>(
     Err(last)
 }
 
-/// Decommission a persisted device: stop any live subscription, `RemoveFabric`
-/// our fabric on the device (freeing its fabric slot), then drop the local
-/// record. Returns the refreshed device list.
+/// Decommission a listed device: stop any live subscription, `RemoveFabric` our
+/// fabric on the device (freeing its fabric slot), then drop it from the list
+/// and its record, if any. Returns the refreshed device list.
 ///
-/// A device that stays unreachable keeps its record, as pending removal: a sync
-/// removes our fabric from it once it advertises again. `force` drops the record
-/// without contacting the device; one that still holds our fabric shows up again
-/// on the next sync.
+/// The device leaves the list even if it cannot be reached, or with `force` is
+/// not contacted at all. Such a device still holds our fabric, so a sync lists
+/// it again once it advertises.
 async fn decommission<C: Crypto>(
     ctx: &ActorCtx<'_, C>,
     node_id: u64,
     force: bool,
 ) -> proto::Response {
-    let Some(dev) = lookup_stored(ctx, node_id) else {
-        return proto::Response::Error {
-            message: format!("no stored device with node_id 0x{node_id:016x}"),
-        };
+    let Some(dev) = lookup_device(ctx, node_id) else {
+        return no_device(node_id);
     };
 
     // Stop any live subscription first (its CASE session is about to be torn down).
@@ -1019,46 +1030,46 @@ async fn decommission<C: Crypto>(
 
     let removed = if force {
         info!("decommission node 0x{node_id:016x}: forced - not contacting the device");
-        Err(())
+        false
     } else {
-        try_remove_fabric(ctx, dev.handle, node_id)
-            .await
-            .map_err(|_| ())
+        let attempts = try_remove_fabric(ctx, dev.handle, node_id);
+        match with_timeout(Duration::from_secs(DECOMMISSION_TIMEOUT_SECS), attempts).await {
+            Ok(result) => result.is_ok(),
+            Err(_) => {
+                warn!("decommission node 0x{node_id:016x}: gave up after {DECOMMISSION_TIMEOUT_SECS}s");
+                false
+            }
+        }
     };
 
     // Drop any secure session we still hold, but only if `RemoveFabric` did not
     // go through: on success, the exchange that carried it still has a trailing
     // close to send on that session.
-    if removed.is_err() {
+    if !removed {
         ctx.controller.forget_sessions(dev.handle);
     }
 
-    if removed.is_ok() || force {
-        set_online(ctx, node_id, false);
+    set_online(ctx, node_id, false);
+    ctx.transient
+        .borrow_mut()
+        .retain(|d| d.handle.node_id != node_id);
 
-        return update_devices(
-            ctx,
-            |devices| devices.retain(|d| d.handle.node_id != node_id),
-            None,
-        );
-    }
+    let notice = (!removed && !force).then(|| {
+        format!(
+            "Device 0x{node_id:016x} could not be reached, so it was only removed from the \
+             list and still holds our fabric. Once it is back online, a sync lists it again \
+             and it can be decommissioned."
+        )
+    });
 
     update_devices(
         ctx,
-        |devices| {
-            devices
-                .iter_mut()
-                .filter(|d| d.handle.node_id == node_id)
-                .for_each(|d| d.pending_removal = true);
-        },
-        Some(format!(
-            "Device 0x{node_id:016x} could not be reached. Our fabric will be removed from \
-             it once it is back online."
-        )),
+        |devices| devices.retain(|d| d.handle.node_id != node_id),
+        notice,
     )
 }
 
-/// Apply `f` to the stored devices, then return the refreshed device list.
+/// Apply `f` to the device records, then return the refreshed device list.
 fn update_devices<C: Crypto>(
     ctx: &ActorCtx<'_, C>,
     f: impl FnOnce(&mut alloc::vec::Vec<matter_peek_core::StoredDevice>),
@@ -1088,21 +1099,19 @@ async fn sync<C: Crypto>(ctx: &ActorCtx<'_, C>) -> proto::Response {
     }
 }
 
-/// Align the device records with the devices advertising on our fabric: adopt
-/// those without a record, complete pending removals and, if `refresh`, re-read
+/// Align the device list with the devices advertising on our fabric: list
+/// those not listed yet (keeping no record of them) and, if `refresh`, re-read
 /// the others' identity. Notes which devices are online. Returns a notice of
 /// what changed, if anything did.
 async fn sync_devices<C: Crypto>(
     ctx: &ActorCtx<'_, C>,
     refresh: bool,
 ) -> Result<Option<String>, Error> {
-    use matter_peek_core::StoredDevice;
-
     let advertised = ctx.controller.browse_fabric(ctx.fab_idx).await?;
     info!("sync: {} device(s) on our fabric", advertised.len());
 
-    let mut devices = ctx.store.load_devices()?;
-    let (mut adopted, mut removed) = (0, 0);
+    let mut remembered = ctx.store.load_devices()?;
+    let mut found = 0;
 
     for &node_id in &advertised {
         // In use on our fabric, so never to be handed out again.
@@ -1113,86 +1122,101 @@ async fn sync_devices<C: Crypto>(
             node_id,
         };
 
-        match devices.iter().position(|d| d.handle.node_id == node_id) {
-            Some(i) if devices[i].pending_removal => {
-                match ctx.controller.decommission(handle).await {
-                    Ok(()) => {
-                        info!("sync: removed our fabric from node 0x{node_id:016x}");
-                        devices.remove(i);
-                        removed += 1;
-                    }
-                    Err(e) => {
-                        warn!("sync: removing our fabric from node 0x{node_id:016x} failed: {e:?}");
-                        continue;
-                    }
-                }
-            }
-            Some(i) => {
-                let ident = if refresh {
-                    ctx.controller.read_basic_info(handle).await
-                } else {
-                    continue;
-                };
+        let record = remembered.iter().position(|d| d.handle.node_id == node_id);
+        let listed = record.is_some()
+            || ctx
+                .transient
+                .borrow()
+                .iter()
+                .any(|d| d.handle.node_id == node_id);
 
-                // An unusable fingerprint means the read failed.
-                if !ident.fingerprint.is_usable() {
-                    continue;
-                }
-
-                let device: &mut StoredDevice = &mut devices[i];
-                if !ident.node_label.is_empty() {
-                    device.node_label = ident.node_label;
-                }
-                device.unique_id = ident.unique_id;
-                device.serial_number = ident.serial_number;
-                device.vendor_name = ident.vendor_name;
-                device.product_name = ident.product_name;
-                device.fingerprint = ident.fingerprint;
-            }
-            None => {
-                let ident = ctx.controller.read_basic_info(handle).await;
-
-                // Only a device that answers: an advertisement can outlive its
-                // device (cached until its TTL runs out).
-                if !ident.fingerprint.is_usable() {
-                    warn!("sync: node 0x{node_id:016x} is advertised on our fabric but does not answer");
-                    continue;
-                }
-
-                info!("sync: adopting node 0x{node_id:016x}, found on our fabric");
-                adopt(&mut devices, handle, &ident);
-                adopted += 1;
-            }
+        if listed && !refresh {
+            continue;
         }
 
-        ctx.store.save_devices(&devices)?;
+        let ident = ctx.controller.read_basic_info(handle).await;
+
+        // An unusable fingerprint means the read failed. Only a device that
+        // answers is listed: an advertisement can outlive its device (cached
+        // until its TTL runs out).
+        if !ident.fingerprint.is_usable() {
+            if !listed {
+                warn!(
+                    "sync: node 0x{node_id:016x} is advertised on our fabric but does not answer"
+                );
+            }
+            continue;
+        }
+
+        if let Some(i) = record {
+            refresh_identity(&mut remembered[i], ident);
+            ctx.store.save_devices(&remembered)?;
+            continue;
+        }
+
+        let mut transient = ctx.transient.borrow_mut();
+        match transient.iter_mut().find(|d| d.handle.node_id == node_id) {
+            Some(device) => refresh_identity(device, ident),
+            None => {
+                info!("sync: listing node 0x{node_id:016x}, found on our fabric");
+                transient.push(new_record(handle, &ident));
+                found += 1;
+            }
+        }
     }
 
     *ctx.online.borrow_mut() = Some(advertised.into_iter().collect());
 
-    let mut notice = alloc::vec::Vec::new();
-    if adopted > 0 {
-        notice.push(format!(
-            "{adopted} device(s) found on our fabric were added to the list."
-        ));
-    }
-    if removed > 0 {
-        notice.push(format!(
-            "Our fabric was removed from {removed} device(s) pending removal."
-        ));
-    }
-
-    Ok((!notice.is_empty()).then(|| notice.join(" ")))
+    Ok((found > 0)
+        .then(|| format!("{found} device(s) found on our fabric were added to the list.")))
 }
 
-/// Add a record for a device found on our fabric. A record of the same unit
-/// under another node ID is stale (a device holds our fabric only once), so it
-/// is replaced, keeping its tags and label.
-fn adopt(
-    devices: &mut alloc::vec::Vec<matter_peek_core::StoredDevice>,
-    handle: DeviceHandle,
-    ident: &matter_peek_core::DeviceIdentity,
-) {
+/// Update a device's identity from a fresh read, keeping a label the device no
+/// longer serves.
+fn refresh_identity(device: &mut StoredDevice, ident: DeviceIdentity) {
+    if !ident.node_label.is_empty() {
+        device.node_label = ident.node_label;
+    }
+    device.unique_id = ident.unique_id;
+    device.serial_number = ident.serial_number;
+    device.vendor_name = ident.vendor_name;
+    device.product_name = ident.product_name;
+    device.fingerprint = ident.fingerprint;
+}
+
+/// Keep a record of a listed device (see [`proto::Request::Remember`]).
+fn remember<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64) -> proto::Response {
+    let position = ctx
+        .transient
+        .borrow()
+        .iter()
+        .position(|d| d.handle.node_id == node_id);
+
+    let Some(i) = position else {
+        // Remembered already, or not listed at all.
+        return match lookup_device(ctx, node_id) {
+            Some(_) => list_devices(ctx),
+            None => no_device(node_id),
+        };
+    };
+
+    let device = ctx.transient.borrow_mut().remove(i);
+    let ident = DeviceIdentity {
+        unique_id: device.unique_id,
+        serial_number: device.serial_number,
+        node_label: device.node_label,
+        vendor_name: device.vendor_name,
+        product_name: device.product_name,
+        fingerprint: device.fingerprint,
+    };
+
+    update_devices(ctx, |devices| adopt(devices, device.handle, &ident), None)
+}
+
+/// Add a record for a device on our fabric. A record of the same unit under
+/// another node ID is stale (a device holds our fabric only once), so it is
+/// replaced, keeping its tags and label.
+fn adopt(devices: &mut Vec<StoredDevice>, handle: DeviceHandle, ident: &DeviceIdentity) {
     use matter_peek_core::{match_device, MatchResult};
 
     let mut record = new_record(handle, ident);
@@ -1222,41 +1246,50 @@ fn set_online<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64, online: bool) {
     }
 }
 
-/// Replace a stored device's local tags, then return the refreshed device list
-/// (so the UI updates in one round-trip).
+/// Replace a remembered device's local tags, then return the refreshed device
+/// list (so the UI updates in one round-trip).
 fn set_tags<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64, tags: &[String]) -> proto::Response {
     match ctx.store.set_tags(node_id, tags) {
         Ok(true) => list_devices(ctx),
-        Ok(false) => proto::Response::Error {
-            message: format!("no stored device with node_id 0x{node_id:016x}"),
+        Ok(false) if lookup_device(ctx, node_id).is_some() => proto::Response::Error {
+            message: format!("device 0x{node_id:016x} is not remembered; remember it to tag it"),
         },
+        Ok(false) => no_device(node_id),
         Err(e) => proto::Response::Error {
             message: format!("set tags failed: {e:?}"),
         },
     }
 }
 
-/// Find a stored device by NodeID.
-fn lookup_stored<C: Crypto>(
-    ctx: &ActorCtx<'_, C>,
-    node_id: u64,
-) -> Option<matter_peek_core::StoredDevice> {
-    ctx.store
-        .load_devices()
-        .ok()?
+/// The listed devices: the remembered ones, then the others.
+fn listed_devices<C: Crypto>(ctx: &ActorCtx<'_, C>) -> Vec<StoredDevice> {
+    let mut devices = ctx.store.load_devices().unwrap_or_default();
+    devices.extend(ctx.transient.borrow().iter().cloned());
+
+    devices
+}
+
+/// Find a listed device by NodeID.
+fn lookup_device<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64) -> Option<StoredDevice> {
+    listed_devices(ctx)
         .into_iter()
         .find(|d| d.handle.node_id == node_id)
 }
 
-/// Run the full vertical against a freshly-addressed peer, using the shared
-/// persistent stack + CA. `Persistent` policy keeps the fabric and records the
-/// device in the store; `Ephemeral` removes it afterward.
-async fn run_vertical<C: Crypto>(
+fn no_device(node_id: u64) -> proto::Response {
+    proto::Response::Error {
+        message: format!("no device with node_id 0x{node_id:016x}"),
+    }
+}
+
+/// Commission a freshly-addressed peer onto our fabric, using the shared
+/// persistent stack + CA. With `remember`, also keep a record of it.
+async fn commission<C: Crypto>(
     cmd: &Command,
     ctx: &ActorCtx<'_, C>,
     peer_addr: &str,
     setup_code: &str,
-    policy: proto::FabricPolicy,
+    remember: bool,
 ) -> proto::Response {
     let peer_addr: SocketAddr = match peer_addr.parse() {
         Ok(a) => a,
@@ -1272,7 +1305,7 @@ async fn run_vertical<C: Crypto>(
         Err(e) => return invalid_setup_code(e),
     };
 
-    vertical_flow(cmd, ctx, peer_addr, passcode, policy).await
+    commission_flow(cmd, ctx, peer_addr, passcode, remember).await
 }
 
 fn invalid_setup_code(e: Error) -> proto::Response {
@@ -1284,24 +1317,25 @@ fn invalid_setup_code(e: Error) -> proto::Response {
     }
 }
 
-/// The vertical proper: commission → health → logs → (persist | decommission),
-/// reporting each step as a [`proto::Event`].
-async fn vertical_flow<C: Crypto>(
+/// The commission proper, reporting each step as a [`proto::Event`]: commission,
+/// then list the device and, with `remember`, keep a record of it.
+async fn commission_flow<C: Crypto>(
     cmd: &Command,
     ctx: &ActorCtx<'_, C>,
     peer_addr: SocketAddr,
     passcode: u32,
-    policy: proto::FabricPolicy,
+    remember: bool,
 ) -> proto::Response {
-    use proto::VerticalStep as Step;
+    use proto::CommissionStep as Step;
 
-    // Fresh cancel state for this run (any stale request from a prior vertical is
-    // cleared). The flag is set out-of-band by the server's dispatch and polled
+    // Fresh cancel state for this run (any stale request from a prior commission
+    // is cleared). The flag is set out-of-band by the server's dispatch and polled
     // at the phase boundaries below.
     ctx.cancel.set(false);
 
-    // A NodeID never handed out before: the device may keep it even if this run
-    // goes wrong.
+    // A NodeID never handed out before, and never to be handed out again (the
+    // counter is saved right away): the device keeps it, remembered or not, and
+    // even if this run goes wrong.
     let device_node_id = match ctx.store.allocate_node_id(FIRST_DEVICE_NODE_ID) {
         Ok(node_id) => node_id,
         Err(e) => {
@@ -1336,7 +1370,6 @@ async fn vertical_flow<C: Crypto>(
             peer_addr,
             passcode,
             device_node_id,
-            convert::policy(policy),
             &live_node_ids,
             move || cancel.get(),
         )
@@ -1370,98 +1403,44 @@ async fn vertical_flow<C: Crypto>(
         return cancelled(removed);
     }
 
-    // --- Read health ---
-    emit(cmd, Step::ReadHealth, started()).await;
-    let health = ctx
-        .controller
-        .read_health(outcome.handle, DiagSet::ALL)
-        .await;
-    emit(cmd, Step::ReadHealth, done()).await;
-
-    // --- Retrieve CrashLogs (soft-fail: a device may simply have none) ---
-    emit(cmd, Step::RetrieveLogs, started()).await;
-    let crash_log_bytes = match ctx
-        .controller
-        .retrieve_logs(outcome.handle, LogIntent::CrashLogs)
-        .await
+    // Our fabric changed with the device on it: keep it across restarts.
+    if let Err(e) = ctx
+        .matter
+        .with_state(|state| ctx.store.save_fabric(state.fabrics.fabric(ctx.fab_idx)?))
     {
-        Ok(bytes) => {
-            emit(cmd, Step::RetrieveLogs, done()).await;
-            Some(bytes.len())
-        }
-        Err(e) => {
-            emit(cmd, Step::RetrieveLogs, failed(&e)).await;
-            None
-        }
-    };
-
-    // SAFEPOINT 3 — after the (read-only) health/logs phases, before we decide
-    // the device's fate. A cancel that arrived during those reads is honored
-    // here: the device is decommissioned regardless of policy (don't persist a
-    // device the user asked to cancel), leaving nothing behind.
-    if ctx.cancel.get() {
-        let removed = ctx.controller.decommission(outcome.handle).await.is_ok();
-        if !removed {
-            error!("actor: cancel cleanup decommission failed");
-        }
-        return cancelled(removed);
+        error!("actor: saving our fabric failed: {e:?}");
     }
 
-    // --- Persist (Persistent) | Decommission (Ephemeral) ---
-    let mut rematch_candidate = None;
-    let decommissioned = match policy {
-        proto::FabricPolicy::Persistent => {
-            // Keep the device: persist our fabric (extended by AddNOC) + a store
-            // record (with BasicInformation identity) so it can be re-addressed
-            // over CASE later without re-commissioning. Re-matching reuses the
-            // record of a re-commissioned unit; a fingerprint-only hit comes back
-            // as a candidate to surface for linking.
-            match persist_commissioned(ctx, outcome.handle).await {
-                Ok(candidate) => rematch_candidate = candidate,
-                Err(e) => error!("actor: persisting commissioned device failed: {e:?}"),
-            }
-            set_online(ctx, outcome.handle.node_id, true);
-            false
-        }
-        proto::FabricPolicy::Ephemeral => {
-            emit(cmd, Step::Decommission, started()).await;
-            match ctx.controller.decommission(outcome.handle).await {
-                Ok(()) => {
-                    emit(cmd, Step::Decommission, done()).await;
-                    true
-                }
-                Err(e) => {
-                    emit(cmd, Step::Decommission, failed(&e)).await;
-
-                    // The device keeps our fabric: have a sync remove it.
-                    let mut record =
-                        new_record(outcome.handle, &matter_peek_core::DeviceIdentity::default());
-                    record.pending_removal = true;
-                    if let Err(e) = ctx.store.load_devices().and_then(|mut devices| {
-                        devices.push(record);
-                        ctx.store.save_devices(&devices)
-                    }) {
-                        error!("actor: recording the pending removal failed: {e:?}");
-                    }
-
-                    false
-                }
+    // List the device; keep a record of it if asked. Re-matching reuses the
+    // record of a re-commissioned unit; a fingerprint-only hit comes back as a
+    // candidate to surface for linking.
+    let rematch_candidate = if remember {
+        match persist_commissioned(ctx, outcome.handle).await {
+            Ok(candidate) => candidate,
+            Err(e) => {
+                error!("actor: remembering the commissioned device failed: {e:?}");
+                None
             }
         }
+    } else {
+        let ident = ctx.controller.read_basic_info(outcome.handle).await;
+        ctx.transient
+            .borrow_mut()
+            .push(new_record(outcome.handle, &ident));
+        None
     };
 
-    proto::Response::Vertical(proto::VerticalResult {
+    set_online(ctx, outcome.handle.node_id, true);
+
+    proto::Response::Commissioned(proto::CommissionResult {
         handle: convert::handle(outcome.handle),
-        health: convert::health(health),
-        crash_log_bytes,
-        decommissioned,
         rematch_candidate,
     })
 }
 
-/// Persist a freshly-commissioned device, re-matching it against the store so a
-/// re-commissioned unit reuses its existing record (and the user's tags / label)
-/// rather than spawning a duplicate.
+/// Keep a record of a freshly-commissioned device, re-matching it against the
+/// store so a re-commissioned unit reuses its existing record (and the user's
+/// tags / label) rather than spawning a duplicate.
 ///
 /// Returns `Some(existing_node_id)` when only the per-model fingerprint matched
 /// (a [`MatchResult::Candidate`]) — surfaced so the UI can offer to *link* the
@@ -1472,10 +1451,6 @@ async fn persist_commissioned<C: Crypto>(
     handle: DeviceHandle,
 ) -> Result<Option<u64>, Error> {
     use matter_peek_core::{match_device, MatchResult, StoredDevice};
-
-    // Save the updated controller fabric (it now lists the new device's NOC).
-    ctx.matter
-        .with_state(|state| ctx.store.save_fabric(state.fabrics.fabric(ctx.fab_idx)?))?;
 
     // Read the device's stable identity (best-effort) and classify it.
     let ident = ctx.controller.read_basic_info(handle).await;
@@ -1513,7 +1488,6 @@ async fn persist_commissioned<C: Crypto>(
                 product_name: ident.product_name,
                 fingerprint: ident.fingerprint,
                 tags,
-                pending_removal: false,
             });
         }
         // Fingerprint-only: possibly the same unit, possibly a sibling of the
@@ -1548,24 +1522,20 @@ fn new_record(
         product_name: ident.product_name.clone(),
         fingerprint: ident.fingerprint,
         tags: alloc::vec::Vec::new(),
-        pending_removal: false,
     }
 }
 
-/// The NodeIDs of the devices we are commissioned into and mean to stay: the
-/// orphan sweep must not remove our fabric from those (see
-/// `sweep_orphaned_fabrics`). Pending removals are not among them.
-fn live_node_ids<C: Crypto>(ctx: &ActorCtx<'_, C>) -> alloc::vec::Vec<u64> {
-    ctx.store
-        .load_devices()
-        .unwrap_or_default()
+/// The NodeIDs of the devices we are commissioned into and mean to stay — the
+/// listed ones: the orphan sweep must not remove our fabric from those (see
+/// `sweep_orphaned_fabrics`).
+fn live_node_ids<C: Crypto>(ctx: &ActorCtx<'_, C>) -> Vec<u64> {
+    listed_devices(ctx)
         .iter()
-        .filter(|d| !d.pending_removal)
         .map(|d| d.handle.node_id)
         .collect()
 }
 
-async fn emit(cmd: &Command, step: proto::VerticalStep, status: proto::StepStatus) {
+async fn emit(cmd: &Command, step: proto::CommissionStep, status: proto::StepStatus) {
     let _ = cmd
         .events
         .send(proto::Event::Step {
@@ -1594,7 +1564,7 @@ fn failed_msg(msg: &str) -> proto::StepStatus {
     }
 }
 
-/// The reply for a vertical cancelled at a safepoint. `decommissioned` says
+/// The reply for a commission cancelled at a safepoint. `decommissioned` says
 /// whether a just-installed device fabric had to be cleaned up on the way out.
 fn cancelled(decommissioned: bool) -> proto::Response {
     proto::Response::Cancelled { decommissioned }

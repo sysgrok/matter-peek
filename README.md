@@ -12,8 +12,10 @@ See [`DESIGN.md`](DESIGN.md) for the full architecture and roadmap.
 
 ## Status
 
-**Phase 0 — vertical spike.** A headless CLI commissions an externally-running
-Matter accessory end-to-end. Diagnostics + log retrieval land next.
+A local Matter controller for diagnostics: a web UI listing the devices on our
+fabric (live health, logs, OTA updates) and commissioning new ones (with mDNS
+discovery), over a WS/JSON RPC server; an MCP server for AI agents; and a
+headless CLI.
 
 ## Layout
 

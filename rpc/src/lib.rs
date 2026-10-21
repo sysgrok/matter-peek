@@ -61,7 +61,7 @@ where
 pub fn run(addr: &str) -> std::io::Result<()> {
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<actor::Command>();
 
-    // The vertical cancel flag, shared (single-threaded `Rc<Cell>`) between the
+    // The commission cancel flag, shared (single-threaded `Rc<Cell>`) between the
     // actor (polls it) and the server (sets it on a `Cancel` request, bypassing
     // the serial command queue).
     let cancel: actor::CancelFlag = std::rc::Rc::new(std::cell::Cell::new(false));

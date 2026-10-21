@@ -28,6 +28,9 @@ use matter_peek_rpc::actor::{self, Command};
 /// is request/response).
 struct ActorDispatch {
     tx: async_channel::Sender<Command>,
+    /// The session's outbound sink, drained unread: an upload in progress
+    /// belongs to it, and OTA update progress lands in it.
+    out: async_channel::Sender<proto::ServerMsg>,
 }
 
 impl Dispatch for ActorDispatch {
@@ -40,10 +43,7 @@ impl Dispatch for ActorDispatch {
             request,
             events: ev_tx,
             reply: rep_tx,
-            // The MCP adapter is one-shot request/response; it doesn't host a
-            // streaming connection, so long-lived subscriptions aren't available
-            // here (and aren't in its tool set).
-            out: None,
+            out: Some(self.out.clone()),
         };
         self.tx
             .send(cmd)
@@ -69,6 +69,15 @@ impl Dispatch for ActorDispatch {
                 Sel::Reply(None) => return Err("actor dropped without reply".to_string()),
             }
         }
+    }
+
+    async fn read_file(&self, path: &str) -> Result<Vec<u8>, String> {
+        let path = path.to_string();
+
+        blocking::unblock(move || {
+            std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))
+        })
+        .await
     }
 }
 
@@ -100,7 +109,13 @@ fn main() -> ExitCode {
     let cancel: actor::CancelFlag = std::rc::Rc::new(std::cell::Cell::new(false));
     matter_peek_rpc::spawn(actor::run(cmd_rx, cancel));
 
-    let dispatch = ActorDispatch { tx: cmd_tx };
+    let (out_tx, out_rx) = async_channel::unbounded::<proto::ServerMsg>();
+    matter_peek_rpc::spawn(async move { while out_rx.recv().await.is_ok() {} });
+
+    let dispatch = ActorDispatch {
+        tx: cmd_tx,
+        out: out_tx,
+    };
 
     match matter_peek_rpc::block_on(stdio_loop(dispatch, caps)) {
         Ok(()) => ExitCode::SUCCESS,

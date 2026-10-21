@@ -1,10 +1,10 @@
-//! A minimal WS client that drives the RPC server through one `RunVertical`,
-//! speaking the exact `matter-peek-proto` contract the Yew UI uses. Doubles as a
-//! headless smoke test of the full server↔core↔device pipe.
+//! A minimal WS client that sends the RPC server one request, speaking the
+//! exact `matter-peek-proto` contract the Yew UI uses. Doubles as a headless
+//! smoke test of the full server↔core↔device pipe.
 //!
 //! ```text
-//! ws_client [WS_URL] [PEER_ADDR] [PASSCODE]
-//! # defaults: ws://127.0.0.1:8087  [::1]:5540  20202021
+//! ws_client [WS_URL] <command> [args...]
+//! # WS_URL defaults to ws://127.0.0.1:8087; the commands are listed in `main`
 //! ```
 
 use async_tungstenite::tungstenite::Message;
@@ -19,16 +19,20 @@ fn main() {
     //   ws_client [URL] discover [setup_code]
     //   ws_client [URL] list
     //   ws_client [URL] sync
-    //   ws_client [URL] peek <node_id_hex_or_dec> [logs]
+    //   ws_client [URL] peek <node_id_hex_or_dec>
+    //   ws_client [URL] logs <node_id> [support|network|crash]  (default crash)
     //   ws_client [URL] identify <node_id> [secs]
     //   ws_client [URL] subscribe <node_id> [secs]      (live health stream)
+    //   ws_client [URL] unsubscribe <node_id>
+    //   ws_client [URL] decommission <node_id> [force]  (force: don't contact it)
+    //   ws_client [URL] remember <node_id>              (keep a record of it)
     //   ws_client [URL] settags <node_id> <comma,separated,tags>
     //   ws_client [URL] ota-images
     //   ws_client [URL] ota-upload <file.ota>
     //   ws_client [URL] ota-delete <name>
     //   ws_client [URL] ota-update <node_id> <name>   (follows the update)
-    //   ws_client [URL] persistent <addr> [setup_code] (persistent commission)
-    //   ws_client [URL] <addr> [setup_code]             (ephemeral vertical)
+    //   ws_client [URL] <addr> [setup_code] [remember]  (commission)
+    //   ws_client [URL] cancel                          (cancel the running commission)
     //
     // A setup code is a passcode, a manual pairing code or an MT: QR code payload.
     let mut args = std::env::args().skip(1);
@@ -54,7 +58,17 @@ fn main() {
         "cancel" => proto::Request::Cancel,
         "peek" => proto::Request::PeekDevice {
             node_id: parse_node(arg3.as_deref().unwrap_or("0")),
-            with_logs: args.next().as_deref() == Some("logs"),
+        },
+        "logs" => proto::Request::RetrieveLogs {
+            node_id: parse_node(arg3.as_deref().unwrap_or("0")),
+            intent: match args.next().as_deref() {
+                Some("support") => proto::LogIntent::EndUserSupport,
+                Some("network") => proto::LogIntent::NetworkDiag,
+                _ => proto::LogIntent::CrashLogs,
+            },
+        },
+        "remember" => proto::Request::Remember {
+            node_id: parse_node(arg3.as_deref().unwrap_or("0")),
         },
         "identify" => proto::Request::Identify {
             node_id: parse_node(arg3.as_deref().unwrap_or("0")),
@@ -93,16 +107,19 @@ fn main() {
             node_id: parse_node(arg3.as_deref().unwrap_or("0")),
             name: args.next().unwrap_or_default(),
         },
-        "persistent" => proto::Request::RunVertical {
-            peer_addr: arg3.clone().unwrap_or_else(|| "[::1]:5540".into()),
-            setup_code: args.next().unwrap_or_else(|| "20202021".into()),
-            policy: proto::FabricPolicy::Persistent,
-        },
-        addr => proto::Request::RunVertical {
-            peer_addr: addr.to_string(),
-            setup_code: arg3.unwrap_or_else(|| "20202021".into()),
-            policy: proto::FabricPolicy::Ephemeral,
-        },
+        addr => {
+            let mut rest: Vec<String> = arg3.into_iter().chain(args.by_ref()).collect();
+            let remember = rest.last().is_some_and(|arg| arg == "remember");
+            if remember {
+                rest.pop();
+            }
+
+            proto::Request::Commission {
+                peer_addr: addr.to_string(),
+                setup_code: rest.pop().unwrap_or_else(|| "20202021".into()),
+                remember,
+            }
+        }
     };
 
     // For `subscribe`, keep the connection open after the `Subscribed` reply and
@@ -161,6 +178,13 @@ fn main() {
                         }
                     }
                 },
+                proto::ServerMsg::Response {
+                    response: proto::Response::Logs { intent, data, .. },
+                    ..
+                } => {
+                    print_log(intent, &data);
+                    break;
+                }
                 proto::ServerMsg::Response { response, .. } => {
                     println!("<< response: {response:#?}");
                     // For a subscription, the data streams *after* this reply — keep
@@ -178,6 +202,24 @@ fn main() {
             }
         }
     });
+}
+
+/// Print a retrieved log: as text when it is, else just its size.
+fn print_log(intent: proto::LogIntent, data: &str) {
+    use base64::Engine as _;
+
+    let log = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .expect("base64 log");
+
+    match String::from_utf8(log) {
+        Ok(text) if text.is_empty() => println!("<< no {intent:?} log on the device"),
+        Ok(text) => println!("<< {intent:?} log:\n{text}"),
+        Err(e) => println!(
+            "<< {intent:?} log: {} bytes of binary data",
+            e.as_bytes().len()
+        ),
+    }
 }
 
 /// The size of an upload chunk, before base64.

@@ -1,4 +1,4 @@
-//! matter-peek CLI — the Phase 0 vertical spike.
+//! matter-peek CLI — a headless commissioning spike.
 //!
 //! Drives [`matter_peek_core::Controller::commission`] against an
 //! externally-running Matter accessory. Defaults match rs-matter's test fixture
@@ -16,8 +16,9 @@
 //! matter-peek: ok fabric_index=<u8> device_node_id=0x<hex>
 //! ```
 //!
-//! The full Phase 0 vertical: commission (ephemeral) → read `sw_diag` +
-//! `gen_diag` → retrieve `CrashLogs` over BDX → `RemoveFabric` (self-destruct).
+//! The flow: commission → read `sw_diag` + `gen_diag` → retrieve `CrashLogs`
+//! over BDX → `RemoveFabric`. The CLI keeps no fabric between runs, so it
+//! removes its own from the device at the end.
 
 use core::pin::pin;
 
@@ -42,7 +43,7 @@ use matter_peek_core::controller::FabricIdentity;
 use matter_peek_core::ota::OtaProvider;
 use matter_peek_core::setup_code::SetupCode;
 use matter_peek_core::subscribe::Reports;
-use matter_peek_core::{Controller, DiagSet, FabricPolicy, LogIntent};
+use matter_peek_core::{Controller, DiagSet, LogIntent};
 
 const DEFAULT_PASSCODE: u32 = 20202021;
 const DEVICE_NODE_ID: u64 = 112234;
@@ -269,8 +270,8 @@ async fn run(mut args: Args) -> Result<matter_peek_core::CommissionOutcome, Erro
 
     let controller = Controller::new(matter, &crypto);
 
-    // Bootstrap the controller CA + ephemeral fabric (the CLI spike uses the
-    // ephemeral policy: throwaway fabric, removed after the run).
+    // Bootstrap the controller CA + a fabric for this run only (removed from the
+    // device at the end).
     let (ca, fab_idx) = matter_peek_core::ca::ControllerCa::bootstrap(
         &crypto,
         matter,
@@ -414,12 +415,11 @@ async fn commission_over_ble<C: rs_matter::crypto::Crypto>(
         DEVICE_NODE_ID,
         creds.as_ref(),
         &socket,
-        FabricPolicy::Ephemeral,
     )
     .await
 }
 
-/// The spike flow: commission (ephemeral), then read a diagnostic health
+/// The spike flow: commission, then read a diagnostic health
 /// snapshot over the freshly-established CASE session.
 async fn flow<'a, C: rs_matter::crypto::Crypto>(
     controller: &Controller<'a, C>,
@@ -435,7 +435,6 @@ async fn flow<'a, C: rs_matter::crypto::Crypto>(
             peer_addr,
             args.passcode,
             DEVICE_NODE_ID,
-            FabricPolicy::Ephemeral,
             // The CLI keeps no store, so it holds no live fabric of its own:
             // every fabric of ours on the device really is a leak to reclaim.
             &[],
@@ -509,7 +508,7 @@ async fn flow<'a, C: rs_matter::crypto::Crypto>(
         Err(e) => error!("identify: failed: {e:?}"),
     }
 
-    // Ephemeral policy: self-destruct our fabric on the device.
+    // This run's fabric is not kept: remove it from the device.
     info!("=== Decommissioning (RemoveFabric) ===");
     if let Err(e) = controller.decommission(outcome.handle).await {
         error!("decommission failed: {e:?}");

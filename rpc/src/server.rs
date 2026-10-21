@@ -20,7 +20,7 @@ use crate::actor::{CancelFlag, Command};
 
 /// Serve WS connections forever on `addr`, dispatching to the actor via `tx`.
 /// `cancel` is shared with the actor: a `Cancel` request sets it directly,
-/// bypassing the (serial) command queue so it reaches a running vertical.
+/// bypassing the (serial) command queue so it reaches a running commission.
 pub async fn serve(
     addr: &str,
     tx: async_channel::Sender<Command>,
@@ -115,8 +115,8 @@ async fn dispatch(
     let req_id = msg.req_id;
 
     // `Cancel` is handled here, NOT enqueued: the actor is busy running the
-    // vertical (the command loop is serial), so a queued Cancel would never be
-    // serviced in time. Setting the shared flag reaches the running vertical,
+    // commission (the command loop is serial), so a queued Cancel would never be
+    // serviced in time. Setting the shared flag reaches the running commission,
     // which polls it at its phase boundaries. Reply immediately.
     if matches!(msg.request, proto::Request::Cancel) {
         cancel.set(true);

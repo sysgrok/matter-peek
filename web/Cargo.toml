@@ -27,3 +27,5 @@ web-sys = { version = "0.3", features = ["HtmlInputElement", "HtmlSelectElement"
 # OTA image uploads: read the picked file, send it base64-encoded.
 gloo-file = { version = "0.3", features = ["futures"] }
 base64 = "0.22"
+# Manual pairing code check digit (as rs-matter does).
+verhoeff = { version = "1", default-features = false }
