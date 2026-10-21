@@ -70,7 +70,8 @@ periodically, like the server), so to share the store with the web UI, run
 
 | Tools | Access |
 |-------|--------|
-| `discover`, `list_devices`, `peek_device`, `read_network`, `retrieve_logs`, `identify`, `read_qr_image`, `ota_images` | read-only |
+| `discover`, `list_devices`, `peek_device`, `read_network`, `retrieve_logs`, `read_qr_image`, `ota_images` | read-only |
+| `identify` | acts on the device (it blinks); not read-only, so agents ask first |
 | `commission`, `decommission`, `remember`, `set_tags`, `sync`, `add_network`, `remove_network`, `connect_network`, `reorder_network`, `ota_upload`, `ota_delete`, `ota_update` | **mutating** |
 
 The mutating tools touch real devices, so only `--allow-mutate` offers them:
@@ -109,8 +110,11 @@ matter-peek chat "Which of my devices are offline?"    # one question
 matter-peek chat --allow-mutate                        # may change things
 ```
 
-With `--allow-mutate`, every tool not marked read-only is asked for first
-(`[y]es / [n]o / [a]lways`). `--no-think` asks the model not to think first
+Every tool not marked read-only is asked for first (`[y]es / [n]o /
+[a]lways`): `identify` always, the ones that change things with
+`--allow-mutate`. The prompt edits like a shell's (arrows, Ctrl-A/E/W, …), with
+its history (↑/↓, Ctrl-R) kept across chats in the data directory; Ctrl-C
+drops the line, Ctrl-D ends the chat. `--no-think` asks the model not to think first
 (faster, less careful), `--show-thinking` shows its thinking, `--verbose` the
 tools' results and the model's tokens. Without `--server`, it holds the store
 and syncs the device list before the first question.

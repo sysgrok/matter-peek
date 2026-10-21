@@ -67,7 +67,7 @@ impl Store {
     fn lock(dir: Option<&str>) -> Result<Self, PeekError> {
         let dir = match dir {
             Some(dir) => PathBuf::from(dir),
-            None => default_store_dir(),
+            None => data_dir(),
         };
 
         std::fs::create_dir_all(&dir).map_err(|e| {
@@ -145,8 +145,9 @@ fn bind_socket() -> std::io::Result<Async<UdpSocket>> {
 
 /// The platform's per-user data directory (`~/.local/share/matter-peek` on
 /// Linux, `~/Library/Application Support/com.sysgrok.matter-peek` on macOS), or
-/// else one under the temp directory, which may not survive a reboot.
-fn default_store_dir() -> PathBuf {
+/// else one under the temp directory, which may not survive a reboot: where the
+/// store goes by default.
+pub fn data_dir() -> PathBuf {
     match ProjectDirs::from("com", "sysgrok", "matter-peek") {
         Some(dirs) => dirs.data_dir().to_path_buf(),
         None => {

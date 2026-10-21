@@ -141,25 +141,26 @@ const MUTATE: Caps = Caps { allow_mutate: true };
 #[test]
 fn tool_call_then_answer() {
     let script = Script::new(vec![
-        calls(&[("identify", r#"{"node_id":"0x1B67B"}"#)]),
-        text("It blinked."),
+        calls(&[("peek_device", r#"{"node_id":"0x1B67B"}"#)]),
+        text("It is up."),
     ]);
     let controller = Controller::default();
     let user = User::new(true);
     let mut agent = Agent::new(&script, &controller, READ_ONLY, Think::Default);
 
-    block_on(agent.ask("Make the 2PM blink", &user)).unwrap();
+    block_on(agent.ask("How is the 2PM?", &user)).unwrap();
 
     assert_eq!(
         user.seen(),
-        ["call: identify", "result: identify ok", "text: It blinked."]
+        [
+            "call: peek_device",
+            "result: peek_device ok",
+            "text: It is up."
+        ]
     );
     assert!(matches!(
         controller.requests.borrow()[..],
-        [wire::Request::Identify {
-            node_id: 112251,
-            secs: 3
-        }]
+        [wire::Request::PeekDevice { node_id: 112251 }]
     ));
     // Read-only: not asked for.
     assert_eq!(user.asked.get(), 0);
@@ -262,7 +263,14 @@ fn tools_as_the_caps_allow() {
     let controller = Controller::default();
 
     let read_only = Agent::new(&script, &controller, READ_ONLY, Think::Default);
-    assert!(read_only.tools().iter().all(|tool| tool.read_only));
+    let asked: Vec<_> = read_only
+        .tools()
+        .iter()
+        .filter(|tool| !tool.read_only)
+        .map(|tool| tool.name.as_str())
+        .collect();
+    // Offered without changing anything, but acting on a device: asked first.
+    assert_eq!(asked, ["identify"]);
     assert!(read_only
         .tools()
         .iter()

@@ -66,6 +66,10 @@ pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-o
      the error code in parentheses: pass that on to the user, with what they \
      can do about it.";
 
+/// The tools that act on a device without changing what is stored: offered
+/// without [`Caps::allow_mutate`], but not read-only, so an agent asks first.
+const ACTING_TOOLS: &[&str] = &["identify"];
+
 /// The mutating tools whose harm may be hard to undo: they cost a device its
 /// fabric, its network or its firmware, or lose an image.
 const DESTRUCTIVE_TOOLS: &[&str] = &[
@@ -234,8 +238,11 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
         ),
         tool(
             "identify",
-            "Ask a listed device to physically identify itself (blink/beep) for \
-             a few seconds via the Identify cluster — to locate a unit.",
+            "Make a listed device blink or beep for a few seconds (Identify \
+             cluster), so that the user can find it; a relay may click, switching \
+             what is connected to it. Only when the user asks to locate or \
+             identify a device: it is not a way to check one (that is \
+             peek_device or read_network).",
             json!({
                 "type": "object",
                 "properties": {
@@ -440,7 +447,7 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
         "description": description,
         "inputSchema": input_schema,
         "annotations": {
-            "readOnlyHint": !MUTATING_TOOLS.contains(&name),
+            "readOnlyHint": !MUTATING_TOOLS.contains(&name) && !ACTING_TOOLS.contains(&name),
             "destructiveHint": DESTRUCTIVE_TOOLS.contains(&name),
         }
     })
@@ -940,15 +947,20 @@ mod tests {
     }
 
     #[test]
-    fn mutating_tools_annotated() {
+    fn tools_annotated() {
         let tools = tool_list(Caps { allow_mutate: true });
 
         for tool in &tools {
             let name = tool["name"].as_str().unwrap();
             let read_only = tool["annotations"]["readOnlyHint"].as_bool().unwrap();
+            let mutating = MUTATING_TOOLS.contains(&name);
 
-            assert_eq!(read_only, !MUTATING_TOOLS.contains(&name), "{name}");
-            if !read_only {
+            assert_eq!(
+                read_only,
+                !mutating && !ACTING_TOOLS.contains(&name),
+                "{name}"
+            );
+            if mutating {
                 assert!(
                     tool["description"].as_str().unwrap().contains("MUTATING"),
                     "{name} does not say it changes things"

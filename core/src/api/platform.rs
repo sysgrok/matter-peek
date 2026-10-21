@@ -27,6 +27,8 @@
 //! With `std`, [`MatterPeek::start`](super::MatterPeek::start) does all this on
 //! its own thread.
 
+#[cfg(feature = "std")]
+pub use crate::host::data_dir;
 pub use crate::mdns::{Builtin, Mdns};
 pub use crate::ota::{OtaImage, OtaImageStore, OtaStore};
 pub use crate::persist::{kv_buf, KvBuf};

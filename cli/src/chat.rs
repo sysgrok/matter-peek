@@ -8,19 +8,29 @@ use core::cell::{Cell, RefCell};
 
 use std::collections::BTreeSet;
 use std::io::{self, BufRead as _, IsTerminal as _, Write as _};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
 use termimad::MadSkin;
 
 use matter_peek_core::api::agent::openai::OpenAi;
 use matter_peek_core::api::agent::{Agent, AgentListener, Http, Provider, Think, ToolCall, Usage};
 use matter_peek_core::api::mcp::{Caps, Dispatch};
+use matter_peek_core::api::platform::data_dir;
 use matter_peek_core::api::wire;
 
 use crate::mcp;
 
 /// How long a model may take to answer.
 const MODEL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The chat's history file, in the data directory.
+const HISTORY_FILE: &str = "chat-history";
+
+/// How many lines the history keeps.
+const HISTORY_MAX: usize = 1000;
 
 /// How much of a tool's result `--verbose` shows, in bytes.
 const SHOWN_RESULT_MAX: usize = 800;
@@ -67,7 +77,7 @@ pub async fn chat(server: Option<String>, args: ChatArgs) -> io::Result<()> {
         args.llm_url,
         agent.tools().len(),
         if changing > 0 {
-            format!(", {changing} of which change things and are asked for first")
+            format!(", {changing} of which are asked for first")
         } else {
             String::new()
         }
@@ -80,12 +90,11 @@ pub async fn chat(server: Option<String>, args: ChatArgs) -> io::Result<()> {
 
     terminal.note("Ask away. /reset forgets the conversation, /tools lists the tools, /quit ends.");
 
-    loop {
-        print!("\n{} ", terminal.bold("you>"));
-        io::stdout().flush()?;
+    let mut prompt = Prompt::new();
 
-        let Some(line) = read_line().await? else {
-            println!();
+    loop {
+        println!();
+        let Some(line) = prompt.read().await? else {
             return Ok(());
         };
 
@@ -101,7 +110,7 @@ pub async fn chat(server: Option<String>, args: ChatArgs) -> io::Result<()> {
                     let changes = if tool.read_only {
                         ""
                     } else {
-                        "  (changes things)"
+                        "  (asked first)"
                     };
                     println!("  {}{changes}", tool.name);
                 }
@@ -120,6 +129,77 @@ async fn ask<P: Provider, D: Dispatch>(
         terminal.done_waiting();
         println!("{}", terminal.error(&format!("  {e}")));
     }
+}
+
+/// The "you>" prompt: a line editor with the chat's history, kept across
+/// chats in the data directory.
+struct Prompt {
+    editor: Option<DefaultEditor>,
+    history: PathBuf,
+}
+
+impl Prompt {
+    fn new() -> Self {
+        let editor = editor()
+            .map_err(|e| log::warn!("chat: no line editing: {e}"))
+            .ok();
+
+        let history = data_dir().join(HISTORY_FILE);
+        let mut prompt = Self { editor, history };
+        if let Some(editor) = &mut prompt.editor {
+            // None yet, the first time.
+            let _ = editor.load_history(&prompt.history);
+        }
+
+        prompt
+    }
+
+    /// The user's next line; `None` when they end the chat (Ctrl-D).
+    async fn read(&mut self) -> io::Result<Option<String>> {
+        let Some(mut editor) = self.editor.take() else {
+            print!("you> ");
+            io::stdout().flush()?;
+            return read_line().await;
+        };
+
+        loop {
+            let (returned, line) = blocking::unblock(move || {
+                let line = editor.readline("you> ");
+                (editor, line)
+            })
+            .await;
+            editor = returned;
+
+            match line {
+                Ok(line) => {
+                    if !line.trim().is_empty() {
+                        let _ = editor.add_history_entry(line.as_str());
+                        if let Err(e) = editor.append_history(&self.history) {
+                            log::warn!("chat: cannot keep the history: {e}");
+                        }
+                    }
+                    self.editor = Some(editor);
+                    return Ok(Some(line));
+                }
+                // Ctrl-C drops the line, as in a shell.
+                Err(ReadlineError::Interrupted) => continue,
+                Err(ReadlineError::Eof) => {
+                    self.editor = Some(editor);
+                    return Ok(None);
+                }
+                Err(e) => return Err(io::Error::other(e)),
+            }
+        }
+    }
+}
+
+fn editor() -> rustyline::Result<DefaultEditor> {
+    let config = rustyline::Config::builder()
+        .max_history_size(HISTORY_MAX)?
+        .history_ignore_dups(true)?
+        .build();
+
+    DefaultEditor::with_config(config)
 }
 
 /// A line of stdin, without blocking the executor; `None` at its end.
@@ -228,10 +308,6 @@ impl Terminal {
 
     fn dim(&self, text: &str) -> String {
         self.style("2", text)
-    }
-
-    fn bold(&self, text: &str) -> String {
-        self.style("1", text)
     }
 
     fn error(&self, text: &str) -> String {

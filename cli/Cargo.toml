@@ -26,6 +26,8 @@ env_logger = { workspace = true }
 # `mcp`: async stdin/stdout, via a thread pool (the smol-family way).
 blocking = "1"
 futures-lite = { workspace = true }
-# `chat`: the model's API over HTTP(S), and its Markdown in the terminal.
+# `chat`: the model's API over HTTP(S), its Markdown in the terminal, and a
+# line editor with history for the prompt.
 ureq = "3.5"
 termimad = "0.35"
+rustyline = "19"
