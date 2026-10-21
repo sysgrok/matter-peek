@@ -34,7 +34,7 @@ impl App {
 
                 <label class={classes!("dropzone", self.uploading.is_some().then_some("is-busy"))}>
                     // Over the whole zone, so a file can be dropped as well as picked.
-                    <input class="dropzone-input" type="file" accept=".ota"
+                    <input class="dropzone-input" type="file"
                         disabled={self.uploading.is_some()}
                         onchange={link.batch_callback(|e: Event| picked_file(e).map(Msg::OtaFile))} />
                     <span class="dropzone-icon">{ icon(Icon::Upload, 26) }</span>
@@ -42,7 +42,7 @@ impl App {
                         <span class="dropzone-title">{ format!("Uploading… {percent}%") }</span>
                         <progress class="progress is-small is-link" value={percent.to_string()} max="100"></progress>
                     } else {
-                        <span class="dropzone-title">{ "Drop an .ota image here, or pick one" }</span>
+                        <span class="dropzone-title">{ "Drop an OTA image here, or pick one" }</span>
                         <span class="dropzone-text">
                             { "Its header and digest are checked. Devices see it if it is for them and newer than what they run." }
                         </span>

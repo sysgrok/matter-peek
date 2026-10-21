@@ -14,9 +14,11 @@ use yew::prelude::*;
 
 use matter_peek_core::api::{self, display, wire};
 
+use camera::Camera;
 use icons::{icon, Icon};
 use network::{Confirm, NetworkView};
 
+mod camera;
 mod commission;
 mod devices;
 mod icons;
@@ -86,6 +88,13 @@ enum Tab {
     Updates,
 }
 
+/// How often the camera popup sends a frame to decode.
+const CAMERA_FRAME_MS: u32 = 500;
+/// How long to wait before reopening the subscription WS.
+const SUB_WS_RETRY_MS: u32 = 2_000;
+/// How long to wait before subscribing again to a device the server refused.
+const SUBSCRIBE_RETRY_MS: u32 = 5_000;
+
 /// How long a commission may run before the UI auto-cancels it.
 const COMMISSION_TIMEOUT_SECS: u32 = 90;
 /// Likewise over Bluetooth: scanning for the device, and its joining its
@@ -146,6 +155,16 @@ enum Msg {
     SetNetwork(Network),
     WifiSsid(String),
     WifiPassword(String),
+    ToggleWifiPassword,
+    /// Open the camera popup, to read the setup code from a QR code.
+    OpenCamera,
+    CloseCamera,
+    CameraStream(web_sys::MediaStream),
+    CameraFailed(String),
+    /// Time to send a frame to decode.
+    CameraTick,
+    /// A frame was decoded: the setup code in it, if any.
+    CameraDecoded(Option<String>),
     ThreadDataset(String),
     ListDevices,
     /// Re-sync the device list with the devices on our fabric.
@@ -188,12 +207,17 @@ enum Msg {
     HealthReport(u64, u64, api::DeviceHealth),
     /// A subscription's connection state changed (node_id, state).
     SubState(u64, api::SubscriptionState),
-    /// The persistent subscription WS is open and ready; its writer sink is
+    /// Subscription WS number `.0` is open and ready; its writer sink is
     /// attached. Any subscriptions queued before it opened are (re)sent.
-    SubWsReady(futures::channel::mpsc::UnboundedSender<String>),
-    /// The persistent subscription WS closed (server gone / network) — all live
-    /// subscriptions are dropped; the UI shows them as ended.
-    SubWsClosed,
+    SubWsReady(u32, futures::channel::mpsc::UnboundedSender<String>),
+    /// Subscription WS number `.0` closed (server gone / network): its
+    /// subscriptions are gone, and a new WS takes them up again.
+    SubWsClosed(u32),
+    /// The server refused to subscribe to a device (node_id), e.g. one it does
+    /// not list yet; retried after a while.
+    SubscribeFailed(u64),
+    /// Subscribe to a device (node_id) again, unless it is live meanwhile.
+    Resubscribe(u64),
     /// Edit the tag-input text for a given device (node_id).
     TagsInput(u64, String),
     /// Persist the edited tags for a given device.
@@ -239,6 +263,11 @@ struct App {
     network: Network,
     wifi_ssid: String,
     wifi_password: String,
+    show_wifi_password: bool,
+    /// The camera popup, while open.
+    camera: Option<Camera>,
+    /// Its video.
+    video_ref: NodeRef,
     /// The Thread operational dataset, hex.
     thread_dataset: String,
     running: bool,
@@ -283,6 +312,10 @@ struct App {
     /// lazily on the first subscribe; a `None` here means no live WS yet. The
     /// value is the sink to its writer task.
     sub_ws: Option<futures::channel::mpsc::UnboundedSender<String>>,
+    /// Numbers the subscription WSs, so a stale one's close is told apart.
+    sub_ws_gen: u32,
+    /// A subscription WS is being opened.
+    sub_ws_opening: bool,
     /// A neutral info notice (e.g. cancellation outcome).
     notice: Option<String>,
     /// The address we most recently commissioned successfully (and kept). Used to
@@ -331,6 +364,9 @@ impl Component for App {
             network: Network::Wifi,
             wifi_ssid: String::new(),
             wifi_password: String::new(),
+            show_wifi_password: false,
+            camera: None,
+            video_ref: NodeRef::default(),
             thread_dataset: String::new(),
             running: false,
             discover_open: false,
@@ -353,6 +389,8 @@ impl Component for App {
             ota_progress: HashMap::new(),
             subs: HashMap::new(),
             sub_ws: None,
+            sub_ws_gen: 0,
+            sub_ws_opening: false,
             notice: None,
             last_commissioned_addr: None,
             confirm_recommission: false,
@@ -532,6 +570,93 @@ impl Component for App {
             }
             Msg::WifiPassword(v) => {
                 self.wifi_password = v;
+                true
+            }
+            Msg::ToggleWifiPassword => {
+                self.show_wifi_password = !self.show_wifi_password;
+                true
+            }
+            Msg::OpenCamera => {
+                let camera = Camera::new();
+                let running = camera.running.clone();
+                self.camera = Some(camera);
+                self.error = None;
+
+                let link = ctx.link().clone();
+                spawn_local(async move {
+                    match camera::open().await {
+                        Ok(stream) => link.send_message(Msg::CameraStream(stream)),
+                        Err(e) => link.send_message(Msg::CameraFailed(e)),
+                    }
+                });
+                let link = ctx.link().clone();
+                spawn_local(async move {
+                    while running.get() {
+                        gloo_timers::future::TimeoutFuture::new(CAMERA_FRAME_MS).await;
+                        if running.get() {
+                            link.send_message(Msg::CameraTick);
+                        }
+                    }
+                });
+                true
+            }
+            Msg::CloseCamera => {
+                if let Some(camera) = self.camera.take() {
+                    camera.stop();
+                }
+                true
+            }
+            Msg::CameraStream(stream) => {
+                // Closed meanwhile.
+                let Some(camera) = self.camera.as_mut() else {
+                    camera::stop(&stream);
+                    return false;
+                };
+                if let Some(video) = self.video_ref.cast::<web_sys::HtmlVideoElement>() {
+                    video.set_src_object(Some(&stream));
+                    let _ = video.play();
+                }
+                camera.stream = Some(stream);
+                true
+            }
+            Msg::CameraFailed(e) => {
+                if let Some(camera) = self.camera.as_mut() {
+                    camera.running.set(false);
+                    camera.error = Some(e);
+                }
+                true
+            }
+            Msg::CameraTick => {
+                let Some(camera) = self.camera.as_mut() else {
+                    return false;
+                };
+                if camera.decoding || camera.stream.is_none() {
+                    return false;
+                }
+                let Some(image) = self
+                    .video_ref
+                    .cast::<web_sys::HtmlVideoElement>()
+                    .and_then(|video| camera::frame(&video))
+                else {
+                    return false;
+                };
+                camera.decoding = true;
+                send_camera_frame(ctx.link().clone(), image);
+                false
+            }
+            Msg::CameraDecoded(code) => {
+                let Some(camera) = self.camera.as_mut() else {
+                    return false;
+                };
+                camera.decoding = false;
+                let Some(code) = code else {
+                    return false;
+                };
+                camera.stop();
+                self.camera = None;
+                self.setup_code = code;
+                self.set_status(Some("Read the setup code from the QR code.".into()));
+                self.fade_status(ctx);
                 true
             }
             Msg::ThreadDataset(v) => {
@@ -820,8 +945,12 @@ impl Component for App {
                 }
                 true
             }
-            Msg::SubWsReady(tx) => {
+            Msg::SubWsReady(gen, tx) => {
+                if gen != self.sub_ws_gen {
+                    return false;
+                }
                 self.sub_ws = Some(tx);
+                self.sub_ws_opening = false;
                 // (Re)send Subscribe for every device we intend to watch — covers
                 // the initial open and any reconnect.
                 let nodes: Vec<u64> = self.subs.keys().copied().collect();
@@ -830,8 +959,12 @@ impl Component for App {
                 }
                 true
             }
-            Msg::SubWsClosed => {
+            Msg::SubWsClosed(gen) => {
+                if gen != self.sub_ws_gen {
+                    return false;
+                }
                 self.sub_ws = None;
+                self.sub_ws_opening = false;
                 // The connection dropped → every subscription is dead. Mark them
                 // reconnecting and reopen the WS (which re-subscribes on ready), so
                 // the dashboard self-heals without user action.
@@ -839,9 +972,31 @@ impl Component for App {
                     sub.conn = SubConn::Reconnecting;
                 }
                 if !self.subs.is_empty() {
-                    self.ensure_sub_ws(ctx);
+                    self.open_sub_ws(ctx, SUB_WS_RETRY_MS);
                 }
                 true
+            }
+            Msg::SubscribeFailed(node_id) => {
+                let Some(sub) = self.subs.get_mut(&node_id) else {
+                    return false;
+                };
+                sub.conn = SubConn::Connecting;
+                let link = ctx.link().clone();
+                spawn_local(async move {
+                    gloo_timers::future::TimeoutFuture::new(SUBSCRIBE_RETRY_MS).await;
+                    link.send_message(Msg::Resubscribe(node_id));
+                });
+                true
+            }
+            Msg::Resubscribe(node_id) => {
+                if self
+                    .subs
+                    .get(&node_id)
+                    .is_some_and(|sub| !matches!(sub.conn, SubConn::Live { .. }))
+                {
+                    self.sub_send(&wire::Request::Subscribe { node_id });
+                }
+                false
             }
             Msg::TagsInput(node_id, text) => {
                 self.tag_inputs.insert(node_id, text);
@@ -1014,7 +1169,10 @@ impl Component for App {
     fn view(&self, ctx: &Context<Self>) -> Html {
         let link = ctx.link();
         // A popup shows the error itself.
-        let popup = self.discover_open || self.logs.is_some() || self.network_view.is_some();
+        let popup = self.discover_open
+            || self.logs.is_some()
+            || self.network_view.is_some()
+            || self.camera.is_some();
 
         html! {
             <>
@@ -1038,6 +1196,7 @@ impl Component for App {
                 </main>
                 { self.view_status(link) }
                 { self.view_discover_modal(link) }
+                { self.view_camera_modal(link) }
                 { self.view_logs_modal(link) }
                 { self.view_network_modal(link) }
                 { self.view_ask(link) }
@@ -1078,8 +1237,13 @@ impl App {
     /// active subscriptions once it opens.
     fn sub_send(&self, request: &wire::Request) {
         if let Some(tx) = &self.sub_ws {
+            // A Subscribe's answer names its device by its req_id.
+            let req_id = match request {
+                wire::Request::Subscribe { node_id } => *node_id,
+                _ => 0,
+            };
             let msg = wire::ClientMsg {
-                req_id: 0,
+                req_id,
                 request: request.clone(),
             };
             if let Ok(json) = serde_json::to_string(&msg) {
@@ -1088,21 +1252,27 @@ impl App {
         }
     }
 
-    /// Open the persistent subscription WS if it isn't already, spawning its
-    /// reader (server frames → `Msg`) and writer (outbound requests) tasks. All
+    /// Open the persistent subscription WS after `delay_ms`, unless it is open
+    /// or opening, spawning its reader (server frames → `Msg`) and writer (outbound requests) tasks. All
     /// live subscriptions share this one connection; it stays open while any
     /// device is being watched. The server ties each subscription to this
     /// connection, so closing it stops them all server-side too.
-    fn ensure_sub_ws(&mut self, ctx: &Context<Self>) {
-        if self.sub_ws.is_some() {
+    fn open_sub_ws(&mut self, ctx: &Context<Self>, delay_ms: u32) {
+        if self.sub_ws.is_some() || self.sub_ws_opening {
             return;
         }
+        self.sub_ws_opening = true;
+        self.sub_ws_gen = self.sub_ws_gen.wrapping_add(1);
+        let gen = self.sub_ws_gen;
         let link = ctx.link().clone();
         spawn_local(async move {
+            if delay_ms > 0 {
+                gloo_timers::future::TimeoutFuture::new(delay_ms).await;
+            }
             let ws = match WebSocket::open(WS_URL) {
                 Ok(ws) => ws,
-                Err(e) => {
-                    link.send_message(Msg::Error(format!("subscription connect failed: {e}")));
+                Err(_) => {
+                    link.send_message(Msg::SubWsClosed(gen));
                     return;
                 }
             };
@@ -1110,7 +1280,7 @@ impl App {
 
             // Outbound: a channel the UI writes request-JSON into; drain to the WS.
             let (out_tx, mut out_rx) = futures::channel::mpsc::unbounded::<String>();
-            link.send_message(Msg::SubWsReady(out_tx));
+            link.send_message(Msg::SubWsReady(gen, out_tx));
 
             let writer = async {
                 while let Some(json) = out_rx.next().await {
@@ -1146,8 +1316,12 @@ impl App {
                             }
                             wire::Event::Step { .. } => {}
                         },
-                        // `Subscribed` acks arrive here; the panel already exists,
-                        // so nothing to do — the streamed events drive the UI.
+                        // A Subscribe refused (its req_id is its device).
+                        wire::ServerMsg::Response {
+                            req_id,
+                            response: wire::Response::Error { .. },
+                        } if req_id != 0 => link.send_message(Msg::SubscribeFailed(req_id)),
+                        // `Subscribed` acks: the streamed events drive the UI.
                         wire::ServerMsg::Response { .. } => {}
                     }
                 }
@@ -1156,7 +1330,7 @@ impl App {
             // Run until either half ends (connection closed), then tell the UI.
             futures::pin_mut!(reader, writer);
             futures::future::select(reader, writer).await;
-            link.send_message(Msg::SubWsClosed);
+            link.send_message(Msg::SubWsClosed(gen));
         });
     }
 
@@ -1169,12 +1343,19 @@ impl App {
             return;
         }
 
-        self.ensure_sub_ws(ctx);
+        self.open_sub_ws(ctx, 0);
 
-        // Subscribe to any stored device we're not already watching.
+        // Subscribe to any stored device we're not already watching, and again
+        // to any still waiting (the server ignores a repeat).
         for node_id in &stored_ids {
-            if !self.subs.contains_key(node_id) {
+            let waiting = self
+                .subs
+                .get(node_id)
+                .map(|sub| matches!(sub.conn, SubConn::Connecting | SubConn::Reconnecting));
+            if waiting.is_none() {
                 self.subs.insert(*node_id, LiveSub::default());
+            }
+            if waiting != Some(false) {
                 self.sub_send(&wire::Request::Subscribe { node_id: *node_id });
             }
         }
@@ -1514,6 +1695,42 @@ fn send_request(link: html::Scope<App>, request: wire::Request) {
             }
         }
     });
+}
+
+/// Send a camera frame to decode, answering with the setup code in it, if any.
+fn send_camera_frame(link: html::Scope<App>, image: String) {
+    spawn_local(async move {
+        let code = match exchange(wire::Request::ReadQrImage { image }).await {
+            Ok(wire::Response::SetupCode { setup_code }) => Some(setup_code),
+            _ => None,
+        };
+        link.send_message(Msg::CameraDecoded(code));
+    });
+}
+
+/// Send `request` on its own WS, answering with its response (events left
+/// out).
+async fn exchange(request: wire::Request) -> Result<wire::Response, String> {
+    let ws = WebSocket::open(WS_URL).map_err(|e| e.to_string())?;
+    let (mut write, mut read) = ws.split();
+
+    let json = serde_json::to_string(&wire::ClientMsg { req_id: 1, request })
+        .map_err(|e| e.to_string())?;
+    write
+        .send(Message::Text(json))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    while let Some(frame) = read.next().await {
+        let Message::Text(text) = frame.map_err(|e| e.to_string())? else {
+            continue;
+        };
+        if let Ok(wire::ServerMsg::Response { response, .. }) = serde_json::from_str(&text) {
+            return Ok(response);
+        }
+    }
+
+    Err("the connection closed".into())
 }
 
 /// The size of an upload chunk, before base64.

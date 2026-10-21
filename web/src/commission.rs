@@ -70,6 +70,14 @@ impl App {
                                     }
                                 </div>
                                 <div class="control">
+                                    <button class="button" title="Scan the device's QR code with the camera"
+                                        disabled={self.running}
+                                        onclick={link.callback(|_| Msg::OpenCamera)}>
+                                        <span class="icon">{ icon(Icon::Camera, 18) }</span>
+                                        <span class="is-hidden-mobile">{ "Camera" }</span>
+                                    </button>
+                                </div>
+                                <div class="control">
                                     <div class="file">
                                         <label class="file-label"
                                             title="Read the setup code from a picture of the device's QR code">
@@ -77,7 +85,7 @@ impl App {
                                                 onchange={link.batch_callback(|e: Event| picked_file(e).map(Msg::QrImage))} />
                                             <span class="file-cta">
                                                 <span class="file-icon">{ icon(Icon::QrCode, 18) }</span>
-                                                <span class="file-label is-hidden-mobile">{ "From QR image" }</span>
+                                                <span class="file-label is-hidden-mobile">{ "Picture" }</span>
                                             </span>
                                         </label>
                                     </div>
@@ -209,11 +217,23 @@ impl App {
                                     </div>
                                 </div>
                                 <div class="column">
-                                    <div class="control has-icons-left">
-                                        <input class="input" type="password" placeholder="Password"
-                                            value={self.wifi_password.clone()}
-                                            oninput={link.callback(|e: InputEvent| Msg::WifiPassword(input_value(e)))} />
-                                        <span class="icon is-left">{ icon(Icon::Lock, 18) }</span>
+                                    <div class="field has-addons">
+                                        <div class="control has-icons-left is-expanded">
+                                            <input class="input" placeholder="Password"
+                                                type={if self.show_wifi_password { "text" } else { "password" }}
+                                                value={self.wifi_password.clone()}
+                                                oninput={link.callback(|e: InputEvent| Msg::WifiPassword(input_value(e)))} />
+                                            <span class="icon is-left">{ icon(Icon::Lock, 18) }</span>
+                                        </div>
+                                        <div class="control">
+                                            <button class="button"
+                                                title={if self.show_wifi_password { "Hide the password" } else { "Show the password" }}
+                                                onclick={link.callback(|_| Msg::ToggleWifiPassword)}>
+                                                <span class="icon">
+                                                    { icon(if self.show_wifi_password { Icon::EyeOff } else { Icon::Eye }, 18) }
+                                                </span>
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -357,7 +377,7 @@ impl App {
                 disabled={self.discovering || self.running}
                 onclick={link.callback(|_| Msg::Discover)}>
                 <span class="icon is-small">{ icon(Icon::Refresh, 16) }</span>
-                <span>{ "Scan again" }</span>
+                <span>{ "Scan" }</span>
             </button>
         };
 
@@ -406,12 +426,7 @@ impl App {
                 "No commissionable devices",
                 "Put the device into pairing mode, or open its commissioning window in the app \
                  it is in, then scan again.",
-                html! {
-                    <button class="button is-link" onclick={link.callback(|_| Msg::Discover)}>
-                        <span class="icon">{ icon(Icon::Refresh, 18) }</span>
-                        <span>{ "Scan again" }</span>
-                    </button>
-                },
+                html! {},
             );
         }
 
@@ -467,6 +482,51 @@ impl App {
                     </div>
                 }
             </>
+        }
+    }
+}
+
+impl App {
+    /// The camera popup: its video, until a QR code in it is read.
+    pub(crate) fn view_camera_modal(&self, link: &Scope<Self>) -> Html {
+        let Some(camera) = &self.camera else {
+            return html! {};
+        };
+
+        html! {
+            <div class="modal is-active">
+                <div class="modal-background" onclick={link.callback(|_| Msg::CloseCamera)}></div>
+                <div class="modal-card camera-card">
+                    <header class="modal-card-head">
+                        <p class="modal-card-title">{ "Scan the QR code" }</p>
+                        <button class="delete" aria-label="close"
+                            onclick={link.callback(|_| Msg::CloseCamera)}></button>
+                    </header>
+                    <section class="modal-card-body">
+                        <div class="camera-view">
+                            <video ref={self.video_ref.clone()} class="camera-video"
+                                autoplay=true muted=true playsinline=true></video>
+                            if camera.stream.is_some() {
+                                <div class="camera-frame"></div>
+                            }
+                            if let Some(e) = &camera.error {
+                                <div class="camera-status">
+                                    { icon(Icon::Alert, 28) }
+                                    <span>{ e.clone() }</span>
+                                </div>
+                            } else if camera.stream.is_none() {
+                                <div class="camera-status">
+                                    <span class="loader is-medium"></span>
+                                    <span>{ "Starting the camera…" }</span>
+                                </div>
+                            }
+                        </div>
+                        <p class="camera-hint">
+                            { "Hold the QR code on the device or its box inside the frame." }
+                        </p>
+                    </section>
+                </div>
+            </div>
         }
     }
 }
