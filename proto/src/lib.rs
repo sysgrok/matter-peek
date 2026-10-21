@@ -82,7 +82,8 @@ pub enum Request {
     /// Answered with [`Response::Devices`].
     ListDevices,
     /// Re-address a listed device by its NodeID over a fresh CASE session — no
-    /// re-commissioning — and read its health. Returns [`Response::Peek`].
+    /// re-commissioning — and read its health. Returns [`Response::Peek`], or
+    /// [`Response::Error`] if the device does not answer.
     PeekDevice { node_id: u64 },
     /// Retrieve a diagnostic log of the given kind from a listed device.
     /// Answered with [`Response::Logs`].
@@ -98,9 +99,11 @@ pub enum Request {
     ///
     /// The subscription is a detached background task on the server — it does
     /// **not** block other commands, so multiple devices can be watched at once.
-    /// It self-heals: if the device goes silent past its reporting deadline the
-    /// server re-establishes it (a fresh subscription), surfaced via
-    /// [`SubscriptionState::Reconnecting`] → [`SubscriptionState::Live`].
+    /// It self-heals: if the device goes silent past its reporting deadline, it
+    /// is reported [`SubscriptionState::Offline`] and the server keeps
+    /// re-establishing the subscription with a backoff (cut short by a
+    /// successful [`Request::PeekDevice`]) until it is
+    /// [`SubscriptionState::Live`] again.
     /// Subscribing a device that is already subscribed is a no-op success.
     Subscribe { node_id: u64 },
     /// Stop a live health subscription started by [`Request::Subscribe`].
@@ -294,9 +297,10 @@ pub enum SubscriptionState {
     /// Established and reporting; the device will report at least every
     /// `max_int_secs` seconds.
     Live { max_int_secs: u16 },
-    /// The subscription went silent past its deadline (or failed to establish)
-    /// and is being rebuilt; the next `Live` marks recovery.
-    Reconnecting,
+    /// The device went silent past its deadline (or the subscription failed to
+    /// establish): it is offline. The subscription keeps being re-established in
+    /// the background; the next `Live` marks recovery.
+    Offline,
     /// The subscription was stopped (by [`Request::Unsubscribe`] or the
     /// connection dropping). No further reports will arrive.
     Stopped,
@@ -416,8 +420,8 @@ pub struct DeviceInfo {
     pub fingerprint: Fingerprint,
     /// Local user tags for filtering/grouping; only a remembered device has any.
     pub tags: Vec<String>,
-    /// Whether the device advertised on our fabric at the last sync; `None`
-    /// before the first one.
+    /// Whether the device is reachable: as of the last sync, or since then its
+    /// subscription or a peek; `None` before the first sync.
     #[serde(default)]
     pub online: Option<bool>,
     /// Whether we keep a record of the device (see [`Request::Remember`]).

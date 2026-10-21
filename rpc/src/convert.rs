@@ -15,7 +15,7 @@ pub fn sub_state(s: core::subscribe::SubState) -> proto::SubscriptionState {
         core::subscribe::SubState::Live { max_int_secs } => {
             proto::SubscriptionState::Live { max_int_secs }
         }
-        core::subscribe::SubState::Reconnecting => proto::SubscriptionState::Reconnecting,
+        core::subscribe::SubState::Offline => proto::SubscriptionState::Offline,
     }
 }
 

@@ -22,10 +22,13 @@
 //! from a *healthy-but-quiet* one from the outside. The device commits to
 //! reporting at least every `max_int` seconds (the negotiated maximum interval),
 //! so [`subscribe_health`] runs a **watchdog**: if no report arrives within
-//! [`STALE_MULTIPLIER`]× `max_int`, the subscription is deemed stale, torn down,
-//! and **re-established** — a fresh `SubscribeRequest` yields a new subscription
-//! id from the device, which implicitly invalidates the old one. The caller is
-//! told about the lifecycle via [`SubState`] through its `on_state` callback.
+//! `max_int` plus [`ROUND_TRIPS`] times the time a report may spend being
+//! retransmitted and answered, the device is deemed offline, and the
+//! subscription is torn down and **re-established** — a fresh `SubscribeRequest`
+//! yields a new subscription id from the device, which implicitly invalidates the
+//! old one. Failed attempts are retried with a backoff, which a `retry`
+//! notification cuts short. The caller is told about the lifecycle via
+//! [`SubState`] through its `on_state` callback.
 //!
 //! ## Concurrency
 //!
@@ -36,7 +39,7 @@
 use core::cell::{Cell, RefCell};
 use core::num::NonZeroU8;
 
-use embassy_futures::select::select;
+use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer};
 
 use log::{debug, info, warn};
@@ -48,6 +51,8 @@ use rs_matter::im::client::{ImClient as _, SubscribeOutcome, TxOutcome};
 use rs_matter::im::encoding::ReportDataResp;
 use rs_matter::im::{AttrPath, GenericPath, IMStatusCode};
 use rs_matter::transport::exchange::Exchange;
+use rs_matter::transport::mrp::RetransEntry;
+use rs_matter::transport::session::SessionMode;
 use rs_matter::utils::sync::Notification;
 use rs_matter::Matter;
 
@@ -59,17 +64,24 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 /// Subscription reporting-interval bounds (seconds). `min = 0` lets the device
-/// report as soon as an attribute changes; `max = 60` bounds the silent period
+/// report as soon as an attribute changes; `max = 20` bounds the silent period
 /// (the device must report at least this often, which also serves as the liveness
-/// heartbeat the watchdog measures against).
+/// heartbeat the watchdog measures against). Sleepy devices (ICDs) pick their own
+/// longer interval anyway, so this does not wake them more often.
 const MIN_INTERVAL_FLOOR_SECS: u16 = 0;
-const MAX_INTERVAL_CEIL_SECS: u16 = 60;
+const MAX_INTERVAL_CEIL_SECS: u16 = 20;
 
-/// How many missed max-intervals mark a subscription stale. The device promises a
-/// report every `max_int` seconds; we allow a generous 3× (network jitter, a
-/// missed report or two) before concluding the subscription is dead and
-/// re-establishing it.
-const STALE_MULTIPLIER: u32 = 3;
+/// Our MRP intervals (ms), which pace the device's retransmissions of a report
+/// to us: the spec defaults, unless configured.
+const DEFAULT_ACTIVE_INTERVAL_MS: u32 = 300;
+const DEFAULT_IDLE_INTERVAL_MS: u32 = 500;
+const ACTIVE_THRESHOLD_MS: u16 = 4_000;
+
+/// Allowance for processing a report before answering it.
+const REPORT_PROCESSING_MS: u64 = 2_000;
+
+/// How many report round trips past `max_int` the watchdog waits for a report.
+const ROUND_TRIPS: u32 = 2;
 
 /// Capped-exponential backoff bounds for re-establishment after a failed
 /// (re-)subscribe. Starts small (a genuinely transient blip recovers fast) and
@@ -85,10 +97,10 @@ pub enum SubState {
     /// maximum reporting interval (seconds) — the device will report at least
     /// this often.
     Live { max_int_secs: u16 },
-    /// No report arrived within the staleness window (or establishment failed);
-    /// the subscription is being torn down and re-established. The next
-    /// [`SubState::Live`] marks recovery (with a *new* device-side sub id).
-    Reconnecting,
+    /// No report arrived within the staleness window, or establishment failed:
+    /// the device is offline. Re-establishing is retried in the background; the
+    /// next [`SubState::Live`] marks recovery (with a *new* device-side sub id).
+    Offline,
 }
 
 /// Routes the reports of our health subscriptions to them, by publisher and
@@ -210,8 +222,10 @@ impl Drop for Registration<'_> {
 ///
 /// - `on_update` receives the priming snapshot first, then deltas (merge them).
 /// - `on_state` receives [`SubState`] transitions: `Live { max_int }` on each
-///   (re-)establishment, `Reconnecting` when a stale/failed subscription is being
-///   rebuilt. The UI uses these to show "live" vs. "reconnecting".
+///   (re-)establishment, `Offline` when the subscription went stale or could not
+///   be established. The UI uses these to show "live" vs. "offline".
+/// - `retry` cuts the backoff before the next attempt short, e.g. once the
+///   device answered something else.
 ///
 /// Never returns on its own (short of the caller dropping it): a lost
 /// subscription is re-established rather than surfaced as an error. The transport
@@ -225,6 +239,7 @@ pub async fn subscribe_health<C, FU, FS>(
     fab_idx: NonZeroU8,
     node_id: u64,
     which: DiagSet,
+    retry: &Notification,
     mut on_update: FU,
     mut on_state: FS,
 ) -> Result<(), Error>
@@ -281,25 +296,66 @@ where
 
         match outcome {
             Ok(()) => {
-                // Stale re-establish: `on_state(Reconnecting)` already emitted. If
-                // the pass had been healthy, retry promptly; otherwise back off.
+                // Stale re-establish: `on_state(Offline)` already emitted. If the
+                // pass had been healthy, retry promptly; otherwise back off.
                 if !established.get() {
-                    Timer::after(backoff).await;
-                    backoff = (backoff * 2).min(REESTABLISH_BACKOFF_MAX);
+                    backoff = back_off(backoff, retry).await;
                 }
             }
             Err(e) => {
-                // Establishment / transport error: report Reconnecting and back off
+                // Establishment / transport error: report Offline and back off
                 // (capped-exponential) so a cold / unreachable device isn't hammered
                 // (which would exhaust its CASE session table).
                 warn!(
                     "subscribe_health(0x{node_id:016x}): {e:?}; re-establishing in {}s",
                     backoff.as_secs()
                 );
-                on_state(SubState::Reconnecting);
-                Timer::after(backoff).await;
-                backoff = (backoff * 2).min(REESTABLISH_BACKOFF_MAX);
+                on_state(SubState::Offline);
+                backoff = back_off(backoff, retry).await;
             }
+        }
+    }
+}
+
+/// The MRP round trip of a report of `node_id`: its retransmissions to us
+/// (paced by our MRP intervals), our processing, and the retransmissions of our
+/// answer (paced by the device's active interval).
+fn report_round_trip(matter: &Matter<'_>, fab_idx: NonZeroU8, node_id: u64) -> Duration {
+    let dev_det = matter.dev_det();
+    let inbound = RetransEntry::retransmission_timeout_ms(
+        dev_det.sai.unwrap_or(DEFAULT_ACTIVE_INTERVAL_MS),
+        dev_det.sii.unwrap_or(DEFAULT_IDLE_INTERVAL_MS),
+        ACTIVE_THRESHOLD_MS,
+        false,
+    );
+
+    let peer_active_ms = matter.with_state(|state| {
+        state
+            .sessions
+            .iter()
+            .find(|sess| {
+                matches!(sess.get_session_mode(), SessionMode::Case { fab_idx: f, .. } if *f == fab_idx)
+                    && sess.get_peer_node_id() == Some(node_id)
+            })
+            .map(|sess| sess.get_peer_active_interval_ms())
+    });
+    let outbound = RetransEntry::retransmission_timeout_ms(
+        peer_active_ms.unwrap_or(DEFAULT_ACTIVE_INTERVAL_MS),
+        peer_active_ms.unwrap_or(DEFAULT_ACTIVE_INTERVAL_MS),
+        0,
+        true,
+    );
+
+    Duration::from_millis(inbound + REPORT_PROCESSING_MS + outbound)
+}
+
+/// Wait `backoff`, or less if `retry` is notified; returns the next backoff.
+async fn back_off(backoff: Duration, retry: &Notification) -> Duration {
+    match select(Timer::after(backoff), retry.wait()).await {
+        Either::First(_) => (backoff * 2).min(REESTABLISH_BACKOFF_MAX),
+        Either::Second(_) => {
+            debug!("subscription retry requested");
+            REESTABLISH_BACKOFF_MIN
         }
     }
 }
@@ -340,7 +396,12 @@ where
         max_int_secs: max_int,
     });
 
-    let window = Duration::from_secs((max_int as u32 * STALE_MULTIPLIER) as u64);
+    let window = Duration::from_secs(max_int as u64)
+        + report_round_trip(matter, fab_idx, node_id) * ROUND_TRIPS;
+    info!(
+        "subscription 0x{node_id:016x}: offline after {} ms without a report",
+        window.as_millis()
+    );
 
     loop {
         for health in slot.updates.take() {
@@ -352,10 +413,10 @@ where
         let now = Instant::now();
         if now >= deadline {
             warn!(
-                "subscription 0x{node_id:016x} stale: no report in {}s (>{STALE_MULTIPLIER}x max_int={max_int}s); re-establishing",
+                "subscription 0x{node_id:016x} stale: no report in {}s (max_int={max_int}s); re-establishing",
                 (now - slot.last_report.get()).as_secs()
             );
-            on_state(SubState::Reconnecting);
+            on_state(SubState::Offline);
             return Ok(());
         }
 

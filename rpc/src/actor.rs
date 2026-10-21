@@ -42,6 +42,7 @@ use rs_matter::transport::network::btp::Btp;
 use rs_matter::transport::network::mdns::CommissionableFilter;
 use rs_matter::transport::network::{Address, ChainedNetwork, NoNetwork};
 use rs_matter::utils::init::InitMaybeUninit;
+use rs_matter::utils::sync::Notification;
 use rs_matter::Matter;
 
 use static_cell::StaticCell;
@@ -322,6 +323,7 @@ async fn run_subscription<C: Crypto>(job: SubJob, ctx: &ActorCtx<'_, C>) {
         handle,
         stop_rx,
         my_stop,
+        retry,
     } = job;
 
     // The registry entry of this subscription, unless it was replaced or removed.
@@ -340,6 +342,7 @@ async fn run_subscription<C: Crypto>(job: SubJob, ctx: &ActorCtx<'_, C>) {
         &ctx.reports,
         handle,
         DiagSet::ALL,
+        &retry,
         |health| {
             let health = convert::health(health);
             with_watch(&mut |watch| {
@@ -354,9 +357,17 @@ async fn run_subscription<C: Crypto>(job: SubJob, ctx: &ActorCtx<'_, C>) {
         },
         |state| {
             let state = convert::sub_state(state);
+            match state {
+                proto::SubscriptionState::Live { .. } => set_online(ctx, node_id, true),
+                proto::SubscriptionState::Offline => set_online(ctx, node_id, false),
+                proto::SubscriptionState::Stopped => {}
+            }
             with_watch(&mut |watch| {
-                watch.state = Some(state);
-                watch.broadcast(proto::Event::SubscriptionState { node_id, state });
+                // Failed retries repeat `Offline`; tell the watchers once.
+                if watch.state != Some(state) {
+                    watch.state = Some(state);
+                    watch.broadcast(proto::Event::SubscriptionState { node_id, state });
+                }
             });
         },
     );
@@ -438,6 +449,8 @@ struct ActorCtx<'a, C: Crypto> {
 struct Watch {
     /// Fires (or drops) to stop the device subscription.
     stop: async_channel::Sender<()>,
+    /// Cuts the wait before the next attempt to re-establish it short.
+    retry: Rc<Notification>,
     /// The connections watching the device.
     watchers: Vec<async_channel::Sender<proto::ServerMsg>>,
     /// The subscription's state, and the health merged from its reports, so
@@ -519,6 +532,8 @@ struct SubJob {
     /// A clone of the registry stop-sender, so the driver can verify at cleanup
     /// that the registry entry is still this subscription before removing it.
     my_stop: async_channel::Sender<()>,
+    /// See [`Watch::retry`].
+    retry: Rc<Notification>,
 }
 
 /// Pull commands and service them one at a time against the shared stack.
@@ -1011,7 +1026,22 @@ async fn peek_device<C: Crypto>(ctx: &ActorCtx<'_, C>, node_id: u64) -> proto::R
         return no_device(node_id);
     };
 
-    let health = ctx.controller.read_health(dev.handle, DiagSet::ALL).await;
+    let health = match ctx.controller.read_health(dev.handle, DiagSet::ALL).await {
+        Ok(health) => health,
+        Err(e) => {
+            return proto::Response::Error {
+                message: format!("device 0x{node_id:016x} did not answer ({:?})", e.code()),
+            }
+        }
+    };
+
+    // It answers, so an offline subscription of it can be re-established now.
+    set_online(ctx, node_id, true);
+    if let Some(watch) = ctx.subs.borrow().get(&node_id) {
+        if watch.state == Some(proto::SubscriptionState::Offline) {
+            watch.retry.notify();
+        }
+    }
 
     proto::Response::Peek {
         handle: convert::handle(dev.handle),
@@ -1097,10 +1127,12 @@ async fn subscribe<C: Crypto>(
     // ownership at cleanup.
     let (stop_tx, stop_rx) = async_channel::bounded::<()>(1);
     let my_stop = stop_tx.clone();
+    let retry = Rc::new(Notification::new());
     ctx.subs.borrow_mut().insert(
         node_id,
         Watch {
             stop: stop_tx,
+            retry: retry.clone(),
             watchers: vec![out],
             state: None,
             health: proto::DeviceHealth::default(),
@@ -1115,6 +1147,7 @@ async fn subscribe<C: Crypto>(
         handle: dev.handle,
         stop_rx,
         my_stop,
+        retry,
     };
     if sub_submit.send(job).await.is_err() {
         ctx.subs.borrow_mut().remove(&node_id);

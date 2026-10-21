@@ -28,7 +28,7 @@ struct StepLine {
 struct LiveSub {
     /// The running, merged health view (successive report deltas merged in).
     health: proto::DeviceHealth,
-    /// Connection state of this subscription (live / reconnecting).
+    /// Connection state of this subscription (live / offline / …).
     conn: SubConn,
     /// How many reports the device's subscription has delivered.
     updates: u64,
@@ -52,6 +52,10 @@ enum SubConn {
     Live {
         max_int_secs: u16,
     },
+    /// The device stopped reporting or cannot be reached; the server keeps
+    /// retrying.
+    Offline,
+    /// The connection to the server dropped and is being reopened.
     Reconnecting,
 }
 
@@ -553,9 +557,9 @@ impl Component for App {
                             sub.conn = SubConn::Live { max_int_secs };
                         }
                     }
-                    proto::SubscriptionState::Reconnecting => {
+                    proto::SubscriptionState::Offline => {
                         if let Some(sub) = self.subs.get_mut(&node_id) {
-                            sub.conn = SubConn::Reconnecting;
+                            sub.conn = SubConn::Offline;
                         }
                     }
                     // Terminal. A device we still watch and still store gets
@@ -1539,6 +1543,14 @@ impl App {
         // This device's live subscription (auto-created; `None` only very briefly).
         let live = self.subs.get(&node_id);
 
+        // Offline per its subscription; until that is live or offline, per the
+        // last sync. Only Refresh and the actions not needing the device remain.
+        let offline = match live.map(|sub| sub.conn) {
+            Some(SubConn::Live { .. }) => false,
+            Some(SubConn::Offline) => true,
+            _ => d.online == Some(false),
+        };
+
         let title = device_title(d);
 
         let tag_text = self
@@ -1560,9 +1572,9 @@ impl App {
                                     title="No record is kept: it cannot be tagged, and is listed only while on our fabric">
                                     { "not remembered" }</span> }
                               } else { html!{} } }
-                            { if d.online == Some(false) {
-                                html!{ <span class="tag is-light"
-                                    title="Not advertising on our fabric at the last sync">
+                            { if offline {
+                                html!{ <span class="tag is-danger is-light"
+                                    title="Not answering; Refresh checks it now">
                                     { "offline" }</span> }
                               } else { html!{} } }
                             <span class="tag is-light mono">
@@ -1624,10 +1636,11 @@ impl App {
                             disabled={self.busy_stored} onclick={refresh}>
                             { "Refresh" }
                         </button>
-                        <button class="button is-warning is-light" disabled={self.busy_stored} onclick={identify}>
+                        <button class="button is-warning is-light" disabled={self.busy_stored || offline}
+                            onclick={identify}>
                             { "Identify" }
                         </button>
-                        <button class="button is-light" onclick={logs}>
+                        <button class="button is-light" disabled={offline} onclick={logs}>
                             { "Logs" }
                         </button>
                         { if d.remembered { html!{} } else { html!{
@@ -1642,7 +1655,7 @@ impl App {
                         </button>
                     </div>
 
-                    { self.view_device_update(d, link) }
+                    { self.view_device_update(d, offline, link) }
 
                     // Every listed device is watched automatically — the panel is
                     // always shown (it renders "connecting…" until the first report).
@@ -1671,7 +1684,12 @@ impl App {
     }
 
     /// A device card's OTA update controls, when there is an image for it.
-    fn view_device_update(&self, d: &proto::DeviceInfo, link: &html::Scope<Self>) -> Html {
+    fn view_device_update(
+        &self,
+        d: &proto::DeviceInfo,
+        offline: bool,
+        link: &html::Scope<Self>,
+    ) -> Html {
         let node_id = d.handle.node_id;
         let images: Vec<_> = self.applicable(d).collect();
         let status = self.ota_status.get(&node_id);
@@ -1706,7 +1724,8 @@ impl App {
                             </div>
                         </div>
                         <div class="control">
-                            <button class="button is-small is-primary is-light" onclick={update}>
+                            <button class="button is-small is-primary is-light" disabled={offline}
+                                onclick={update}>
                                 { "Update" }
                             </button>
                         </div>
@@ -1907,6 +1926,10 @@ impl App {
                     sub.updates
                 ),
                 "tag is-success is-light",
+            ),
+            SubConn::Offline => (
+                format!("○ offline · retrying · {} report(s)", sub.updates),
+                "tag is-danger is-light",
             ),
             SubConn::Reconnecting => (
                 format!("◌ reconnecting… · {} report(s)", sub.updates),

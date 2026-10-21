@@ -23,6 +23,7 @@ use rs_matter::error::{Error, ErrorCode};
 use rs_matter::onboard::{CommissionOptions, Commissioner};
 use rs_matter::transport::network::Address;
 use rs_matter::transport::session::{Session, SessionMode};
+use rs_matter::utils::sync::Notification;
 use rs_matter::Matter;
 
 use rs_matter::dm::clusters::decl::identify::IdentifyClient as _;
@@ -459,7 +460,11 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// over a fresh CASE session. `dev` carries the `(fabric_index, node_id)`
     /// returned by [`Self::commission`] — that's all that's needed to re-address
     /// the device on our fabric.
-    pub async fn read_health(&self, dev: DeviceHandle, which: DiagSet) -> DeviceHealth {
+    pub async fn read_health(
+        &self,
+        dev: DeviceHandle,
+        which: DiagSet,
+    ) -> Result<DeviceHealth, Error> {
         // `self.crypto: &C` is `Copy` and impls `Crypto` (blanket `impl Crypto
         // for &T`), so each per-attribute exchange gets its own crypto handle.
         crate::diagnostics::read_health(
@@ -478,8 +483,9 @@ impl<'a, C: Crypto> Controller<'a, C> {
     ///
     /// - `on_update` receives the priming snapshot first, then deltas.
     /// - `on_state` receives [`SubState`](crate::subscribe::SubState) lifecycle
-    ///   transitions (`Live { max_int }` / `Reconnecting`), so the caller can show
+    ///   transitions (`Live { max_int }` / `Offline`), so the caller can show
     ///   connection health.
+    /// - `retry` cuts the wait before the next re-establishing attempt short.
     ///
     /// Runs **indefinitely**, self-healing across session drops (a stale
     /// subscription is re-established with a fresh device-side id), until the
@@ -491,6 +497,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
         reports: &crate::subscribe::Reports,
         dev: DeviceHandle,
         which: DiagSet,
+        retry: &Notification,
         on_update: impl FnMut(DeviceHealth),
         on_state: impl FnMut(crate::subscribe::SubState),
     ) -> Result<(), Error> {
@@ -501,6 +508,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
             dev.fabric_index,
             dev.node_id,
             which,
+            retry,
             on_update,
             on_state,
         )

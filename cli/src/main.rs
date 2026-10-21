@@ -407,7 +407,7 @@ impl Out {
                 proto::SubscriptionState::Live { max_int_secs } => {
                     println!("(live, reporting at least every {max_int_secs} s)")
                 }
-                proto::SubscriptionState::Reconnecting => println!("(reconnecting...)"),
+                proto::SubscriptionState::Offline => println!("(offline, retrying...)"),
                 proto::SubscriptionState::Stopped => println!("(stopped)"),
             },
             proto::Event::OtaProgress { progress, .. } => {

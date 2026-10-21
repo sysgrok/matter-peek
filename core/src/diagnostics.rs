@@ -15,8 +15,6 @@
 
 use core::num::NonZeroU8;
 
-use log::debug;
-
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::decl::general_diagnostics::{
     GeneralDiagnosticsAttrReads as _, GeneralDiagnosticsAttrResponses as _,
@@ -105,25 +103,26 @@ pub(crate) fn parse_health(resp: &ReportDataResp<'_>, which: DiagSet) -> DeviceH
 /// Read the requested diagnostic clusters from the device identified by
 /// `(fab_idx, node_id)` and assemble a [`DeviceHealth`] snapshot.
 ///
-/// `crypto` is consumed per cluster read, so it must be `Copy` (the rs-matter
-/// crypto backends are).
+/// Fails if the device cannot be reached; attributes it does not support are
+/// left `None`. `crypto` is consumed per cluster read, so it must be `Copy`
+/// (the rs-matter crypto backends are).
 pub async fn read_health<C: Crypto + Copy>(
     matter: &Matter<'_>,
     crypto: C,
     fab_idx: NonZeroU8,
     node_id: u64,
     which: DiagSet,
-) -> DeviceHealth {
+) -> Result<DeviceHealth, Error> {
     let mut health = DeviceHealth::default();
 
     if which.general {
-        health.general = Some(read_general(matter, crypto, fab_idx, node_id).await);
+        health.general = Some(read_general(matter, crypto, fab_idx, node_id).await?);
     }
     if which.software {
-        health.software = Some(read_software(matter, crypto, fab_idx, node_id).await);
+        health.software = Some(read_software(matter, crypto, fab_idx, node_id).await?);
     }
 
-    health
+    Ok(health)
 }
 
 /// First report from a scalar-attribute iterator. `None` on absence/error
@@ -139,21 +138,6 @@ where
 }
 
 async fn read_general<C: Crypto>(
-    matter: &Matter<'_>,
-    crypto: C,
-    fab_idx: NonZeroU8,
-    node_id: u64,
-) -> GeneralDiag {
-    match try_read_general(matter, crypto, fab_idx, node_id).await {
-        Ok(diag) => diag,
-        Err(e) => {
-            debug!("GeneralDiagnostics read failed: {e:?}");
-            GeneralDiag::default()
-        }
-    }
-}
-
-async fn try_read_general<C: Crypto>(
     matter: &Matter<'_>,
     crypto: C,
     fab_idx: NonZeroU8,
@@ -192,21 +176,6 @@ async fn try_read_general<C: Crypto>(
 }
 
 async fn read_software<C: Crypto>(
-    matter: &Matter<'_>,
-    crypto: C,
-    fab_idx: NonZeroU8,
-    node_id: u64,
-) -> SoftwareDiag {
-    match try_read_software(matter, crypto, fab_idx, node_id).await {
-        Ok(diag) => diag,
-        Err(e) => {
-            debug!("SoftwareDiagnostics read failed: {e:?}");
-            SoftwareDiag::default()
-        }
-    }
-}
-
-async fn try_read_software<C: Crypto>(
     matter: &Matter<'_>,
     crypto: C,
     fab_idx: NonZeroU8,
