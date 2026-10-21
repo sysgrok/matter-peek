@@ -7,6 +7,7 @@
 //! the reports of the connection's subscriptions, OTA progress.
 //! [`WireSession`] runs them against a [`MatterPeek`](super::MatterPeek).
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -66,6 +67,14 @@ pub enum Request {
     ListDevices,
     /// See `MatterPeek::peek_device`. Answered with [`Response::Peek`].
     PeekDevice { node_id: u64 },
+    /// See `MatterPeek::read_network`. Answered with [`Response::Network`].
+    ReadNetwork { node_id: u64 },
+    /// See `MatterPeek::change_network`. Answered with [`Response::Network`].
+    ChangeNetwork {
+        node_id: u64,
+        endpoint: u16,
+        change: NetworkChange,
+    },
     /// See `MatterPeek::retrieve_logs`. Answered with [`Response::Logs`].
     RetrieveLogs { node_id: u64, intent: LogIntent },
     /// See `MatterPeek::identify`. Answered with [`Response::Ok`].
@@ -132,6 +141,10 @@ pub enum Response {
     Peek {
         node_id: u64,
         health: DeviceHealth,
+    },
+    Network {
+        node_id: u64,
+        network: Box<NetworkInfo>,
     },
     /// A log, base64-encoded in `data`; empty if the device has none of that
     /// kind.

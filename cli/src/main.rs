@@ -106,6 +106,17 @@ enum Command {
     },
     /// Read the health of a device.
     Peek { node: Node },
+    /// Read the networking of a device: its interfaces and addresses, the
+    /// networks it knows, and the diagnostics of the network it is on; or
+    /// change the networks it knows.
+    Network {
+        node: Node,
+        /// The endpoint of the network interface; 0 is the primary one.
+        #[arg(long, default_value_t = 0)]
+        endpoint: u16,
+        #[command(subcommand)]
+        change: Option<NetworkChange>,
+    },
     /// Follow the health of a device live, until interrupted.
     Watch { node: Node },
     /// Retrieve a diagnostic log of a device.
@@ -140,6 +151,41 @@ enum Command {
         /// Also offer the tools that change devices or the stored state.
         #[arg(long)]
         allow_mutate: bool,
+    },
+}
+
+/// A change to the networks a device knows, each committed under a fail-safe.
+/// A network is named as `network` shows it: an SSID, a Thread extended PAN ID.
+#[derive(Subcommand)]
+enum NetworkChange {
+    /// Give the device a network, or new credentials for one it knows. New
+    /// credentials for the connected network are proven by reconnecting.
+    Add {
+        /// A Wi-Fi network, by SSID.
+        #[arg(long, value_name = "SSID", requires = "password")]
+        wifi: Option<String>,
+        /// The password of the --wifi network.
+        #[arg(long, requires = "wifi")]
+        password: Option<String>,
+        /// A Thread network: its operational dataset, hex-encoded.
+        #[arg(
+            long,
+            value_name = "HEX",
+            conflicts_with = "wifi",
+            required_unless_present = "wifi"
+        )]
+        thread_dataset: Option<String>,
+    },
+    /// Make the device forget a network; not the connected one.
+    Remove { network: String },
+    /// Connect the device to a network it knows. Committed once the device
+    /// answers on it; otherwise the device returns to its previous network.
+    Connect { network: String },
+    /// Move a network to another place in the order the device tries them.
+    Reorder {
+        network: String,
+        /// Its new place, from 0.
+        index: u8,
     },
 }
 
@@ -361,6 +407,37 @@ async fn run(cli: Cli) -> io::Result<bool> {
                 response => response.is_some(),
             },
         ),
+        Command::Network {
+            node,
+            endpoint,
+            change,
+        } => {
+            let request = match change {
+                None => wire::Request::ReadNetwork { node_id: node.0 },
+                Some(change) => {
+                    let Some(change) = network_change(&conn, node.0, endpoint, change).await?
+                    else {
+                        return Ok(false);
+                    };
+                    if !out.json {
+                        println!("Changing the networks of the device…");
+                    }
+                    wire::Request::ChangeNetwork {
+                        node_id: node.0,
+                        endpoint,
+                        change,
+                    }
+                }
+            };
+
+            Ok(match call(&conn, &out, request).await? {
+                Some(wire::Response::Network { network, .. }) if !out.json => {
+                    print!("{}", network_text(&network));
+                    true
+                }
+                response => response.is_some(),
+            })
+        }
         Command::Watch { node } => watch(&conn, &out, node.0).await,
         Command::Logs { node, kind, output } => {
             let request = wire::Request::RetrieveLogs {
@@ -511,6 +588,9 @@ fn devices(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
         );
         if d.is_test_vendor() {
             line.push_str(" (test vendor)");
+        }
+        if let Some(kind) = d.network {
+            line.push_str(&format!("  {}", kind.label()));
         }
         match d.online {
             Some(true) => line.push_str("  online"),
@@ -698,6 +778,240 @@ fn discover_filter(filter: Option<String>) -> (Option<u16>, Option<String>) {
         Some(f) => (None, Some(f)),
         None => (None, None),
     }
+}
+
+/// The API's change for `change`, naming its network by its ID; `None` when
+/// the device does not know the named network (reported).
+async fn network_change(
+    conn: &Connection,
+    node_id: u64,
+    endpoint: u16,
+    change: NetworkChange,
+) -> io::Result<Option<api::NetworkChange>> {
+    let network = match &change {
+        NetworkChange::Add { .. } => None,
+        NetworkChange::Remove { network }
+        | NetworkChange::Connect { network }
+        | NetworkChange::Reorder { network, .. } => Some(network.clone()),
+    };
+
+    let network_id = match network {
+        Some(name) => {
+            let request = wire::Request::ReadNetwork { node_id };
+            let known = match conn.call(request, |_| ()).await? {
+                wire::Response::Network { network, .. } => network
+                    .configs
+                    .into_iter()
+                    .filter(|config| config.endpoint == endpoint)
+                    .flat_map(|config| config.networks)
+                    .find(|known| known.name.eq_ignore_ascii_case(&name)),
+                wire::Response::Error { message } => {
+                    eprintln!("error: {message}");
+                    return Ok(None);
+                }
+                _ => None,
+            };
+            let Some(known) = known else {
+                eprintln!("error: the device knows no network {name}");
+                return Ok(None);
+            };
+            known.id
+        }
+        None => Vec::new(),
+    };
+
+    Ok(Some(match change {
+        NetworkChange::Add {
+            wifi,
+            password,
+            thread_dataset,
+        } => api::NetworkChange::AddOrUpdate {
+            credentials: match (wifi, thread_dataset) {
+                (Some(ssid), _) => api::NetworkCredentials::Wifi {
+                    ssid,
+                    password: password.unwrap_or_default(),
+                },
+                (None, dataset) => api::NetworkCredentials::Thread {
+                    dataset: dataset.unwrap_or_default(),
+                },
+            },
+        },
+        NetworkChange::Remove { .. } => api::NetworkChange::Remove { network_id },
+        NetworkChange::Connect { .. } => api::NetworkChange::Connect { network_id },
+        NetworkChange::Reorder { index, .. } => api::NetworkChange::Reorder { network_id, index },
+    }))
+}
+
+/// A device's networking, a few facts per line; facts the device does not
+/// serve are left out.
+fn network_text(info: &api::NetworkInfo) -> String {
+    use std::fmt::Write as _;
+
+    /// The facts that have a value, as `name value`, comma-separated.
+    fn facts(facts: &[(&str, Option<String>)]) -> String {
+        facts
+            .iter()
+            .filter_map(|(name, value)| Some(format!("{name} {}", value.as_ref()?)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn some<T: ToString>(v: Option<T>) -> Option<String> {
+        v.map(|v| v.to_string())
+    }
+
+    let mut out = String::new();
+
+    for iface in &info.interfaces {
+        let _ = writeln!(
+            out,
+            "Interface {} ({}): {}, hardware address {}",
+            iface.name,
+            iface.kind.label(),
+            if iface.operational { "up" } else { "down" },
+            iface.hardware_address
+        );
+        for addr in iface.ipv4_addresses.iter().chain(&iface.ipv6_addresses) {
+            let _ = writeln!(out, "  {addr}");
+        }
+    }
+
+    for config in &info.configs {
+        let kind = config.kind.map(|kind| kind.label()).unwrap_or("Network");
+        let room = config
+            .max_networks
+            .map(|max| format!(", room for {max}"))
+            .unwrap_or_default();
+        let _ = writeln!(out, "{kind} networks (endpoint {}{room}):", config.endpoint);
+        for network in &config.networks {
+            let mark = if network.connected {
+                "  (connected)"
+            } else {
+                ""
+            };
+            let _ = writeln!(out, "  {}{mark}", network.name);
+        }
+        if let Some(status) = config.last_status {
+            let on = config
+                .last_network
+                .as_ref()
+                .map(|name| format!(" on {name}"))
+                .unwrap_or_default();
+            let error = config
+                .last_connect_error
+                .map(|e| format!(" (error {e})"))
+                .unwrap_or_default();
+            let _ = writeln!(out, "  Last operation: {}{on}{error}", status.label());
+        }
+    }
+
+    if let Some(wifi) = &info.wifi {
+        let _ = writeln!(
+            out,
+            "Wi-Fi: {}",
+            facts(&[
+                ("access point", wifi.bssid.clone()),
+                ("signal", wifi.rssi.map(|rssi| format!("{rssi} dBm"))),
+                ("channel", some(wifi.channel)),
+                ("security", some(wifi.security.map(|s| s.label()))),
+                ("standard", some(wifi.version.map(|v| v.label()))),
+                ("max rate", wifi.current_max_rate.map(display::bit_rate)),
+            ])
+        );
+        let counters = facts(&[
+            ("beacons lost", some(wifi.beacon_lost_count)),
+            ("beacons received", some(wifi.beacon_rx_count)),
+            ("packets received", some(wifi.packet_unicast_rx_count)),
+            ("packets sent", some(wifi.packet_unicast_tx_count)),
+            ("overruns", some(wifi.overrun_count)),
+        ]);
+        if !counters.is_empty() {
+            let _ = writeln!(out, "  {counters}");
+        }
+    }
+
+    if let Some(thread) = &info.thread {
+        let _ = writeln!(
+            out,
+            "Thread: {}",
+            facts(&[
+                ("role", some(thread.role.map(|r| r.label()))),
+                ("network", thread.network_name.clone()),
+                ("channel", some(thread.channel)),
+                ("PAN", thread.pan_id.map(display::hex_u16)),
+                ("extended PAN", thread.extended_pan_id.map(display::hex_u64)),
+                ("mesh-local prefix", thread.mesh_local_prefix.clone()),
+                ("RLOC16", thread.rloc16.map(display::hex_u16)),
+            ])
+        );
+        let stats = facts(&[
+            ("partition", some(thread.partition_id)),
+            ("leader", some(thread.leader_router_id)),
+            ("attach attempts", some(thread.attach_attempt_count)),
+            ("parent changes", some(thread.parent_change_count)),
+            ("partition changes", some(thread.partition_id_change_count)),
+            ("detached", some(thread.detached_role_count)),
+            ("routes", some(thread.route_count)),
+        ]);
+        if !stats.is_empty() {
+            let _ = writeln!(out, "  {stats}");
+        }
+        for n in &thread.neighbors {
+            let _ = writeln!(
+                out,
+                "  Neighbor {} (RLOC16 {}){}: {}",
+                display::hex_u64(n.ext_address),
+                display::hex_u16(n.rloc16),
+                if n.is_child { ", our child" } else { "" },
+                facts(&[
+                    ("LQI", some(Some(n.lqi))),
+                    (
+                        "average signal",
+                        n.average_rssi.map(|rssi| format!("{rssi} dBm"))
+                    ),
+                    ("last signal", n.last_rssi.map(|rssi| format!("{rssi} dBm"))),
+                    (
+                        "seen",
+                        Some(format!("{} ago", display::duration(u64::from(n.age_secs))))
+                    ),
+                ])
+            );
+        }
+    }
+
+    if let Some(eth) = &info.ethernet {
+        let _ = writeln!(
+            out,
+            "Ethernet: {}",
+            facts(&[
+                (
+                    "speed",
+                    eth.phy_rate_mbps.map(|mbps| format!("{mbps} Mbit/s"))
+                ),
+                (
+                    "duplex",
+                    eth.full_duplex
+                        .map(|full| if full { "full" } else { "half" }.to_string())
+                ),
+                (
+                    "carrier",
+                    eth.carrier_detect
+                        .map(|c| if c { "yes" } else { "no" }.to_string())
+                ),
+                ("packets received", some(eth.packet_rx_count)),
+                ("packets sent", some(eth.packet_tx_count)),
+                ("send errors", some(eth.tx_err_count)),
+                ("collisions", some(eth.collision_count)),
+                ("up", eth.time_since_reset_secs.map(display::duration)),
+            ])
+        );
+    }
+
+    if out.is_empty() {
+        out.push_str("The device reports no networking.\n");
+    }
+
+    out
 }
 
 fn health_text(health: &api::DeviceHealth) -> String {

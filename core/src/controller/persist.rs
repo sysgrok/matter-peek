@@ -29,7 +29,7 @@ use rs_matter::tlv::{FromTLV, OctetsVec, TLVElement, ToTLV};
 use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::sync::blocking::Mutex;
 
-use crate::model::{DeviceHandle, StoredDevice};
+use crate::model::{DeviceHandle, NetworkKind, StoredDevice};
 
 /// Scratch buffer size for the KV store (fits a fabric blob or our device list).
 const KV_BUF_LEN: usize = 4096;
@@ -214,6 +214,29 @@ fn normalize_tags(tags: &[String]) -> Vec<String> {
     out
 }
 
+/// How a [`NetworkKind`] is stored.
+fn network_code(kind: NetworkKind) -> u8 {
+    match kind {
+        NetworkKind::Unspecified => 0,
+        NetworkKind::WiFi => 1,
+        NetworkKind::Thread => 2,
+        NetworkKind::Ethernet => 3,
+        NetworkKind::Cellular => 4,
+    }
+}
+
+/// The [`NetworkKind`] stored as `code`.
+fn network_kind(code: u8) -> Option<NetworkKind> {
+    match code {
+        0 => Some(NetworkKind::Unspecified),
+        1 => Some(NetworkKind::WiFi),
+        2 => Some(NetworkKind::Thread),
+        3 => Some(NetworkKind::Ethernet),
+        4 => Some(NetworkKind::Cellular),
+        _ => None,
+    }
+}
+
 /// `None` for an empty string, `Some(clone)` otherwise — so blank device names
 /// don't bloat the persisted blob and round-trip cleanly to/from empty.
 fn opt_str(s: &str) -> Option<String> {
@@ -270,6 +293,9 @@ struct StoredDeviceWire {
     // decommissioned. Never written; such a record is dropped on load, and a
     // sync lists the device again if it still holds our fabric.
     pending_removal: Option<bool>,
+    // The kind of network the device is on (see `network_code`); appended last,
+    // so earlier blobs decode it as `None`.
+    network: Option<u8>,
 }
 
 impl StoredDeviceList {
@@ -293,6 +319,7 @@ impl StoredDeviceList {
                     vendor_name: opt_str(&d.vendor_name),
                     product_name: opt_str(&d.product_name),
                     pending_removal: None,
+                    network: d.network.map(network_code),
                 })
                 .collect(),
         }
@@ -322,6 +349,7 @@ impl StoredDeviceList {
                         software_version: w.fp_software_version,
                     },
                     tags: w.tags,
+                    network: w.network.and_then(network_kind),
                 })
             })
             .collect()
@@ -331,7 +359,7 @@ impl StoredDeviceList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DeviceFingerprint, DeviceHandle};
+    use crate::model::{DeviceFingerprint, DeviceHandle, NetworkKind};
     use alloc::collections::BTreeMap;
     use alloc::string::ToString;
     use alloc::vec;
@@ -397,6 +425,7 @@ mod tests {
             product_name: "Widget".to_string(),
             fingerprint: fp(0x1234, 0x5678),
             tags: tags.iter().map(|t| t.to_string()).collect(),
+            network: Some(NetworkKind::Thread),
         }
     }
 

@@ -46,6 +46,10 @@ const MUTATING_TOOLS: &[&str] = &[
     "ota_upload",
     "ota_delete",
     "ota_update",
+    "add_network",
+    "remove_network",
+    "connect_network",
+    "reorder_network",
 ];
 
 /// How much of an OTA image goes in one upload request.
@@ -113,10 +117,11 @@ fn initialize_result() -> Value {
         "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
         "instructions":
             "Vendor-agnostic Matter controller. Read-only tools \
-             (discover, list_devices, peek_device, retrieve_logs, identify, \
+             (discover, list_devices, peek_device, read_network, retrieve_logs, identify, \
              read_qr_image, ota_images) are always available. The tools that change devices \
              or the stored state (commission, decommission, remember, set_tags, \
-             sync, ota_upload, ota_delete, ota_update) are available only if the \
+             sync, ota_upload, ota_delete, ota_update, add_network, remove_network, \
+             connect_network, reorder_network) are available only if the \
              operator allowed them (e.g. `matter-peek mcp --allow-mutate`)."
     })
 }
@@ -162,6 +167,22 @@ fn tool_list(caps: Caps) -> Vec<Value> {
             "Re-address a listed device by its node id over a fresh CASE \
              session (no re-commissioning) and read its health diagnostics \
              (uptime, reboot count, heap).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "integer", "description": "The device's node id on our fabric." }
+                },
+                "required": ["node_id"]
+            }),
+        ),
+        tool(
+            "read_network",
+            "Read a listed device's networking: its network interfaces and their \
+             addresses, the networks it knows (Wi-Fi SSIDs / Thread networks) and \
+             which one it is on, the outcome of its last network operation, and \
+             the diagnostics of its network (Wi-Fi: access point, signal, channel; \
+             Thread: role, channel, PAN, neighbors with their signal; Ethernet: \
+             speed, carrier).",
             json!({
                 "type": "object",
                 "properties": {
@@ -269,6 +290,57 @@ fn tool_list(caps: Caps) -> Vec<Value> {
                 "properties": { "node_id": { "type": "integer" } },
                 "required": ["node_id"]
             }),
+        ));
+        let network = json!({
+            "node_id": { "type": "integer" },
+            "endpoint": {
+                "type": "integer",
+                "description": "Endpoint of the network interface (default 0, the primary one)."
+            },
+            "ssid": { "type": "string", "description": "The Wi-Fi network, by SSID." },
+            "network_id_hex": {
+                "type": "string",
+                "description": "Or the network by the id_hex read_network gives (e.g. a Thread extended PAN ID)."
+            }
+        });
+        tools.push(tool(
+            "add_network",
+            "Give a listed device a Wi-Fi network (ssid + password) or a Thread network \
+             (thread_dataset, hex), or new credentials for one it knows. Committed under a \
+             fail-safe; new credentials for the network the device is connected to are \
+             proven by reconnecting with them, else the device returns to its old ones.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "integer" },
+                    "endpoint": { "type": "integer", "description": "Default 0." },
+                    "ssid": { "type": "string" },
+                    "password": { "type": "string" },
+                    "thread_dataset": { "type": "string", "description": "Thread operational dataset, hex." }
+                },
+                "required": ["node_id"]
+            }),
+        ));
+        tools.push(tool(
+            "remove_network",
+            "Make a listed device forget a network (not the one it is connected to).",
+            json!({ "type": "object", "properties": network.clone(), "required": ["node_id"] }),
+        ));
+        tools.push(tool(
+            "connect_network",
+            "Connect a listed device to a network it knows. Committed only once the device \
+             answers on that network; otherwise it returns to its previous network by itself.",
+            json!({ "type": "object", "properties": network.clone(), "required": ["node_id"] }),
+        ));
+        let mut reorder = network;
+        reorder["index"] = json!({
+            "type": "integer",
+            "description": "The network's new place in the order the device tries them, from 0."
+        });
+        tools.push(tool(
+            "reorder_network",
+            "Move a network of a listed device to another place in the order the device tries them.",
+            json!({ "type": "object", "properties": reorder, "required": ["node_id", "index"] }),
         ));
         tools.push(tool(
             "set_tags",
@@ -457,6 +529,47 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
         "peek_device" => wire::Request::PeekDevice {
             node_id: arg_u64(args, "node_id")?,
         },
+        "read_network" => wire::Request::ReadNetwork {
+            node_id: arg_u64(args, "node_id")?,
+        },
+        "add_network" => wire::Request::ChangeNetwork {
+            node_id: arg_u64(args, "node_id")?,
+            endpoint: arg_endpoint(args)?,
+            change: api::NetworkChange::AddOrUpdate {
+                credentials: match args.get("thread_dataset").and_then(Value::as_str) {
+                    Some(dataset) => api::NetworkCredentials::Thread {
+                        dataset: dataset.to_string(),
+                    },
+                    None => api::NetworkCredentials::Wifi {
+                        ssid: arg_str(args, "ssid")?,
+                        password: arg_str(args, "password")?,
+                    },
+                },
+            },
+        },
+        "remove_network" => wire::Request::ChangeNetwork {
+            node_id: arg_u64(args, "node_id")?,
+            endpoint: arg_endpoint(args)?,
+            change: api::NetworkChange::Remove {
+                network_id: arg_network(args)?,
+            },
+        },
+        "connect_network" => wire::Request::ChangeNetwork {
+            node_id: arg_u64(args, "node_id")?,
+            endpoint: arg_endpoint(args)?,
+            change: api::NetworkChange::Connect {
+                network_id: arg_network(args)?,
+            },
+        },
+        "reorder_network" => wire::Request::ChangeNetwork {
+            node_id: arg_u64(args, "node_id")?,
+            endpoint: arg_endpoint(args)?,
+            change: api::NetworkChange::Reorder {
+                network_id: arg_network(args)?,
+                index: u8::try_from(arg_u64(args, "index")?)
+                    .map_err(|_| (jsonrpc::INVALID_PARAMS, "'index' is too big".to_string()))?,
+            },
+        },
         "retrieve_logs" => wire::Request::RetrieveLogs {
             node_id: arg_u64(args, "node_id")?,
             intent: match args.get("intent").and_then(Value::as_str) {
@@ -539,6 +652,41 @@ fn arg_u64(args: &Value, key: &str) -> Result<u64, ToolErr> {
     ))
 }
 
+/// The `endpoint` argument, `0` by default.
+fn arg_endpoint(args: &Value) -> Result<u16, ToolErr> {
+    match args.get("endpoint").and_then(Value::as_u64) {
+        Some(endpoint) => u16::try_from(endpoint)
+            .map_err(|_| (jsonrpc::INVALID_PARAMS, "'endpoint' is too big".to_string())),
+        None => Ok(0),
+    }
+}
+
+/// The network ID named by `ssid` or `network_id_hex`.
+fn arg_network(args: &Value) -> Result<Vec<u8>, ToolErr> {
+    if let Some(ssid) = args.get("ssid").and_then(Value::as_str) {
+        return Ok(ssid.as_bytes().to_vec());
+    }
+
+    let hex = arg_str(args, "network_id_hex").map_err(|_| {
+        (
+            jsonrpc::INVALID_PARAMS,
+            "name the network by 'ssid' or 'network_id_hex'".to_string(),
+        )
+    })?;
+    let digits = hex.trim_start_matches("0x").as_bytes();
+
+    digits
+        .chunks(2)
+        .map(|pair| {
+            core::str::from_utf8(pair)
+                .ok()
+                .filter(|pair| pair.len() == 2)
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+        })
+        .collect::<Option<Vec<u8>>>()
+        .ok_or((jsonrpc::INVALID_PARAMS, format!("'{hex}' is not hex")))
+}
+
 fn arg_str(args: &Value, key: &str) -> Result<String, ToolErr> {
     args.get(key)
         .and_then(Value::as_str)
@@ -589,6 +737,21 @@ fn labelled(response: &wire::Response) -> Value {
             for (i, v) in images.iter().zip(entries(&mut value, "images")) {
                 v["vendor"] = json!(display::vendor_label(i.vendor_id, None));
                 v["product"] = json!(display::product_label(i.vendor_id, i.product_id, None));
+            }
+        }
+        wire::Response::Network { network, .. } => {
+            for (config, c) in network
+                .configs
+                .iter()
+                .zip(entries(&mut value["network"], "configs"))
+            {
+                for (known, k) in config.networks.iter().zip(entries(c, "networks")) {
+                    k["id_hex"] = json!(known
+                        .id
+                        .iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<String>());
+                }
             }
         }
         wire::Response::Peek { health, .. } => {

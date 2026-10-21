@@ -274,7 +274,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 pass: password.as_bytes(),
             }),
             Some(NetworkCredentials::Thread { dataset: hex }) => {
-                dataset = ble::decode_hex(hex)?;
+                dataset = crate::network::decode_hex(hex)?;
                 Some(WirelessCreds::Thread {
                     dataset_tlv: &dataset,
                 })

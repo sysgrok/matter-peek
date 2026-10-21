@@ -15,6 +15,8 @@
 //! `DESIGN.md` at the workspace root for the architecture.
 
 #![no_std]
+// The TLV derives of the stored device record nest deeper than the default.
+#![recursion_limit = "256"]
 
 extern crate alloc;
 
@@ -41,6 +43,8 @@ mod controller {
     pub mod matter;
     pub mod mdns;
     pub mod model;
+    pub mod netconfig;
+    pub mod network;
     pub mod node;
     pub mod ota;
     pub mod persist;

@@ -203,6 +203,9 @@ pub struct DeviceInfo {
     /// Whether we keep a record of the device (see
     /// [`MatterPeek::remember`](super::MatterPeek::remember)).
     pub remembered: bool,
+    /// The kind of network it is on, if known.
+    #[serde(default)]
+    pub network: Option<NetworkKind>,
 }
 
 /// The numeric BasicInformation attributes of a device.
@@ -324,4 +327,238 @@ pub enum OtaProgress {
     Applying { version: u32 },
     /// The device reports that it runs `version`.
     Applied { version: u32 },
+}
+
+/// What kind of network a device, or one of its interfaces, is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkKind {
+    WiFi,
+    Thread,
+    Ethernet,
+    Cellular,
+    Unspecified,
+}
+
+/// A device's networking: its interfaces, the networks it knows, and the
+/// diagnostics of the network it is on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct NetworkInfo {
+    pub interfaces: Vec<NetworkInterfaceInfo>,
+    /// One per network interface it can be given networks for (its primary
+    /// one on endpoint 0).
+    pub configs: Vec<NetworkConfig>,
+    pub wifi: Option<WifiDiag>,
+    pub thread: Option<ThreadDiag>,
+    pub ethernet: Option<EthernetDiag>,
+}
+
+/// A change to the networks a device knows (see
+/// [`MatterPeek::change_network`](super::MatterPeek::change_network)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "change", rename_all = "snake_case")]
+pub enum NetworkChange {
+    /// Add a network, or update the credentials of a known one.
+    AddOrUpdate { credentials: NetworkCredentials },
+    /// Forget a network; not the connected one.
+    Remove { network_id: Vec<u8> },
+    /// Connect to a known network.
+    Connect { network_id: Vec<u8> },
+    /// Move a network to `index` in the order the device tries them.
+    Reorder { network_id: Vec<u8>, index: u8 },
+}
+
+/// A network interface of a device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct NetworkInterfaceInfo {
+    pub name: String,
+    pub kind: NetworkKind,
+    pub operational: bool,
+    /// Its MAC (or, on Thread, extended) address, e.g. `AA:BB:CC:DD:EE:FF`.
+    pub hardware_address: String,
+    pub ipv4_addresses: Vec<String>,
+    pub ipv6_addresses: Vec<String>,
+    /// Whether services off the premises are reachable over IPv4 / IPv6, if
+    /// the device knows.
+    pub off_premise_ipv4: Option<bool>,
+    pub off_premise_ipv6: Option<bool>,
+}
+
+/// The networks a device can be given for one of its interfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct NetworkConfig {
+    pub endpoint: u16,
+    pub kind: Option<NetworkKind>,
+    pub interface_enabled: Option<bool>,
+    /// How many networks it can keep.
+    pub max_networks: Option<u8>,
+    pub networks: Vec<KnownNetwork>,
+    /// The outcome of its last network operation, e.g. a failed connect.
+    pub last_status: Option<NetworkStatus>,
+    /// The network of that operation, as in [`KnownNetwork`].
+    pub last_network_id: Option<Vec<u8>>,
+    pub last_network: Option<String>,
+    /// The error that operation's connect failed with: an 802.11 reason or
+    /// status code on Wi-Fi.
+    pub last_connect_error: Option<i32>,
+    pub connect_max_time_secs: Option<u8>,
+    pub scan_max_time_secs: Option<u8>,
+}
+
+/// A network a device knows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct KnownNetwork {
+    /// Its ID, as the device has it: an SSID, a Thread extended PAN ID, an
+    /// Ethernet interface name.
+    pub id: Vec<u8>,
+    /// Its ID as text: the SSID, the extended PAN ID in hex, the name.
+    pub name: String,
+    pub connected: bool,
+}
+
+/// The outcome of a network operation on a device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkStatus {
+    Success,
+    OutOfRange,
+    BoundsExceeded,
+    NetworkIdNotFound,
+    DuplicateNetworkId,
+    NetworkNotFound,
+    RegulatoryError,
+    AuthFailure,
+    UnsupportedSecurity,
+    OtherConnectionFailure,
+    Ipv6Failed,
+    IpBindFailed,
+    UnknownError,
+}
+
+/// Wi-Fi Network Diagnostics.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct WifiDiag {
+    /// The access point's address, e.g. `AA:BB:CC:DD:EE:FF`.
+    pub bssid: Option<String>,
+    pub security: Option<WifiSecurity>,
+    pub version: Option<WifiVersion>,
+    pub channel: Option<u16>,
+    /// dBm.
+    pub rssi: Option<i8>,
+    /// Bits per second.
+    pub current_max_rate: Option<u64>,
+    pub beacon_lost_count: Option<u32>,
+    pub beacon_rx_count: Option<u32>,
+    pub packet_unicast_rx_count: Option<u32>,
+    pub packet_unicast_tx_count: Option<u32>,
+    pub packet_multicast_rx_count: Option<u32>,
+    pub packet_multicast_tx_count: Option<u32>,
+    pub overrun_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum WifiSecurity {
+    Unspecified,
+    None,
+    Wep,
+    Wpa,
+    Wpa2,
+    Wpa3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum WifiVersion {
+    A,
+    B,
+    G,
+    N,
+    Ac,
+    Ax,
+    Ah,
+}
+
+/// Thread Network Diagnostics.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ThreadDiag {
+    pub role: Option<ThreadRole>,
+    pub network_name: Option<String>,
+    pub channel: Option<u16>,
+    pub pan_id: Option<u16>,
+    pub extended_pan_id: Option<u64>,
+    /// E.g. `fd12:3456:789a:1::/64`.
+    pub mesh_local_prefix: Option<String>,
+    pub rloc16: Option<u16>,
+    pub ext_address: Option<u64>,
+    pub partition_id: Option<u32>,
+    pub leader_router_id: Option<u8>,
+    pub attach_attempt_count: Option<u16>,
+    pub parent_change_count: Option<u16>,
+    pub partition_id_change_count: Option<u16>,
+    pub detached_role_count: Option<u16>,
+    pub neighbors: Vec<ThreadNeighbor>,
+    /// How many routes its route table holds.
+    pub route_count: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadRole {
+    Unspecified,
+    Unassigned,
+    SleepyEndDevice,
+    EndDevice,
+    Reed,
+    Router,
+    Leader,
+}
+
+/// A neighbor of a Thread device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ThreadNeighbor {
+    pub ext_address: u64,
+    pub rloc16: u16,
+    /// Seconds since last heard.
+    pub age_secs: u32,
+    pub lqi: u8,
+    /// dBm.
+    pub average_rssi: Option<i8>,
+    pub last_rssi: Option<i8>,
+    /// Percent.
+    pub frame_error_rate: u8,
+    pub message_error_rate: u8,
+    /// Whether it is our child (else, e.g., our parent or a router).
+    pub is_child: bool,
+    pub rx_on_when_idle: bool,
+    pub full_thread_device: bool,
+}
+
+/// Ethernet Network Diagnostics.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct EthernetDiag {
+    /// Mbit/s.
+    pub phy_rate_mbps: Option<u32>,
+    pub full_duplex: Option<bool>,
+    pub carrier_detect: Option<bool>,
+    pub packet_rx_count: Option<u64>,
+    pub packet_tx_count: Option<u64>,
+    pub tx_err_count: Option<u64>,
+    pub collision_count: Option<u64>,
+    pub overrun_count: Option<u64>,
+    pub time_since_reset_secs: Option<u64>,
 }

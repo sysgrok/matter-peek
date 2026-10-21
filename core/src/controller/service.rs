@@ -50,6 +50,7 @@ use watch::{SubJob, Watch};
 mod commission;
 mod convert;
 mod devices;
+mod netconfig;
 mod ota;
 mod watch;
 
@@ -205,6 +206,18 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             }
             Op::PeekDevice { node_id, reply } => {
                 let _ = reply.send(self.peek_device(node_id).await).await;
+            }
+            Op::ReadNetwork { node_id, reply } => {
+                let _ = reply.send(self.read_network(node_id).await).await;
+            }
+            Op::ChangeNetwork {
+                node_id,
+                endpoint,
+                change,
+                reply,
+            } => {
+                let changed = self.change_network(node_id, endpoint, change).await;
+                let _ = reply.send(changed).await;
             }
             Op::RetrieveLogs {
                 node_id,
@@ -457,6 +470,9 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             | Op::SetTags { reply, .. }
             | Op::Decommission { reply, .. } => refuse(reply, error).await,
             Op::PeekDevice { reply, .. } => refuse(reply, error).await,
+            Op::ReadNetwork { reply, .. } | Op::ChangeNetwork { reply, .. } => {
+                refuse(reply, error).await
+            }
             Op::RetrieveLogs { reply, .. } => refuse(reply, error).await,
             Op::Identify { reply, .. } | Op::OtaUpdate { reply, .. } => refuse(reply, error).await,
             Op::Watch { reply, .. } => refuse(reply, error).await,

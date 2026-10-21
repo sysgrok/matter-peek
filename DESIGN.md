@@ -81,7 +81,7 @@ controller serves the CLI, the MCP server and mobile apps.
 | Commissioning | `commission` (IP or BLE, network credentials, `remember`, a progress listener), `cancel_commission`, `read_qr_image`, `discover` (mDNS + BLE) |
 | Device list | `list_devices`, `sync`, `remember`, `set_tags`, `decommission` |
 | Health | `peek_device` (one-shot), `subscribe` (live; returns a `Subscription`, which stops when dropped) |
-| Device | `retrieve_logs`, `identify` |
+| Device | `read_network` (interfaces, known networks, Wi-Fi / Thread / Ethernet diagnostics), `change_network` (add or update, remove, connect, reorder a known network), `retrieve_logs`, `identify` |
 | OTA | `ota_images`, `ota_upload` (returns an `OtaUpload` to write chunks to), `ota_delete`, `ota_update` (a progress listener) |
 
 The same methods serve every binding:
@@ -186,6 +186,22 @@ of it is private to `core`.
   two MRP round trips of a report. Re-establishing is retried with a 2–60 s
   backoff; a successful `peek_device` retries at once.
 
+### Network changes
+- One `change_network` call is one complete change: arm the fail-safe, make the
+  change, commit it (`CommissioningComplete`). What fails is disarmed at once,
+  or reverted by the device when its fail-safe expires.
+- Connecting to another network, or new credentials for the network the device
+  is on, is committed only once the device answers on that network again;
+  otherwise it returns to its previous one.
+- Removing the network the device is on is refused.
+- A new network goes last, as the spec says; where a device puts it elsewhere
+  (the Shelly Gen4 uses a free slot), it is moved there in the same change.
+- Which network the device is on comes from what it shows of it: for Wi-Fi, its
+  access point (BSSID) among a directed scan's results for that SSID; for
+  Thread, its extended PAN ID. A network's Connected flag is the fallback only:
+  some devices get it wrong (the Shelly Gen4 keeps it on a position in the list,
+  not on the network).
+
 ### OTA
 We are the devices' OTA Provider: images are stored as files (uploaded in
 chunks, checked as they arrive), `ota_update` announces us to the device, and
@@ -262,16 +278,24 @@ its own platform pieces (e.g. `Builtin` mDNS over its multicast socket), plus an
 
 **Done**: commissioning over IP and BLE (Wi-Fi), discovery, QR from a picture;
 inventory with remember, tags and sync; one-shot and live health; diagnostic
-logs; identify; OTA Provider and updates; decommission; web UI, CLI and MCP on
-one API; the API in `core` (`MatterPeek`), exported over UniFFI.
+logs; identify; OTA Provider and updates; decommission; a device's networking
+and changes to its networks; web UI, CLI and MCP on one API; the API in `core`
+(`MatterPeek`), exported over UniFFI.
 
 **Next**
-- Network diagnostics (Ethernet, Wi-Fi, Thread; network interfaces) and network
-  management (the networks a device knows; add / remove / update), then
-  migrating devices to a new Wi-Fi.
+- Migrating devices to a new Wi-Fi, and other changes to the networks of many
+  devices at once.
 - Device types (and card icons) and a data-model browser: endpoints, clusters,
-  attributes, commands. Needs id → name tables from rs-matter's codegen, and
-  subscriptions per set of paths rather than one fixed set.
+  attributes, commands; reading and writing any attribute, invoking any
+  command. Needs id → name tables from rs-matter's codegen, and subscriptions
+  per set of paths rather than one fixed set.
+- Filtering devices by what we know of them (Wi-Fi / Thread / Ethernet, device
+  types, clusters, fabrics), next to the user's tags; the same filters select
+  devices for bulk changes.
+- A device's fabrics (where else it is commissioned), and devices on other
+  fabrics only (to have their commissioning windows opened for us).
+- Several fabrics of our own ("homes"), and joining another controller's
+  fabric with Matter 1.6 Joint Fabric (e.g. Home Assistant's).
 - Sharing a device: opening a basic or enhanced commissioning window and showing
   its pairing code and QR code.
 - Commissioning progress (percent and stage) from rs-matter's `Commissioner`,
@@ -280,7 +304,10 @@ one API; the API in `core` (`MatterPeek`), exported over UniFFI.
 - BLE commissioning onto Thread (in the API, not yet tried on a device).
 
 **Platforms**: running operations concurrently (a long commission blocks the
-others today); mobile apps (above); macOS desktop.
+others today); macOS desktop; Android and iOS apps (above), commissioning
+through the platform's own commissioner (Google Play services, Apple) rather
+than over BLE, and maybe a built-in agent driving the controller through a
+cloud LLM, as MCP does on a PC.
 
 **Later**: consent-gated upload of logs and crash dumps; per-vendor crash
 parsers.

@@ -2,7 +2,7 @@
 
 use core::num::NonZeroU8;
 
-pub use crate::api::{DeviceHealth, GeneralDiag, LogIntent, SoftwareDiag};
+pub use crate::api::{DeviceHealth, GeneralDiag, LogIntent, NetworkKind, SoftwareDiag};
 
 /// Which diagnostic clusters to read in a health snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +67,8 @@ pub struct StoredDevice {
     pub fingerprint: DeviceFingerprint,
     /// Local user tags for filtering/grouping.
     pub tags: alloc::vec::Vec<alloc::string::String>,
+    /// The kind of network it is on, if known.
+    pub network: Option<NetworkKind>,
 }
 
 /// Device identity read from the BasicInformation cluster at commission time.
@@ -94,6 +96,8 @@ pub struct DeviceIdentity {
     /// globally unique, but a stable per-model fingerprint and the fallback when
     /// the string identifiers are absent.
     pub fingerprint: DeviceFingerprint,
+    /// The kind of network it is on (of its primary network interface).
+    pub network: Option<NetworkKind>,
 }
 
 /// The always-available numeric BasicInformation attributes.
@@ -216,6 +220,7 @@ mod tests {
             product_name: "".to_string(),
             fingerprint,
             tags: vec!["keep-me".to_string()],
+            network: None,
         }
     }
 
@@ -227,6 +232,7 @@ mod tests {
             vendor_name: "".to_string(),
             product_name: "".to_string(),
             fingerprint,
+            network: None,
         }
     }
 

@@ -14,6 +14,10 @@ use yew::prelude::*;
 
 use matter_peek_core::api::{self, display, wire};
 
+use network::{Confirm, NetworkView};
+
+mod network;
+
 /// Where the server listens (see `matter-peek-server`'s default).
 const WS_URL: &str = "ws://127.0.0.1:8087";
 
@@ -135,6 +139,26 @@ enum Msg {
     CloseLogs,
     /// Retrieve a log of the device whose logs popup is open.
     FetchLogs(api::LogIntent),
+    /// Open the network popup of a device, reading its networking.
+    OpenNetwork(u64),
+    /// Read the networking of the device whose network popup is open again.
+    RefreshNetwork,
+    CloseNetwork,
+    NetworkSsid(String),
+    NetworkPassword(String),
+    NetworkDataset(String),
+    /// Add the network in the form to the networks on an endpoint, or update it.
+    AddNetwork(u16, api::NetworkKind),
+    /// Change the networks on an endpoint, once confirmed where it may cost the
+    /// device its network.
+    ChangeNetwork(u16, api::NetworkChange),
+    ConfirmNetworkChange,
+    CancelNetworkChange,
+    NetworkTab(network::Tab),
+    /// Open or close the form adding a network.
+    ToggleAddNetwork,
+    ToggleShowPassword,
+    DismissError,
     /// A live health update arrived for a subscribed device (node_id, the
     /// subscription's report count, health). Deltas are merged into that
     /// device's running view.
@@ -241,6 +265,8 @@ struct App {
     ota_status: HashMap<u64, String>,
     /// The logs popup, when open.
     logs: Option<LogsView>,
+    /// The network popup, when open.
+    network_view: Option<NetworkView>,
     error: Option<String>,
 }
 
@@ -293,6 +319,7 @@ impl Component for App {
             ota_choice: HashMap::new(),
             ota_status: HashMap::new(),
             logs: None,
+            network_view: None,
             error: None,
         }
     }
@@ -503,6 +530,115 @@ impl Component for App {
                 self.logs = None;
                 true
             }
+            Msg::OpenNetwork(node_id) => {
+                self.error = None;
+                self.network_view = Some(NetworkView::new(node_id));
+                send_request(ctx.link().clone(), wire::Request::ReadNetwork { node_id });
+                true
+            }
+            Msg::RefreshNetwork => {
+                let Some(network) = self.network_view.as_mut() else {
+                    return false;
+                };
+                network.loading = true;
+                self.error = None;
+                send_request(
+                    ctx.link().clone(),
+                    wire::Request::ReadNetwork {
+                        node_id: network.node_id,
+                    },
+                );
+                true
+            }
+            Msg::CloseNetwork => {
+                self.network_view = None;
+                true
+            }
+            Msg::NetworkSsid(ssid) => {
+                if let Some(view) = self.network_view.as_mut() {
+                    view.ssid = ssid;
+                }
+                true
+            }
+            Msg::NetworkPassword(password) => {
+                if let Some(view) = self.network_view.as_mut() {
+                    view.password = password;
+                }
+                true
+            }
+            Msg::NetworkDataset(dataset) => {
+                if let Some(view) = self.network_view.as_mut() {
+                    view.dataset = dataset;
+                }
+                true
+            }
+            Msg::AddNetwork(endpoint, kind) => {
+                let Some(view) = self.network_view.as_ref() else {
+                    return false;
+                };
+                let credentials = match kind {
+                    api::NetworkKind::Thread => api::NetworkCredentials::Thread {
+                        dataset: view.dataset.trim().to_string(),
+                    },
+                    _ => api::NetworkCredentials::Wifi {
+                        ssid: view.ssid.trim().to_string(),
+                        password: view.password.clone(),
+                    },
+                };
+                ctx.link().send_message(Msg::ChangeNetwork(
+                    endpoint,
+                    api::NetworkChange::AddOrUpdate { credentials },
+                ));
+                false
+            }
+            Msg::ChangeNetwork(endpoint, change) => {
+                let Some(view) = self.network_view.as_mut() else {
+                    return false;
+                };
+                self.error = None;
+                match Confirm::of(view.info.as_ref(), endpoint, change) {
+                    Ok(confirm) => view.confirm = Some(confirm),
+                    Err(change) => view.change(ctx.link(), endpoint, change),
+                }
+                true
+            }
+            Msg::ConfirmNetworkChange => {
+                let Some(view) = self.network_view.as_mut() else {
+                    return false;
+                };
+                if let Some(confirm) = view.confirm.take() {
+                    view.change(ctx.link(), confirm.endpoint, confirm.change);
+                }
+                true
+            }
+            Msg::CancelNetworkChange => {
+                if let Some(view) = self.network_view.as_mut() {
+                    view.confirm = None;
+                }
+                true
+            }
+            Msg::NetworkTab(tab) => {
+                if let Some(view) = self.network_view.as_mut() {
+                    view.tab = Some(tab);
+                }
+                true
+            }
+            Msg::ToggleAddNetwork => {
+                if let Some(view) = self.network_view.as_mut() {
+                    view.adding = !view.adding;
+                }
+                true
+            }
+            Msg::ToggleShowPassword => {
+                if let Some(view) = self.network_view.as_mut() {
+                    view.show_password = !view.show_password;
+                }
+                true
+            }
+            Msg::DismissError => {
+                self.error = None;
+                true
+            }
             Msg::FetchLogs(intent) => {
                 let Some(logs) = self.logs.as_mut() else {
                     return false;
@@ -662,6 +798,9 @@ impl Component for App {
                 if let Some(logs) = self.logs.as_mut() {
                     logs.loading = false;
                 }
+                if let Some(network) = self.network_view.as_mut() {
+                    network.loading = false;
+                }
                 match resp {
                     wire::Response::Discovered {
                         devices,
@@ -721,6 +860,27 @@ impl Component for App {
                             "Commission cancelled before the device was modified.".into()
                         });
                     }
+                    wire::Response::Network { node_id, network } => {
+                        // The card's icon, before the next listing has it.
+                        let kind = network
+                            .configs
+                            .iter()
+                            .find(|config| config.endpoint == 0)
+                            .and_then(|config| config.kind);
+                        if let Some(d) =
+                            self.stored.iter_mut().find(|d| d.handle.node_id == node_id)
+                        {
+                            d.network = kind.or(d.network);
+                        }
+                        if let Some(view) =
+                            self.network_view.as_mut().filter(|n| n.node_id == node_id)
+                        {
+                            view.info = Some(*network);
+                            if view.changing {
+                                view.changed();
+                            }
+                        }
+                    }
                     wire::Response::Logs { node_id, data, .. } => {
                         if let Some(logs) = self.logs.as_mut().filter(|l| l.node_id == node_id) {
                             logs.data = Some(data);
@@ -747,6 +907,9 @@ impl Component for App {
                     }
                     wire::Response::Error { message } => self.error = Some(message),
                 }
+                if let Some(network) = self.network_view.as_mut() {
+                    network.changing = false;
+                }
                 true
             }
             Msg::Error(e) => {
@@ -754,6 +917,10 @@ impl Component for App {
                 self.discovering = false;
                 self.busy_stored = false;
                 self.loading = None;
+                if let Some(network) = self.network_view.as_mut() {
+                    network.loading = false;
+                    network.changing = false;
+                }
                 self.error = Some(e);
                 true
             }
@@ -1551,6 +1718,7 @@ impl App {
                 }
 
                 { self.view_logs_modal(link) }
+                { self.view_network_modal(link) }
             </div>
         }
     }
@@ -1560,6 +1728,7 @@ impl App {
         let refresh = link.callback(move |_| Msg::Refresh(node_id));
         let identify = link.callback(move |_| Msg::Identify(node_id));
         let logs = link.callback(move |_| Msg::OpenLogs(node_id));
+        let network = link.callback(move |_| Msg::OpenNetwork(node_id));
         let remember = link.callback(move |_| Msg::Remember(node_id));
         let decommission = link.callback(move |_| Msg::Decommission(node_id));
         let save_tags = link.callback(move |_| Msg::SaveTags(node_id));
@@ -1587,11 +1756,12 @@ impl App {
         html! {
             <div class="card mb-4">
                 <div class="card-content">
-                    <div class="level is-mobile mb-2">
-                        <div class="level-left">
-                            <p class="title is-6 mb-0">{ title }</p>
-                        </div>
-                        <div class="level-right tags">
+                    <div class="card-head mb-2">
+                        <p class="title is-6 mb-0">
+                            { network_icon(d.network) }
+                            { title }
+                        </p>
+                        <div class="tags mb-0">
                             { if !d.remembered {
                                 html!{ <span class="tag is-light"
                                     title="No record is kept: it cannot be tagged, and is listed only while on our fabric">
@@ -1671,6 +1841,9 @@ impl App {
                         <button class="button is-warning is-light" disabled={self.busy_stored || offline}
                             onclick={identify}>
                             { "Identify" }
+                        </button>
+                        <button class="button is-light" disabled={offline} onclick={network}>
+                            { "Network" }
                         </button>
                         <button class="button is-light" disabled={offline} onclick={logs}>
                             { "Logs" }
@@ -1886,6 +2059,22 @@ impl App {
         }
     }
 
+    /// Full-screen popup with a device's networking.
+    fn view_network_modal(&self, link: &html::Scope<Self>) -> Html {
+        let Some(view) = &self.network_view else {
+            return html! {};
+        };
+
+        let title = self
+            .stored
+            .iter()
+            .find(|d| d.handle.node_id == view.node_id)
+            .map(api::DeviceInfo::title)
+            .unwrap_or_else(|| format!("node {}", display::hex_u64(view.node_id)));
+
+        network::view_modal(view, &title, self.error.as_deref(), link)
+    }
+
     /// A retrieved log: its text, or its size if it is binary, with a download.
     fn view_log(&self, logs: &LogsView) -> Html {
         use base64::Engine as _;
@@ -1941,11 +2130,9 @@ impl App {
         // Each metric as a labelled cell; `—` when the device doesn't report it.
         let metric = |label: &str, value: String| -> Html {
             html! {
-                <div class="level-item has-text-centered">
-                    <div>
-                        <p class="heading">{ label.to_string() }</p>
-                        <p class="title is-6 mono">{ value }</p>
-                    </div>
+                <div class="has-text-centered">
+                    <p class="heading">{ label.to_string() }</p>
+                    <p class="title is-6 mono">{ value }</p>
                 </div>
             }
         };
@@ -1973,22 +2160,18 @@ impl App {
 
         html! {
             <div class="box mt-2 p-3">
-                <div class="level is-mobile mb-2">
-                    <div class="level-left">
-                        <p class="heading mb-0">{ "Live health" }</p>
-                    </div>
-                    <div class="level-right">
-                        <span class={status_class}>{ status }</span>
-                    </div>
+                <div class="health-head mb-2">
+                    <p class="heading mb-0">{ "Live health" }</p>
+                    <span class={classes!(status_class, "is-wrappable")}>{ status }</span>
                 </div>
-                <nav class="level is-mobile">
+                <div class="health-grid">
                     { metric("Uptime", g.up_time_secs.map(display::duration).unwrap_or_else(|| "—".into())) }
                     { metric("Reboots", opt_str(g.reboot_count)) }
                     { metric("Op. hours", opt_str(g.total_operational_hours)) }
                     { metric("Heap free", opt_str(sw.current_heap_free)) }
                     { metric("Heap used", opt_str(sw.current_heap_used)) }
                     { metric("Heap peak", opt_str(sw.current_heap_high_watermark)) }
-                </nav>
+                </div>
             </div>
         }
     }
@@ -1997,6 +2180,20 @@ impl App {
 /// A metric value or an em-dash placeholder when the device doesn't report it.
 fn opt_str<T: std::fmt::Display>(v: Option<T>) -> String {
     v.map(|x| x.to_string()).unwrap_or_else(|| "—".into())
+}
+
+/// An icon for the kind of network a device is on.
+fn network_icon(kind: Option<api::NetworkKind>) -> Html {
+    let Some(glyph) = network::kind_icon(kind) else {
+        return html! {};
+    };
+    let label = kind.map(|kind| kind.label()).unwrap_or_default();
+
+    html! {
+        <span class="icon mr-1 has-text-grey" title={label}>
+            { network::icon(glyph, 18) }
+        </span>
+    }
 }
 
 /// A device card's hardware and software versions.

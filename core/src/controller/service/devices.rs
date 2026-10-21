@@ -12,7 +12,9 @@ use rs_matter::crypto::Crypto;
 use rs_matter::error::Error;
 use rs_matter::persist::KvBlobStore;
 
-use crate::api::{DeviceHealth, DeviceList, LogIntent, PeekError, SubscriptionState};
+use crate::api::{
+    DeviceHealth, DeviceList, LogIntent, NetworkInfo, NetworkKind, PeekError, SubscriptionState,
+};
 use crate::model::{
     match_device, DeviceHandle, DeviceIdentity, DiagSet, MatchResult, StoredDevice,
 };
@@ -80,6 +82,57 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         }
 
         Ok(health)
+    }
+
+    /// Read the networking of a listed device, noting the kind of network it is
+    /// on in its listing.
+    pub(super) async fn read_network(&self, node_id: u64) -> Result<NetworkInfo, PeekError> {
+        let dev = self.lookup_device(node_id)?;
+
+        let info = self
+            .controller
+            .read_network(dev.handle)
+            .await
+            .map_err(|e| failed(&format!("device 0x{node_id:016X} did not answer"), e))?;
+
+        self.set_online(node_id, true);
+
+        let kind = info
+            .configs
+            .iter()
+            .find(|config| config.endpoint == 0)
+            .and_then(|config| config.kind);
+        if kind.is_some() && kind != dev.network {
+            self.set_network(node_id, kind);
+        }
+
+        Ok(info)
+    }
+
+    /// Note the kind of network a listed device is on.
+    fn set_network(&self, node_id: u64, kind: Option<NetworkKind>) {
+        if let Some(device) = self
+            .transient
+            .borrow_mut()
+            .iter_mut()
+            .find(|d| d.handle.node_id == node_id)
+        {
+            device.network = kind;
+            return;
+        }
+
+        let updated = self.store.load_devices().and_then(|mut devices| {
+            match devices.iter_mut().find(|d| d.handle.node_id == node_id) {
+                Some(device) => {
+                    device.network = kind;
+                    self.store.save_devices(&devices)
+                }
+                None => Ok(()),
+            }
+        });
+        if let Err(e) = updated {
+            warn!("cannot note the network of node 0x{node_id:016X}: {e:?}");
+        }
     }
 
     /// Retrieve a diagnostic log of a listed device.
@@ -318,6 +371,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             vendor_name: device.vendor_name,
             product_name: device.product_name,
             fingerprint: device.fingerprint,
+            network: device.network,
         };
 
         self.update_devices(|devices| adopt(devices, device.handle, &ident), None)
@@ -411,6 +465,9 @@ fn refresh_identity(device: &mut StoredDevice, ident: DeviceIdentity) {
     device.vendor_name = ident.vendor_name;
     device.product_name = ident.product_name;
     device.fingerprint = ident.fingerprint;
+    if ident.network.is_some() {
+        device.network = ident.network;
+    }
 }
 
 /// Add a record for a device on our fabric. A record of the same unit under
@@ -444,5 +501,6 @@ pub(super) fn new_record(handle: DeviceHandle, ident: &DeviceIdentity) -> Stored
         product_name: ident.product_name.clone(),
         fingerprint: ident.fingerprint,
         tags: Vec::new(),
+        network: ident.network,
     }
 }

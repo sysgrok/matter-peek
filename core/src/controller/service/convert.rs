@@ -38,6 +38,7 @@ pub(super) fn device(d: StoredDevice, online: Option<bool>, remembered: bool) ->
         tags: d.tags,
         online,
         remembered,
+        network: d.network,
     }
 }
 

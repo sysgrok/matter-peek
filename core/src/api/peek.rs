@@ -153,6 +153,34 @@ impl MatterPeek {
         self.call(|reply| Op::PeekDevice { node_id, reply }).await
     }
 
+    /// Read the networking of a listed device: its interfaces and addresses,
+    /// the networks it knows, and the diagnostics of the network it is on.
+    pub async fn read_network(&self, node_id: u64) -> Result<NetworkInfo, PeekError> {
+        self.call(|reply| Op::ReadNetwork { node_id, reply }).await
+    }
+
+    /// Change the networks the Network Commissioning instance on `endpoint` of
+    /// a listed device knows (`0` for its primary network interface), and
+    /// answer with its networking after. Each change is made under a fail-safe
+    /// and committed: one that touches the device's connection (connecting to
+    /// another network, new credentials for the connected one) only once the
+    /// device answers on its network, else it returns to its previous network.
+    /// The connected network cannot be removed.
+    pub async fn change_network(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        change: NetworkChange,
+    ) -> Result<NetworkInfo, PeekError> {
+        self.call(|reply| Op::ChangeNetwork {
+            node_id,
+            endpoint,
+            change,
+            reply,
+        })
+        .await
+    }
+
     /// Retrieve a diagnostic log of a listed device; empty if it has none of
     /// that kind.
     pub async fn retrieve_logs(
@@ -411,6 +439,16 @@ pub(crate) enum Op {
     PeekDevice {
         node_id: u64,
         reply: Reply<DeviceHealth>,
+    },
+    ReadNetwork {
+        node_id: u64,
+        reply: Reply<NetworkInfo>,
+    },
+    ChangeNetwork {
+        node_id: u64,
+        endpoint: u16,
+        change: NetworkChange,
+        reply: Reply<NetworkInfo>,
     },
     RetrieveLogs {
         node_id: u64,

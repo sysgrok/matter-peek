@@ -2,6 +2,7 @@
 
 use core::cell::RefCell;
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::ToString;
 use alloc::sync::Arc;
@@ -97,6 +98,25 @@ impl WireSession {
                 .peek_device(node_id)
                 .await
                 .map(|health| Response::Peek { node_id, health }),
+            Request::ReadNetwork { node_id } => {
+                peek.read_network(node_id)
+                    .await
+                    .map(|network| Response::Network {
+                        node_id,
+                        network: Box::new(network),
+                    })
+            }
+            Request::ChangeNetwork {
+                node_id,
+                endpoint,
+                change,
+            } => peek
+                .change_network(node_id, endpoint, change)
+                .await
+                .map(|network| Response::Network {
+                    node_id,
+                    network: Box::new(network),
+                }),
             Request::RetrieveLogs { node_id, intent } => peek
                 .retrieve_logs(node_id, intent)
                 .await

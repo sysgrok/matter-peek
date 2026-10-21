@@ -384,6 +384,12 @@ impl<'a, C: Crypto> Controller<'a, C> {
         crate::discovery::browse_fabric_with_running_backend(self.matter, fab_idx, None).await
     }
 
+    /// Read a device's networking: its interfaces, the networks it knows, and
+    /// the diagnostics of its network.
+    pub async fn read_network(&self, dev: DeviceHandle) -> Result<crate::api::NetworkInfo, Error> {
+        crate::network::read_network(self.matter, self.crypto, dev.fabric_index, dev.node_id).await
+    }
+
     /// Read a diagnostic health snapshot from a previously-commissioned device
     /// over a fresh CASE session. `dev` carries the `(fabric_index, node_id)`
     /// returned by [`Self::commission`] — that's all that's needed to re-address

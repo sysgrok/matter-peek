@@ -64,8 +64,8 @@ periodically, like the server), so to share the store with the web UI, run
 
 | Tools | Access |
 |-------|--------|
-| `discover`, `list_devices`, `peek_device`, `retrieve_logs`, `identify`, `read_qr_image`, `ota_images` | read-only |
-| `commission`, `decommission`, `remember`, `set_tags`, `sync`, `ota_upload`, `ota_delete`, `ota_update` | **mutating** |
+| `discover`, `list_devices`, `peek_device`, `read_network`, `retrieve_logs`, `identify`, `read_qr_image`, `ota_images` | read-only |
+| `commission`, `decommission`, `remember`, `set_tags`, `sync`, `add_network`, `remove_network`, `connect_network`, `reorder_network`, `ota_upload`, `ota_delete`, `ota_update` | **mutating** |
 
 The mutating tools touch real devices, so only `--allow-mutate` offers them:
 without it they are hidden from `tools/list` and rejected at `tools/call`. The

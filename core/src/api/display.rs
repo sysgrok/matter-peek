@@ -10,7 +10,7 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use super::types::DeviceInfo;
+use super::types::{DeviceInfo, NetworkKind, NetworkStatus, ThreadRole, WifiSecurity, WifiVersion};
 
 mod dcl;
 
@@ -63,6 +63,79 @@ impl DeviceInfo {
     /// Whether the device has a test vendor ID (see [`is_test_vendor`]).
     pub fn is_test_vendor(&self) -> bool {
         self.fingerprint.vendor_id.is_some_and(is_test_vendor)
+    }
+}
+
+impl NetworkKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::WiFi => "Wi-Fi",
+            Self::Thread => "Thread",
+            Self::Ethernet => "Ethernet",
+            Self::Cellular => "Cellular",
+            Self::Unspecified => "Unspecified",
+        }
+    }
+}
+
+impl NetworkStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Success => "Success",
+            Self::OutOfRange => "Out of range",
+            Self::BoundsExceeded => "Too many networks",
+            Self::NetworkIdNotFound => "Unknown network",
+            Self::DuplicateNetworkId => "Network known already",
+            Self::NetworkNotFound => "Network not found",
+            Self::RegulatoryError => "Regulatory error",
+            Self::AuthFailure => "Authentication failure",
+            Self::UnsupportedSecurity => "Unsupported security",
+            Self::OtherConnectionFailure => "Connection failure",
+            Self::Ipv6Failed => "IPv6 failure",
+            Self::IpBindFailed => "IP bind failure",
+            Self::UnknownError => "Unknown error",
+        }
+    }
+}
+
+impl WifiSecurity {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "Unspecified",
+            Self::None => "Open",
+            Self::Wep => "WEP",
+            Self::Wpa => "WPA",
+            Self::Wpa2 => "WPA2",
+            Self::Wpa3 => "WPA3",
+        }
+    }
+}
+
+impl WifiVersion {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::A => "802.11a",
+            Self::B => "802.11b",
+            Self::G => "802.11g",
+            Self::N => "802.11n (Wi-Fi 4)",
+            Self::Ac => "802.11ac (Wi-Fi 5)",
+            Self::Ax => "802.11ax (Wi-Fi 6)",
+            Self::Ah => "802.11ah (HaLow)",
+        }
+    }
+}
+
+impl ThreadRole {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "Unspecified",
+            Self::Unassigned => "Detached",
+            Self::SleepyEndDevice => "Sleepy end device",
+            Self::EndDevice => "End device",
+            Self::Reed => "Router-eligible end device",
+            Self::Router => "Router",
+            Self::Leader => "Leader",
+        }
     }
 }
 
@@ -147,6 +220,29 @@ pub fn duration(secs: u64) -> String {
     }
 
     out
+}
+
+/// A bit rate, e.g. `72.2 Mbit/s`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn bit_rate(bits_per_sec: u64) -> String {
+    const UNITS: [(u64, &str); 3] = [
+        (1_000_000_000, "Gbit/s"),
+        (1_000_000, "Mbit/s"),
+        (1_000, "kbit/s"),
+    ];
+
+    for (unit, suffix) in UNITS {
+        if bits_per_sec >= unit {
+            let tenths = bits_per_sec * 10 / unit;
+            return if tenths.is_multiple_of(10) {
+                format!("{} {suffix}", tenths / 10)
+            } else {
+                format!("{}.{} {suffix}", tenths / 10, tenths % 10)
+            };
+        }
+    }
+
+    format!("{bits_per_sec} bit/s")
 }
 
 /// `name (id)`, or just `id`.
