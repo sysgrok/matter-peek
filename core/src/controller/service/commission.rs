@@ -376,6 +376,6 @@ fn invalid_setup_code(e: Error) -> PeekError {
 
 fn step_failed(e: &Error) -> StepStatus {
     StepStatus::Failed {
-        message: format!("{:?}", e.code()),
+        message: crate::explain::describe(e.code()),
     }
 }

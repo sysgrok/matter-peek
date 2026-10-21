@@ -37,6 +37,7 @@ mod controller {
     pub mod ca;
     pub mod diagnostics;
     pub mod discovery;
+    pub mod explain;
     #[cfg(feature = "std")]
     pub mod host;
     pub mod logs;

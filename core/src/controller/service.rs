@@ -451,9 +451,9 @@ fn read_qr_image(image: &[u8]) -> Result<String, PeekError> {
     }
 }
 
-/// `context: <the error's code>`, as a failure.
+/// `context: <what the error means> (<its code>)`, as a failure.
 fn failed(context: &str, e: Error) -> PeekError {
-    PeekError::failed(format!("{context} ({:?})", e.code()))
+    PeekError::failed(format!("{context}: {}", crate::explain::describe(e.code())))
 }
 
 /// Answer every operation with `error`, until every handle is dropped.

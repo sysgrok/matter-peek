@@ -33,8 +33,9 @@ pub mod jsonrpc;
 
 const SERVER_NAME: &str = "matter-peek";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// The MCP protocol revision we speak.
-const PROTOCOL_VERSION: &str = "2024-11-05";
+/// The MCP protocol revisions we speak, newest first: a client asking for
+/// another gets the newest.
+const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2024-11-05"];
 
 /// The tools that change devices or the stored state; see [`Caps`].
 const MUTATING_TOOLS: &[&str] = &[
@@ -50,6 +51,17 @@ const MUTATING_TOOLS: &[&str] = &[
     "remove_network",
     "connect_network",
     "reorder_network",
+];
+
+/// The mutating tools whose harm may be hard to undo: they cost a device its
+/// fabric, its network or its firmware, or lose an image.
+const DESTRUCTIVE_TOOLS: &[&str] = &[
+    "decommission",
+    "ota_delete",
+    "ota_update",
+    "add_network",
+    "remove_network",
+    "connect_network",
 ];
 
 /// How much of an OTA image goes in one upload request.
@@ -93,7 +105,7 @@ pub async fn handle<D: Dispatch>(
     let id = req.id.clone()?;
 
     let resp = match req.method.as_str() {
-        "initialize" => Response::ok(id, initialize_result()),
+        "initialize" => Response::ok(id, initialize_result(&req.params)),
         "tools/list" => Response::ok(id, json!({ "tools": tool_list(caps) })),
         "tools/call" => match tools_call(req.params, dispatch, caps).await {
             Ok(result) => Response::ok(id, result),
@@ -110,9 +122,15 @@ pub async fn handle<D: Dispatch>(
     Some(resp)
 }
 
-fn initialize_result() -> Value {
+fn initialize_result(params: &Value) -> Value {
+    let asked = params.get("protocolVersion").and_then(Value::as_str);
+    let version = PROTOCOL_VERSIONS
+        .iter()
+        .find(|version| Some(**version) == asked)
+        .unwrap_or(&PROTOCOL_VERSIONS[0]);
+
     json!({
-        "protocolVersion": PROTOCOL_VERSION,
+        "protocolVersion": version,
         "capabilities": { "tools": {} },
         "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
         "instructions":
@@ -122,7 +140,11 @@ fn initialize_result() -> Value {
              or the stored state (commission, decommission, remember, set_tags, \
              sync, ota_upload, ota_delete, ota_update, add_network, remove_network, \
              connect_network, reorder_network) are available only if the \
-             operator allowed them (e.g. `matter-peek mcp --allow-mutate`)."
+             operator allowed them (e.g. `matter-peek mcp --allow-mutate`). \
+             A device is named by its node_id: the number list_devices gives, or its \
+             hex form (\"0x1B67B\"). A failed tool says why in plain words, with \
+             the error code in parentheses: pass that on to the user, with what they \
+             can do about it."
     })
 }
 
@@ -170,7 +192,7 @@ fn tool_list(caps: Caps) -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "node_id": { "type": "integer", "description": "The device's node id on our fabric." }
+                    "node_id": node_id_schema()
                 },
                 "required": ["node_id"]
             }),
@@ -186,7 +208,7 @@ fn tool_list(caps: Caps) -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "node_id": { "type": "integer", "description": "The device's node id on our fabric." }
+                    "node_id": node_id_schema()
                 },
                 "required": ["node_id"]
             }),
@@ -198,7 +220,7 @@ fn tool_list(caps: Caps) -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "node_id": { "type": "integer" },
+                    "node_id": node_id_schema(),
                     "intent": {
                         "type": "string",
                         "enum": ["end_user_support", "network_diag", "crash_logs"],
@@ -215,7 +237,7 @@ fn tool_list(caps: Caps) -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "node_id": { "type": "integer" },
+                    "node_id": node_id_schema(),
                     "secs": { "type": "integer", "description": "Blink duration in seconds (default 3)." }
                 },
                 "required": ["node_id"]
@@ -274,7 +296,7 @@ fn tool_list(caps: Caps) -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "node_id": { "type": "integer" },
+                    "node_id": node_id_schema(),
                     "force": { "type": "boolean", "description": "Drop it from the list without contacting the device. Default false." }
                 },
                 "required": ["node_id"]
@@ -287,12 +309,12 @@ fn tool_list(caps: Caps) -> Vec<Value> {
              stored device list.",
             json!({
                 "type": "object",
-                "properties": { "node_id": { "type": "integer" } },
+                "properties": { "node_id": node_id_schema() },
                 "required": ["node_id"]
             }),
         ));
         let network = json!({
-            "node_id": { "type": "integer" },
+            "node_id": node_id_schema(),
             "endpoint": {
                 "type": "integer",
                 "description": "Endpoint of the network interface (default 0, the primary one)."
@@ -308,11 +330,12 @@ fn tool_list(caps: Caps) -> Vec<Value> {
             "Give a listed device a Wi-Fi network (ssid + password) or a Thread network \
              (thread_dataset, hex), or new credentials for one it knows. Committed under a \
              fail-safe; new credentials for the network the device is connected to are \
-             proven by reconnecting with them, else the device returns to its old ones.",
+             proven by reconnecting with them, else the device returns to its old ones. \
+             MUTATING — changes the device's networks.",
             json!({
                 "type": "object",
                 "properties": {
-                    "node_id": { "type": "integer" },
+                    "node_id": node_id_schema(),
                     "endpoint": { "type": "integer", "description": "Default 0." },
                     "ssid": { "type": "string" },
                     "password": { "type": "string" },
@@ -323,13 +346,15 @@ fn tool_list(caps: Caps) -> Vec<Value> {
         ));
         tools.push(tool(
             "remove_network",
-            "Make a listed device forget a network (not the one it is connected to).",
+            "Make a listed device forget a network (not the one it is connected to). \
+             MUTATING — changes the device's networks.",
             json!({ "type": "object", "properties": network.clone(), "required": ["node_id"] }),
         ));
         tools.push(tool(
             "connect_network",
             "Connect a listed device to a network it knows. Committed only once the device \
-             answers on that network; otherwise it returns to its previous network by itself.",
+             answers on that network; otherwise it returns to its previous network by itself. \
+             MUTATING — moves the device to another network.",
             json!({ "type": "object", "properties": network.clone(), "required": ["node_id"] }),
         ));
         let mut reorder = network;
@@ -339,17 +364,19 @@ fn tool_list(caps: Caps) -> Vec<Value> {
         });
         tools.push(tool(
             "reorder_network",
-            "Move a network of a listed device to another place in the order the device tries them.",
+            "Move a network of a listed device to another place in the order the device tries them. \
+             MUTATING — changes the device's networks.",
             json!({ "type": "object", "properties": reorder, "required": ["node_id", "index"] }),
         ));
         tools.push(tool(
             "set_tags",
             "Replace the local tags of a remembered device (controller-local labels \
-             for grouping/filtering; never touches the device).",
+             for grouping/filtering; never touches the device). MUTATING — changes \
+             our record of the device.",
             json!({
                 "type": "object",
                 "properties": {
-                    "node_id": { "type": "integer" },
+                    "node_id": node_id_schema(),
                     "tags": { "type": "array", "items": { "type": "string" } }
                 },
                 "required": ["node_id", "tags"]
@@ -394,7 +421,7 @@ fn tool_list(caps: Caps) -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "node_id": { "type": "integer" },
+                    "node_id": node_id_schema(),
                     "name": { "type": "string", "description": "The image name, as ota_images lists it." }
                 },
                 "required": ["node_id", "name"]
@@ -406,7 +433,23 @@ fn tool_list(caps: Caps) -> Vec<Value> {
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
-    json!({ "name": name, "description": description, "inputSchema": input_schema })
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": input_schema,
+        "annotations": {
+            "readOnlyHint": !MUTATING_TOOLS.contains(&name),
+            "destructiveHint": DESTRUCTIVE_TOOLS.contains(&name),
+        }
+    })
+}
+
+/// A device, as the tools name it.
+fn node_id_schema() -> Value {
+    json!({
+        "type": ["integer", "string"],
+        "description": "The device's node id: the number list_devices gives, or its hex form as shown (e.g. \"0x1B67B\")."
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -515,7 +558,7 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
         "list_devices" => wire::Request::ListDevices,
         "sync" => wire::Request::Sync,
         "decommission" => wire::Request::Decommission {
-            node_id: arg_u64(args, "node_id")?,
+            node_id: arg_node(args)?,
             force: args.get("force").and_then(Value::as_bool).unwrap_or(false),
         },
         "ota_images" => wire::Request::OtaImages,
@@ -523,17 +566,17 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
             name: arg_str(args, "name")?,
         },
         "ota_update" => wire::Request::OtaUpdate {
-            node_id: arg_u64(args, "node_id")?,
+            node_id: arg_node(args)?,
             name: arg_str(args, "name")?,
         },
         "peek_device" => wire::Request::PeekDevice {
-            node_id: arg_u64(args, "node_id")?,
+            node_id: arg_node(args)?,
         },
         "read_network" => wire::Request::ReadNetwork {
-            node_id: arg_u64(args, "node_id")?,
+            node_id: arg_node(args)?,
         },
         "add_network" => wire::Request::ChangeNetwork {
-            node_id: arg_u64(args, "node_id")?,
+            node_id: arg_node(args)?,
             endpoint: arg_endpoint(args)?,
             change: api::NetworkChange::AddOrUpdate {
                 credentials: match args.get("thread_dataset").and_then(Value::as_str) {
@@ -548,21 +591,21 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
             },
         },
         "remove_network" => wire::Request::ChangeNetwork {
-            node_id: arg_u64(args, "node_id")?,
+            node_id: arg_node(args)?,
             endpoint: arg_endpoint(args)?,
             change: api::NetworkChange::Remove {
                 network_id: arg_network(args)?,
             },
         },
         "connect_network" => wire::Request::ChangeNetwork {
-            node_id: arg_u64(args, "node_id")?,
+            node_id: arg_node(args)?,
             endpoint: arg_endpoint(args)?,
             change: api::NetworkChange::Connect {
                 network_id: arg_network(args)?,
             },
         },
         "reorder_network" => wire::Request::ChangeNetwork {
-            node_id: arg_u64(args, "node_id")?,
+            node_id: arg_node(args)?,
             endpoint: arg_endpoint(args)?,
             change: api::NetworkChange::Reorder {
                 network_id: arg_network(args)?,
@@ -571,7 +614,7 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
             },
         },
         "retrieve_logs" => wire::Request::RetrieveLogs {
-            node_id: arg_u64(args, "node_id")?,
+            node_id: arg_node(args)?,
             intent: match args.get("intent").and_then(Value::as_str) {
                 None | Some("crash_logs") => api::LogIntent::CrashLogs,
                 Some("end_user_support") => api::LogIntent::EndUserSupport,
@@ -585,10 +628,10 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
             },
         },
         "remember" => wire::Request::Remember {
-            node_id: arg_u64(args, "node_id")?,
+            node_id: arg_node(args)?,
         },
         "identify" => wire::Request::Identify {
-            node_id: arg_u64(args, "node_id")?,
+            node_id: arg_node(args)?,
             secs: args.get("secs").and_then(Value::as_u64).unwrap_or(3) as u16,
         },
         "commission" => wire::Request::Commission {
@@ -604,7 +647,7 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
                 .unwrap_or(false),
         },
         "set_tags" => wire::Request::SetTags {
-            node_id: arg_u64(args, "node_id")?,
+            node_id: arg_node(args)?,
             tags: args
                 .get("tags")
                 .and_then(Value::as_array)
@@ -649,6 +692,25 @@ fn arg_u64(args: &Value, key: &str) -> Result<u64, ToolErr> {
     args.get(key).and_then(Value::as_u64).ok_or((
         jsonrpc::INVALID_PARAMS,
         format!("missing or non-integer '{key}'"),
+    ))
+}
+
+/// The `node_id` argument: a number, or a hex string ("0x1B67B").
+fn arg_node(args: &Value) -> Result<u64, ToolErr> {
+    let value = args.get("node_id");
+
+    let id = value.and_then(Value::as_u64).or_else(|| {
+        let text = value?.as_str()?.trim();
+        match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+            Some(hex) => u64::from_str_radix(hex, 16).ok(),
+            None => text.parse().ok(),
+        }
+    });
+
+    id.ok_or((
+        jsonrpc::INVALID_PARAMS,
+        "missing or bad 'node_id': give the number list_devices gives, or its hex form (\"0x1B67B\")"
+            .to_string(),
     ))
 }
 
@@ -703,9 +765,9 @@ fn arg_str(args: &Value, key: &str) -> Result<String, ToolErr> {
 /// render and feed to the model.
 fn tool_result(response: &wire::Response) -> Value {
     let (text, is_error) = match response {
-        wire::Response::Error { message } => (pretty(&json!({ "error": message })), true),
+        wire::Response::Error { message } => (message.clone(), true),
         wire::Response::Logs { intent, data, .. } => (log_text(*intent, data), false),
-        other => (pretty(&labelled(other)), false),
+        other => (compact(labelled(other)).to_string(), false),
     };
 
     json!({
@@ -774,8 +836,29 @@ fn entries<'a>(value: &'a mut Value, key: &str) -> impl Iterator<Item = &'a mut 
         .flatten()
 }
 
-fn pretty(payload: &Value) -> String {
-    serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string())
+/// `value` without its nulls, empty strings and empty lists or objects: what an
+/// agent need not read.
+fn compact(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, compact(value)))
+                .filter(|(_, value)| !is_empty(value))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(compact).collect()),
+        other => other,
+    }
+}
+
+fn is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(text) => text.is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(map) => map.is_empty(),
+        _ => false,
+    }
 }
 
 /// A retrieved log for the model: its text, or its size if it is binary.
@@ -789,5 +872,86 @@ fn log_text(intent: api::LogIntent, data: &str) -> String {
             )
         }),
         Err(e) => format!("The {intent:?} log is not valid base64: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn node_id_as_number_or_hex() {
+        assert_eq!(arg_node(&json!({ "node_id": 112251 })).unwrap(), 112251);
+        assert_eq!(arg_node(&json!({ "node_id": "0x1B67B" })).unwrap(), 112251);
+        assert_eq!(
+            arg_node(&json!({ "node_id": "0x000000000001b67b" })).unwrap(),
+            112251
+        );
+        assert_eq!(arg_node(&json!({ "node_id": "112251" })).unwrap(), 112251);
+        assert!(arg_node(&json!({ "node_id": "0xZZ" })).is_err());
+        assert!(arg_node(&json!({})).is_err());
+    }
+
+    #[test]
+    fn compact_drops_what_says_nothing() {
+        let value = compact(json!({
+            "name": "light",
+            "label": "",
+            "online": null,
+            "tags": [],
+            "fingerprint": { "vendor_id": null },
+            "devices": [{ "node": "0x1", "serial": "" }],
+            "count": 0,
+            "remembered": false
+        }));
+
+        assert_eq!(
+            value,
+            json!({
+                "name": "light",
+                "devices": [{ "node": "0x1" }],
+                "count": 0,
+                "remembered": false
+            })
+        );
+    }
+
+    #[test]
+    fn protocol_version_negotiated() {
+        let version = |asked: Value| initialize_result(&asked)["protocolVersion"].clone();
+
+        assert_eq!(
+            version(json!({ "protocolVersion": "2024-11-05" })),
+            "2024-11-05"
+        );
+        assert_eq!(
+            version(json!({ "protocolVersion": "2025-06-18" })),
+            "2025-06-18"
+        );
+        assert_eq!(
+            version(json!({ "protocolVersion": "2099-01-01" })),
+            PROTOCOL_VERSIONS[0]
+        );
+        assert_eq!(version(json!({})), PROTOCOL_VERSIONS[0]);
+    }
+
+    #[test]
+    fn mutating_tools_annotated() {
+        let tools = tool_list(Caps { allow_mutate: true });
+
+        for tool in &tools {
+            let name = tool["name"].as_str().unwrap();
+            let read_only = tool["annotations"]["readOnlyHint"].as_bool().unwrap();
+
+            assert_eq!(read_only, !MUTATING_TOOLS.contains(&name), "{name}");
+            if !read_only {
+                assert!(
+                    tool["description"].as_str().unwrap().contains("MUTATING"),
+                    "{name} does not say it changes things"
+                );
+            }
+        }
     }
 }

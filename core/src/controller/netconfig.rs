@@ -20,7 +20,7 @@ use rs_matter::dm::clusters::decl::network_commissioning::{
 use rs_matter::dm::clusters::net_comm::WirelessCreds;
 use rs_matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter::dm::EndptId;
-use rs_matter::error::Error;
+use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::{Nullable, OctetStr};
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::Matter;
@@ -265,7 +265,18 @@ impl<C: Crypto> Target<'_, '_, C> {
 }
 
 fn failed(step: &str, e: Error) -> PeekError {
-    PeekError::failed(format!("{step} failed ({:?})", e.code()))
+    let code = e.code();
+
+    // The device judges the credentials by the formats Wi-Fi allows.
+    if step == "AddOrUpdateWiFiNetwork" && code == ErrorCode::ConstraintError {
+        return PeekError::failed(format!(
+            "{step} failed: the device rejected the SSID or the password ({code:?}); an SSID is \
+             1 to 32 bytes, and a Wi-Fi password 8 to 63 characters (64 hex digits for a raw \
+             key, 5 or 13 characters for WEP, none for an open network)"
+        ));
+    }
+
+    PeekError::failed(format!("{step} failed: {}", crate::explain::describe(code)))
 }
 
 fn text(text: Option<&str>) -> Option<String> {
