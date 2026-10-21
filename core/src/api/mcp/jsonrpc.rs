@@ -2,8 +2,8 @@
 //!
 //! MCP's stdio transport is newline-delimited JSON-RPC 2.0: each message is a
 //! single JSON object on its own line. This module is just the envelope (request
-//! / response / error); the line read/write is the binary shell's job and the
-//! MCP method semantics live in [`crate::mcp`]. `no_std` + `alloc`.
+//! / response / error); the line read/write is the shell's job and the MCP
+//! method semantics live in [`super`]. `no_std` + `alloc`.
 
 use alloc::string::String;
 

@@ -51,15 +51,16 @@ controller serves the CLI, the MCP server and mobile apps.
 
 ```
   Web UI (Yew/Wasm) ──── WebSocket/JSON ───┐
-  MCP / CLI --server ─── WebSocket/JSON ───┤      matter-peek-server
+  CLI (+ mcp) --server ─ WebSocket/JSON ───┤      matter-peek-server
                                            │ ──►  (WireSession per connection)
                                            │              │
-  MCP / CLI (no --server) ── in process ───┼──► WireSession┤
+  CLI (+ mcp), no --server ─ in process ──┼──► WireSession┤
   mobile apps ──────── UniFFI ─────────────┤              ▼
   Rust ─────────────── Rust ───────────────┴──►  ┌────────────────────────────────┐
                                                   │ matter-peek-core               │
                                                   │  api: MatterPeek (the API),    │
-                                                  │       its types, wire messages │
+                                                  │       its types, wire messages,│
+                                                  │       MCP tools                │
                                                   │  controller (private):         │
                                                   │   service: the operations      │
                                                   │   matter, ble, discovery, …    │
@@ -96,9 +97,13 @@ The same methods serve every binding:
   the listeners' calls as `Event`s. `WireSession` runs one client's messages
   against a `MatterPeek`, and owns what outlives a request (its subscriptions
   and uploads, which end with the session).
+- **MCP** (`api::mcp`): the methods as tools for AI agents (JSON-RPC envelope,
+  tool catalog, tool → `Request` mapping, the `--allow-mutate` gate), run
+  through an injected `Dispatch`; `matter-peek mcp` is the stdio shell.
 
-The types are always compiled, also without the controller (`--no-default-features`),
-which is what the web UI and the MCP protocol layer depend on.
+The types, the messages and the MCP tools are always compiled, also without the
+controller (`--no-default-features`), which is what the web UI depends on; an
+unused MCP layer is left out by the linker.
 
 ### The controller
 
@@ -131,11 +136,9 @@ of it is private to `core`.
 | Server | `matter-peek-server` | starts one; serves `ws://127.0.0.1:8087` |
 | Web UI (Yew/Wasm, Bulma) | `trunk serve` | WebSocket |
 | CLI | `matter-peek` | `--server <url>`, or a `WireSession` in process |
-| MCP server | `matter-peek-mcp` | `--server <url>`, or in process (read-only unless `--allow-mutate`) |
+| MCP server | `matter-peek mcp` | as the CLI (read-only unless `--allow-mutate`) |
 | Mobile apps | — | UniFFI, in process |
 
-The MCP protocol layer (JSON-RPC, tool catalog, tool ⇄ request mapping) is
-`no_std`, behind an injected `Dispatch`; the stdio shell is the `std` part.
 
 ---
 
@@ -205,11 +208,11 @@ pieces it uses are released.
 
 ## 6. Portability
 
-### `core` and `mcp` are `no_std` + `alloc`
+### `core` is `no_std` + `alloc`
 
-They build for bare-metal targets (`riscv32imac-unknown-none-elf`): `core` with
-`--no-default-features` (the API types) and with `--features controller` (the
-controller too), and `mcp`'s protocol layer. The rules that keep it so:
+It builds for bare-metal targets (`riscv32imac-unknown-none-elf`), with
+`--no-default-features` (the API types, messages and MCP tools) and with
+`--features controller` (the controller too). The rules that keep it so:
 - `#![no_std]` + `extern crate alloc`; `core::net` addresses, `alloc`
   collections.
 - `core` depends on rs-matter without default features; its `std` feature (pulled

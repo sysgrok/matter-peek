@@ -4,7 +4,6 @@ members = [
     "core",
     "server",
     "cli",
-    "mcp",
     # "web" is a separate wasm crate, excluded from the native workspace build.
 ]
 exclude = ["web"]
@@ -32,7 +31,7 @@ futures-lite = "2"
 rand = { version = "0.10", features = ["std", "std_rng", "thread_rng"] }
 static_cell = "2"
 
-# The server, CLI and MCP shells (smol/async-io family, as the core's host).
+# The server and CLI shells (smol/async-io family, as the core's host).
 serde = { version = "1", default-features = false }
 serde_json = "1"
 async-net = "2"

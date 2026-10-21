@@ -3,6 +3,7 @@
 //! Every command goes through the matter-peek API: to a running
 //! `matter-peek-server` with `--server <ws-url>`, else to a controller started
 //! in this process (which needs the store to itself, so not while a server runs).
+//! `matter-peek mcp` offers the API to AI agents, as MCP tools over stdio.
 //!
 //! ```text
 //! matter-peek [--server ws://127.0.0.1:8087] [--json] <command> [args...]
@@ -19,6 +20,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use matter_peek_core::api::{self, wire};
 use matter_peek_server::client::{self, Connection};
+
+mod mcp;
 
 /// How much of an OTA image goes in one upload request.
 const UPLOAD_CHUNK_LEN: usize = 256 * 1024;
@@ -130,6 +133,14 @@ enum Command {
     /// OTA images and device updates.
     #[command(subcommand)]
     Ota(Ota),
+    /// Offer the API to an AI agent, as MCP tools over stdio (the MCP stdio
+    /// transport), until stdin closes. Without --server, holds the store while
+    /// it runs.
+    Mcp {
+        /// Also offer the tools that change devices or the stored state.
+        #[arg(long)]
+        allow_mutate: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -179,9 +190,14 @@ impl std::str::FromStr for Node {
 }
 
 fn main() -> ExitCode {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-
     let cli = Cli::parse();
+
+    // Logs go to stderr: stdout is the output, or the MCP stream.
+    let level = match cli.command {
+        Command::Mcp { .. } => "info",
+        _ => "warn",
+    };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
 
     match matter_peek_server::block_on(run(cli)) {
         Ok(true) => ExitCode::SUCCESS,
@@ -195,6 +211,12 @@ fn main() -> ExitCode {
 
 /// Run the command; `Ok(false)` when the API answered with an error.
 async fn run(cli: Cli) -> io::Result<bool> {
+    // Its own connection, for as long as stdin is open.
+    if let Command::Mcp { allow_mutate } = cli.command {
+        mcp::serve(cli.server, allow_mutate).await?;
+        return Ok(true);
+    }
+
     let conn = match &cli.server {
         Some(url) => client::connect(url).await?,
         // Short-lived: no periodic sync, which the process could exit in the
@@ -374,6 +396,7 @@ async fn run(cli: Cli) -> io::Result<bool> {
             call(&conn, &out, wire::Request::OtaDelete { name }).await?,
         ),
         Command::Ota(Ota::Update { node, name }) => update(&conn, &out, node.0, name).await,
+        Command::Mcp { .. } => unreachable!("served above"),
     }
 }
 

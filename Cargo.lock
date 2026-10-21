@@ -1677,8 +1677,10 @@ name = "matter-peek-cli"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "blocking",
  "clap",
  "env_logger",
+ "futures-lite",
  "log",
  "matter-peek-core",
  "matter-peek-server",
@@ -1703,24 +1705,9 @@ dependencies = [
  "rand 0.10.3",
  "rs-matter",
  "serde",
+ "serde_json",
  "socket2",
  "uniffi",
-]
-
-[[package]]
-name = "matter-peek-mcp"
-version = "0.1.0"
-dependencies = [
- "base64",
- "blocking",
- "clap",
- "env_logger",
- "futures-lite",
- "log",
- "matter-peek-core",
- "matter-peek-server",
- "serde",
- "serde_json",
 ]
 
 [[package]]

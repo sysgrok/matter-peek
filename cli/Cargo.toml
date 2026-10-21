@@ -1,6 +1,6 @@
 [package]
 name = "matter-peek-cli"
-description = "The matter-peek command line: everything the web UI does, from a terminal"
+description = "The matter-peek command line: everything the web UI does, from a terminal; and as MCP tools, for AI agents"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -23,3 +23,6 @@ serde_json = { workspace = true }
 base64 = "0.22"
 log = { workspace = true }
 env_logger = { workspace = true }
+# `mcp`: async stdin/stdout, via a thread pool (the smol-family way).
+blocking = "1"
+futures-lite = { workspace = true }

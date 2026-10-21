@@ -19,19 +19,19 @@ a web UI, a command line, or an AI agent over MCP, all through one API.
 ## Layout
 
 ```
-core/    matter-peek-core — the API (`MatterPeek`, its types and wire messages)
-         and the controller behind it (wraps rs-matter); also the UniFFI bindings
+core/    matter-peek-core — the API (`MatterPeek`, its types, wire messages and
+         MCP tools) and the controller behind it (wraps rs-matter); also the
+         UniFFI bindings
 server/  matter-peek-server — the API over WebSocket/JSON, and its clients'
          connection (binary: matter-peek-server)
-cli/     the command line (binary: matter-peek)
-mcp/     the MCP server for AI agents (binary: matter-peek-mcp)
+cli/     the command line, and the MCP server for AI agents (binary: matter-peek)
 web/     matter-peek-web — Yew/Wasm web UI (WebSocket client; separate wasm crate)
 ```
 
 Everything goes through the API. The web UI talks to a running
-`matter-peek-server`; the CLI and the MCP server do too with `--server`, else
-they run a controller in their own process. Only one process at a time can hold
-the store.
+`matter-peek-server`; the CLI (also as the MCP server) does too with `--server`,
+else it runs a controller in its own process. Only one process at a time can
+hold the store.
 
 ## Run
 
@@ -51,8 +51,41 @@ cargo run --bin matter-peek -- --help
 
 # The MCP server (stdio), for an AI agent: through the server, or on its own;
 # mutating tools need --allow-mutate
-cargo run --bin matter-peek-mcp -- --server ws://127.0.0.1:8087 --allow-mutate
+cargo run --bin matter-peek -- --server ws://127.0.0.1:8087 mcp --allow-mutate
 ```
+
+### MCP (AI agents)
+
+`matter-peek mcp` offers the API as MCP tools over stdio (newline-delimited
+JSON-RPC 2.0, protocol version `2024-11-05`); logs go to stderr. Without
+`--server` it holds the store for as long as it runs (syncing the device list
+periodically, like the server), so to share the store with the web UI, run
+`matter-peek-server` and pass `--server`.
+
+| Tools | Access |
+|-------|--------|
+| `discover`, `list_devices`, `peek_device`, `retrieve_logs`, `identify`, `read_qr_image`, `ota_images` | read-only |
+| `commission`, `decommission`, `remember`, `set_tags`, `sync`, `ota_upload`, `ota_delete`, `ota_update` | **mutating** |
+
+The mutating tools touch real devices, so only `--allow-mutate` offers them:
+without it they are hidden from `tools/list` and rejected at `tools/call`. The
+operator decides; the agent cannot enable them.
+
+Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "matter-peek": {
+      "command": "/absolute/path/to/target/release/matter-peek",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Add `"--allow-mutate"` to `args` only when the agent may change devices, and
+`"--server", "ws://127.0.0.1:8087"` (before `mcp`) to go through a running server.
 
 ### Mobile bindings
 

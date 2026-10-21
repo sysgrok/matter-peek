@@ -1,19 +1,19 @@
-//! The MCP method layer: handshake (`initialize`), tool discovery
-//! (`tools/list`), and tool invocation (`tools/call`).
+//! The API as MCP (Model Context Protocol) tools, for AI agents: the handshake
+//! (`initialize`), tool discovery (`tools/list`), and tool invocation
+//! (`tools/call`), in [`jsonrpc`] messages.
 //!
 //! Transport- and controller-agnostic (`no_std` + `alloc`). A tool call maps to
-//! a [`matter_peek_wire::Request`], which is run by an injected [`Dispatch`]
-//! (the desktop shell implements it over a connection to the matter-peek
-//! server). The single final [`matter_peek_wire::Response`] is rendered back as
-//! the tool result; streamed progress is not surfaced over MCP (a tool call is
-//! request/response), so neither are health subscriptions.
+//! a [`wire::Request`], which an injected [`Dispatch`] runs (the CLI's `mcp`
+//! command does, over a connection to the API); the [`wire::Response`] comes
+//! back as the tool result. Streamed progress is not surfaced (a tool call is
+//! request/response), so neither are health subscriptions. The line reading and
+//! writing is the shell's.
 //!
 //! **Safety:** read-only tools (discover / list / peek / logs / identify / QR
-//! images / OTA images) are always registered. Mutating tools (commission / decommission /
-//! remember / set_tags / sync / OTA upload, delete and update) are registered
-//! only when
-//! [`Caps::allow_mutate`] is set — so an agent cannot commission or alter devices
-//! unless the human operator opted in (the shell sets this from `--allow-mutate`).
+//! images / OTA images) are always offered. Mutating tools (commission /
+//! decommission / remember / set_tags / sync / OTA upload, delete and update) are
+//! offered only with [`Caps::allow_mutate`], so an agent cannot change devices
+//! unless the human operator opted in.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -25,9 +25,11 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use matter_peek_core::api::{self, wire};
+use crate::api::{self, wire};
 
-use crate::jsonrpc::{self, Response};
+use jsonrpc::Response;
+
+pub mod jsonrpc;
 
 const SERVER_NAME: &str = "matter-peek";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -50,9 +52,9 @@ const MUTATING_TOOLS: &[&str] = &[
 const UPLOAD_CHUNK_LEN: usize = 256 * 1024;
 
 /// Runs one [`wire::Request`] against the controller and yields its single final
-/// response. The protocol layer is agnostic to *how* — the desktop shell
-/// implements this over a connection to the matter-peek server; a future esp shell
-/// would implement it over its own in-process controller.
+/// response. The protocol layer is agnostic to *how*: the CLI implements this
+/// over a connection to the API, an embedded shell could over its own
+/// controller.
 pub trait Dispatch {
     /// `Err(message)` is for transport failures (becomes a JSON-RPC
     /// internal error); a controller-level failure is a normal
@@ -110,12 +112,12 @@ fn initialize_result() -> Value {
         "capabilities": { "tools": {} },
         "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
         "instructions":
-            "Vendor-agnostic Matter diagnostic controller. Read-only tools \
+            "Vendor-agnostic Matter controller. Read-only tools \
              (discover, list_devices, peek_device, retrieve_logs, identify, \
              read_qr_image, ota_images) are always available. The tools that change devices \
              or the stored state (commission, decommission, remember, set_tags, \
-             sync, ota_upload, ota_delete, ota_update) require matter-peek-mcp \
-             to have been started with --allow-mutate."
+             sync, ota_upload, ota_delete, ota_update) are available only if the \
+             operator allowed them (e.g. `matter-peek mcp --allow-mutate`)."
     })
 }
 
@@ -356,7 +358,7 @@ async fn tools_call<D: Dispatch>(
         return Err((
             jsonrpc::INVALID_PARAMS,
             format!(
-                "tool '{name}' is disabled; start matter-peek-mcp with --allow-mutate to enable it"
+                "tool '{name}' is disabled: the operator has not allowed changes (e.g. `matter-peek mcp --allow-mutate`)"
             ),
         ));
     }

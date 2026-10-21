@@ -28,7 +28,6 @@ controller = [
     "dep:embassy-time",
     "dep:async-channel",
     "dep:futures-util",
-    "dep:base64",
 ]
 
 # Run the controller on this host (`MatterPeek::start`): its thread, UDP socket,
@@ -64,8 +63,11 @@ uniffi = ["std", "dep:uniffi"]
 uniffi-cli = ["uniffi", "uniffi/cli", "uniffi/cargo-metadata"]
 
 [dependencies]
-# The API types, for every build (the web UI's too).
+# The API types and its MCP tools, for every build (the web UI's too).
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+# Binary payloads (logs, images) travel base64-encoded on the wire.
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 log = { workspace = true }
 
 # --- The controller (`controller`), `no_std` + `alloc`. ---
@@ -76,8 +78,6 @@ embassy-futures = { workspace = true, optional = true }
 embassy-time = { version = "0.5", optional = true, default-features = false }
 async-channel = { version = "2", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["alloc"] }
-# Binary payloads (logs, images) travel base64-encoded on the wire.
-base64 = { version = "0.22", optional = true, default-features = false, features = ["alloc"] }
 
 # --- This host (`std`). ---
 embassy-time-queue-utils = { workspace = true, optional = true }
