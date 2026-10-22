@@ -199,7 +199,9 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
              session (no re-commissioning) and read its health diagnostics \
              (uptime, reboot count, heap, and the threads/tasks of its \
              software with their stack size, peak use and free stack, where \
-             the device reports them).",
+             the device reports them), and the fabrics it is on: the \
+             controllers (ecosystems: Google, Apple, Home Assistant, ...) it \
+             belongs to, ours marked, of how many it supports.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1043,8 +1045,15 @@ fn labelled(response: &wire::Response) -> Value {
             }
         }
         wire::Response::Peek { health, .. } => {
-            if let Some(secs) = health.general.and_then(|g| g.up_time_secs) {
+            if let Some(secs) = health.general.as_ref().and_then(|g| g.up_time_secs) {
                 value["health"]["general"]["up_time"] = json!(display::duration(secs));
+            }
+            let fabrics = health.fabrics.iter().flatten();
+            for (fabric, v) in fabrics.zip(entries(&mut value["health"], "fabrics")) {
+                v["name"] = json!(fabric.name());
+                v["vendor"] = json!(display::vendor_label(fabric.vendor_id, None));
+                v["fabric"] = json!(display::hex_u64(fabric.fabric_id));
+                v["node"] = json!(display::hex_u64(fabric.node_id));
             }
         }
         _ => {}

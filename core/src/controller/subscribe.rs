@@ -56,7 +56,7 @@ use rs_matter::transport::session::SessionMode;
 use rs_matter::utils::sync::Notification;
 use rs_matter::Matter;
 
-use crate::diagnostics::{health_cluster_ids, parse_health, ROOT_ENDPOINT};
+use crate::diagnostics::{fabric_paths, health_cluster_ids, parse_health, ROOT_ENDPOINT};
 use crate::model::{DeviceHealth, DiagSet};
 
 extern crate alloc;
@@ -481,15 +481,17 @@ where
 }
 
 /// Build the subscription's `AttrPath` list: one **cluster-wildcard** path per
-/// selected diagnostic cluster (endpoint 0, `attr = None`). Cluster granularity
-/// (rather than per-attribute) is what lets the subscription survive a device
-/// that implements only a subset of the attributes — see
-/// [`health_cluster_ids`](crate::diagnostics::health_cluster_ids).
+/// selected diagnostic cluster (endpoint 0, `attr = None`), and the fabrics.
+/// Cluster granularity (rather than per-attribute) is what lets the
+/// subscription survive a device that implements only a subset of the
+/// attributes — see [`health_cluster_ids`](crate::diagnostics::health_cluster_ids).
+/// A device need take no more than 3 paths.
 fn attr_paths(which: DiagSet) -> Vec<AttrPath> {
     health_cluster_ids(which)
         .into_iter()
         .map(|cluster| {
             AttrPath::from_gp(&GenericPath::new(Some(ROOT_ENDPOINT), Some(cluster), None))
         })
+        .chain(fabric_paths(which))
         .collect()
 }

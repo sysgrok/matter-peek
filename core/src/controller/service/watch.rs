@@ -208,7 +208,10 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             handle,
             DiagSet::LIVE,
             &retry,
-            |health| with_watch(&mut |watch| watch.report(node_id, health.clone())),
+            |mut health| {
+                self.mark_our_fabric(node_id, &mut health);
+                with_watch(&mut |watch| watch.report(node_id, health.clone()))
+            },
             |state| {
                 let state = convert::sub_state(state);
                 match state {

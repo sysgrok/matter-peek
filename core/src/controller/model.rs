@@ -12,6 +12,8 @@ pub struct DiagSet {
     pub thread: bool,
     pub wifi: bool,
     pub ethernet: bool,
+    /// The fabrics it is on.
+    pub fabrics: bool,
 }
 
 impl DiagSet {
@@ -22,17 +24,19 @@ impl DiagSet {
         thread: true,
         wifi: true,
         ethernet: true,
+        fabrics: true,
     };
 
-    /// What a live subscription follows: General Diagnostics. The rest is
-    /// read when asked for; Software Diagnostics' thread metrics, for one,
-    /// change all the time.
+    /// What a live subscription follows: General Diagnostics, and the
+    /// fabrics. The rest is read when asked for; Software Diagnostics' thread
+    /// metrics, for one, change all the time.
     pub const LIVE: Self = Self {
         general: true,
         software: false,
         thread: false,
         wifi: false,
         ethernet: false,
+        fabrics: true,
     };
 }
 

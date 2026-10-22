@@ -13,8 +13,9 @@ See [`DESIGN.md`](DESIGN.md) for the full architecture and roadmap.
 ## Status
 
 A local Matter controller for diagnostics: list the devices on our fabric (live
-health, logs, OTA updates), commission new ones (with mDNS discovery) and share
-them with other ecosystems (Google Home, Home Assistant, ...) — from
+health, logs, OTA updates, the fabrics they are on), commission new ones (with
+mDNS discovery) and share them with other ecosystems (Google Home, Home
+Assistant, ...) — from
 a web UI, a command line, or an AI agent over MCP, all through one API.
 
 ## Layout
@@ -112,6 +113,12 @@ passcode made for that window, and show the code to commission it with: the
 11-digit manual pairing code and the QR code (drawn in the web UI and the
 terminal). The window closes after 15 minutes (3 to 15), or when closed; the
 code works only while it is open. A device with no free fabric is refused.
+
+The fabrics a device is on (the controllers it belongs to: ours, Google,
+Apple, Home Assistant, ... by their vendor, or the label their controller set)
+come with its health: live on the device card (a click shows each one's
+vendor, fabric ID and the device's node ID there), in `matter-peek peek
+<node>` and in the MCP tool `peek_device`.
 
 ### Thread mesh
 

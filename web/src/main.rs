@@ -23,6 +23,7 @@ mod assistant;
 mod camera;
 mod commission;
 mod devices;
+mod fabrics;
 mod icons;
 mod memory;
 mod network;
@@ -136,6 +137,8 @@ enum Msg {
     Memory(memory::MemoryMsg),
     /// In a device's share popup.
     Share(share::ShareMsg),
+    /// In a device's fabrics popup.
+    Fabrics(fabrics::FabricsMsg),
     /// On the Thread page.
     Thread(thread::ThreadMsg),
     /// Open or close the navigation drawer (on phones).
@@ -362,6 +365,8 @@ struct App {
     memory: Option<memory::MemoryView>,
     /// The share popup, while open.
     share: Option<share::ShareView>,
+    /// The device whose fabrics popup is open.
+    fabrics_of: Option<u64>,
     thread: thread::ThreadPage,
     /// The network popup, when open.
     network_view: Option<NetworkView>,
@@ -438,6 +443,7 @@ impl Component for App {
             logs: None,
             memory: None,
             share: None,
+            fabrics_of: None,
             thread: Default::default(),
             network_view: None,
             assistant: Assistant::default(),
@@ -481,6 +487,7 @@ impl Component for App {
             Msg::Assistant(msg) => self.update_assistant(ctx, msg),
             Msg::Memory(msg) => self.update_memory(ctx, msg),
             Msg::Share(msg) => self.update_share(ctx, msg),
+            Msg::Fabrics(msg) => self.update_fabrics(msg),
             Msg::Thread(msg) => self.update_thread(ctx, msg),
             Msg::ToggleDrawer => {
                 self.drawer_open = !self.drawer_open;
@@ -1330,6 +1337,7 @@ impl Component for App {
                 { self.view_camera_modal(link) }
                 { self.view_logs_modal(link) }
                 { self.view_memory_modal(link) }
+                { self.view_fabrics_modal(link) }
                 { self.view_share_modal(link) }
                 { self.view_settings_modal(link) }
                 { self.view_network_modal(link) }

@@ -1679,7 +1679,7 @@ fn health_text(health: &api::DeviceHealth) -> String {
         ));
     }
 
-    let mut text = if parts.is_empty() {
+    let mut text = if parts.is_empty() && health.fabrics.is_none() {
         "(no health data)".to_string()
     } else {
         parts.join("; ")
@@ -1692,8 +1692,36 @@ fn health_text(health: &api::DeviceHealth) -> String {
         text.push('\n');
         text.push_str(&threads_text(threads));
     }
+    if let Some(fabrics) = &health.fabrics {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&fabrics_text(fabrics, health.supported_fabrics));
+    }
 
     text
+}
+
+/// The fabrics a device is on: the controllers it belongs to.
+fn fabrics_text(fabrics: &[api::DeviceFabric], supported: Option<u8>) -> String {
+    let of = supported.map(|n| format!(" of {n}")).unwrap_or_default();
+    let mut lines = vec![format!("Fabrics ({}{of}):", fabrics.len())];
+
+    for fabric in fabrics {
+        lines.push(format!(
+            "  {:<3} {:<28} vendor {}  fabric {}  node {}",
+            fabric
+                .index
+                .map(|index| format!("#{index}"))
+                .unwrap_or_default(),
+            fabric.name(),
+            display::vendor_label(fabric.vendor_id, None),
+            display::hex_u64(fabric.fabric_id),
+            display::hex_u64(fabric.node_id)
+        ));
+    }
+
+    lines.join("\n")
 }
 
 /// The threads (tasks) of a device's software: the one with the least stack

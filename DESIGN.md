@@ -80,7 +80,7 @@ controller serves the CLI, the MCP server and mobile apps.
 |---|---|
 | Commissioning | `commission` (IP or BLE, network credentials, `remember`, a progress listener), `cancel_commission`, `read_qr_image`, `discover` (mDNS + BLE) |
 | Device list | `list_devices`, `sync`, `remember`, `set_tags`, `decommission` |
-| Health | `peek_device` (one-shot: also its heap, and the threads (tasks) of its software and their stacks, where it reports them), `subscribe` (live, General Diagnostics only: uptime, reboots, operating hours; returns a `Subscription`, which stops when dropped) |
+| Health | `peek_device` (one-shot: also its heap, and the threads (tasks) of its software and their stacks, where it reports them), `subscribe` (live: General Diagnostics (uptime, reboots, operating hours) and the fabrics the device is on; returns a `Subscription`, which stops when dropped) |
 | Thread | `read_thread_mesh`: networks, nodes, links and findings, from our Thread devices' tables and the LAN's MeshCoP / Matter adverts |
 | Device | `read_network` (interfaces, known networks, Wi-Fi / Thread / Ethernet diagnostics), `change_network` (add or update, remove, connect, reorder a known network), `retrieve_logs`, `identify` |
 | OTA | `ota_images`, `ota_upload` (returns an `OtaUpload` to write chunks to), `ota_delete`, `ota_update` (a progress listener) |
@@ -196,9 +196,14 @@ of it is private to `core`.
   commissionable BLE advertisements.
 
 ### Health subscriptions
-- One subscription per device (General + Software Diagnostics), shared by all
-  its listeners; a late one gets the state and merged health so far. It stops
-  with its last listener.
+- One subscription per device, shared by all its listeners; a late one gets
+  the state and merged health so far. It stops with its last listener.
+- It takes three paths, as many as a device must accept: General Diagnostics
+  (a cluster wildcard, so a device serving part of it still accepts it), and
+  Operational Credentials' `Fabrics` and `SupportedFabrics` (mandatory), read
+  unfiltered so every fabric shows, not only ours. Ours is the one with our
+  fabric ID on which the device has the node ID we gave it. A fabric list sent
+  in pieces is merged piece by piece.
 - We ask for at most 20 s between reports; devices may choose longer (sleepy
   devices pick their idle duration).
 - A device is **offline** when no report arrived within the max interval plus

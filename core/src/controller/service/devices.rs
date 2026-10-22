@@ -71,11 +71,12 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     pub(super) async fn peek_device(&self, node_id: u64) -> Result<DeviceHealth, PeekError> {
         let dev = self.lookup_device(node_id)?;
 
-        let health = self
+        let mut health = self
             .controller
             .read_health(dev.handle, DiagSet::ALL)
             .await
             .map_err(|e| failed(&format!("device 0x{node_id:016X} did not answer"), e))?;
+        self.mark_our_fabric(node_id, &mut health);
 
         // It answers, so an offline subscription of it can be re-established now.
         self.set_online(node_id, true);
@@ -86,6 +87,24 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         }
 
         Ok(health)
+    }
+
+    /// Mark our fabric among those `health` has of device `node_id`: the one
+    /// with our fabric ID, on which the device has its node ID with us.
+    pub(super) fn mark_our_fabric(&self, node_id: u64, health: &mut DeviceHealth) {
+        let Some(fabrics) = health.fabrics.as_mut() else {
+            return;
+        };
+        let Ok(fabric_id) = self
+            .matter
+            .with_state(|state| Ok::<_, Error>(state.fabrics.fabric(self.fab_idx)?.fabric_id()))
+        else {
+            return;
+        };
+
+        for fabric in fabrics {
+            fabric.ours = fabric.fabric_id == fabric_id && fabric.node_id == node_id;
+        }
     }
 
     /// Name the Thread networks of `info` the device knows by no name, as the

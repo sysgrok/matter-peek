@@ -629,3 +629,27 @@ pre.log-text { max-height: 70vh; margin: 0; padding: .75rem 0; overflow: auto; b
 }
 .share-warning > svg, .share-error > svg { flex: none; margin-top: .1rem; color: var(--bulma-info); }
 .share-error > svg { color: var(--bulma-danger); }
+
+/* Fabrics: the controllers a device belongs to */
+.device-fabrics { display: flex; align-items: center; gap: .55rem; width: 100%; margin-top: .75rem; padding: .45rem .6rem; border: 1px solid var(--bulma-border-weak); border-radius: 10px; background: transparent; color: var(--bulma-text); font: inherit; font-size: .82rem; text-align: left; cursor: pointer; }
+.device-fabrics:hover { background: var(--bulma-scheme-main-bis); }
+.device-fabrics > svg { flex: none; color: var(--bulma-text-weak); }
+.device-fabrics-label { display: inline-flex; align-items: center; gap: .35rem; flex: none; font-size: .68rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--bulma-text-weak); }
+.device-fabrics-chips { display: flex; flex-wrap: wrap; gap: .3rem; flex: 1; min-width: 0; }
+.fabric-chip { max-width: 100%; padding: .05rem .5rem; border-radius: 999px; background: hsla(var(--info-hsl), .1); font-size: .78rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fabric-chip.is-ours { background: hsla(var(--link-hsl), .12); color: var(--bulma-link); }
+.device-fabrics-count { flex: none; font-size: .75rem; color: var(--bulma-text-weak); }
+.modal .modal-card.fabrics-card { width: min(720px, calc(100vw - 32px)); }
+.fabrics-intro, .fabrics-none { margin-bottom: .9rem; font-size: .85rem; color: var(--bulma-text-weak); }
+.fabrics-list { display: flex; flex-direction: column; gap: .6rem; }
+.fabric-row { display: flex; align-items: center; gap: .85rem; padding: .7rem .85rem; border: 1px solid var(--bulma-border-weak); border-radius: 12px; }
+.fabric-row.is-ours { border-color: hsla(var(--link-hsl), .45); }
+.fabric-main { flex: 1; min-width: 0; }
+.fabric-title { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; font-weight: 600; color: var(--bulma-text-strong); }
+.fabric-sub { font-size: .8rem; color: var(--bulma-text-weak); }
+.fabric-ids { display: flex; flex-direction: column; align-items: flex-end; gap: .1rem; font-size: .72rem; color: var(--bulma-text-weak); }
+.fabrics-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .6rem; margin-top: 1rem; font-size: .82rem; color: var(--bulma-text-weak); }
+@media (max-width: 600px) {
+  .fabric-row { flex-wrap: wrap; }
+  .fabric-ids { align-items: flex-start; width: 100%; padding-left: 3.1rem; }
+}

@@ -12,7 +12,9 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use super::types::{DeviceInfo, NetworkKind, NetworkStatus, ThreadRole, WifiSecurity, WifiVersion};
+use super::types::{
+    DeviceFabric, DeviceInfo, NetworkKind, NetworkStatus, ThreadRole, WifiSecurity, WifiVersion,
+};
 
 mod dcl;
 
@@ -87,6 +89,23 @@ impl DeviceInfo {
     /// Whether the device has a test vendor ID (see [`is_test_vendor`]).
     pub fn is_test_vendor(&self) -> bool {
         self.fingerprint.vendor_id.is_some_and(is_test_vendor)
+    }
+}
+
+impl DeviceFabric {
+    /// What to call the fabric: ours `matter-peek`; another by its label, else
+    /// by the name of its controller's vendor (`Google LLC`), else by the
+    /// vendor ID.
+    pub fn name(&self) -> String {
+        if self.ours {
+            "matter-peek".to_string()
+        } else if !self.label.is_empty() {
+            self.label.clone()
+        } else {
+            static_vendor_name(self.vendor_id)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| hex_u16(self.vendor_id))
+        }
     }
 }
 

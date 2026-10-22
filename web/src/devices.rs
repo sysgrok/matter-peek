@@ -208,6 +208,7 @@ impl App {
                     </div>
                 </dl>
 
+                { self.view_fabrics_row(node_id, live, link) }
                 { self.view_health(live, offline) }
                 { self.view_tags(d, link) }
                 { self.view_device_update(d, offline, link) }
@@ -297,6 +298,34 @@ impl App {
     }
 
     /// A device's tags, and their editor for a remembered one.
+    /// A card's fabrics: the controllers it belongs to, opening their popup.
+    fn view_fabrics_row(&self, node_id: u64, sub: Option<&LiveSub>, link: &Scope<Self>) -> Html {
+        let Some(health) = sub.map(|sub| &sub.health) else {
+            return html! {};
+        };
+        let Some(list) = health.fabrics.as_ref() else {
+            return html! {};
+        };
+
+        html! {
+            <button class="device-fabrics" title="The controllers it belongs to"
+                onclick={link.callback(move |_| Msg::Fabrics(crate::fabrics::FabricsMsg::Open(node_id)))}>
+                <span class="device-fabrics-label">{ icon(Icon::Fabrics, 14) }{ "Fabrics" }</span>
+                <span class="device-fabrics-chips">
+                    { for list.iter().map(|fabric| html! {
+                        <span class={classes!("fabric-chip", fabric.ours.then_some("is-ours"))}>
+                            { fabric.name() }
+                        </span>
+                    }) }
+                </span>
+                if let Some(supported) = health.supported_fabrics {
+                    <span class="device-fabrics-count">{ format!("{} of {supported}", list.len()) }</span>
+                }
+                { icon(Icon::ChevronRight, 16) }
+            </button>
+        }
+    }
+
     fn view_tags(&self, d: &api::DeviceInfo, link: &Scope<Self>) -> Html {
         let node_id = d.handle.node_id;
 

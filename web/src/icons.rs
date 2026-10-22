@@ -46,6 +46,7 @@ pub enum Icon {
     Key,
     Share,
     Copy,
+    Fabrics,
     Check,
     CheckCircle,
     XCircle,
@@ -259,6 +260,12 @@ pub fn icon(glyph: Icon, size: u32) -> Html {
                 <circle cx="6" cy="12" r="3" />
                 <circle cx="18" cy="19" r="3" />
                 <path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4" />
+            </>
+        },
+        Icon::Fabrics => html! {
+            <>
+                <path d="M12.8 2.2a2 2 0 0 0-1.6 0L2.6 6.1a1 1 0 0 0 0 1.8l8.6 3.9a2 2 0 0 0 1.6 0l8.6-3.9a1 1 0 0 0 0-1.8z" />
+                <path d="M22 17.6l-9.2 4.2a2 2 0 0 1-1.6 0L2 17.6M22 12.6l-9.2 4.2a2 2 0 0 1-1.6 0L2 12.6" />
             </>
         },
         Icon::Copy => html! {

@@ -231,6 +231,17 @@ pub struct Fingerprint {
 pub struct DeviceHealth {
     pub general: Option<GeneralDiag>,
     pub software: Option<SoftwareDiag>,
+    /// The fabrics the device is on: the controllers (ecosystems) it belongs
+    /// to.
+    #[serde(default)]
+    pub fabrics: Option<Vec<DeviceFabric>>,
+    /// How many fabrics it supports.
+    #[serde(default)]
+    pub supported_fabrics: Option<u8>,
+    /// Whether `fabrics` adds to those reported before: a device sends a long
+    /// list in pieces.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub fabrics_appended: bool,
 }
 
 impl DeviceHealth {
@@ -255,7 +266,33 @@ impl DeviceHealth {
                 base.thread_metrics = s.thread_metrics;
             }
         }
+        if let Some(fabrics) = delta.fabrics {
+            match self.fabrics.as_mut() {
+                Some(base) if delta.fabrics_appended => base.extend(fabrics),
+                _ => self.fabrics = Some(fabrics),
+            }
+        }
+        self.supported_fabrics = delta.supported_fabrics.or(self.supported_fabrics);
     }
+}
+
+/// A fabric a device is on: a controller (an ecosystem) it belongs to, from
+/// its Operational Credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DeviceFabric {
+    /// The device's index of the fabric.
+    pub index: Option<u8>,
+    /// The vendor of the controller that put the device on the fabric.
+    pub vendor_id: u16,
+    /// The fabric's name, as its controller set it; empty if none.
+    pub label: String,
+    pub fabric_id: u64,
+    /// The device's node ID on the fabric.
+    pub node_id: u64,
+    /// Whether it is our fabric.
+    #[serde(default)]
+    pub ours: bool,
 }
 
 /// Part of the General Diagnostics cluster (`0x0033`).
@@ -1088,4 +1125,45 @@ pub struct UnreadDevice {
     pub node_id: u64,
     pub title: String,
     pub reason: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+
+    use super::*;
+
+    fn fabric(index: u8) -> DeviceFabric {
+        DeviceFabric {
+            index: Some(index),
+            vendor_id: 0x6006,
+            label: String::new(),
+            fabric_id: index.into(),
+            node_id: 0x1B669,
+            ours: false,
+        }
+    }
+
+    #[test]
+    fn fabrics_sent_in_pieces_add_up_and_a_whole_list_replaces_them() {
+        let mut health = DeviceHealth::default();
+        let report = |fabrics, appended, supported| DeviceHealth {
+            fabrics: Some(fabrics),
+            fabrics_appended: appended,
+            supported_fabrics: supported,
+            ..Default::default()
+        };
+
+        health.merge(report(vec![fabric(1)], false, Some(5)));
+        health.merge(report(vec![fabric(2)], true, None));
+        assert_eq!(health.fabrics, Some(vec![fabric(1), fabric(2)]));
+        assert_eq!(health.supported_fabrics, Some(5));
+
+        health.merge(report(vec![fabric(3)], false, None));
+        assert_eq!(health.fabrics, Some(vec![fabric(3)]));
+        assert_eq!(health.supported_fabrics, Some(5));
+
+        health.merge(DeviceHealth::default());
+        assert_eq!(health.fabrics, Some(vec![fabric(3)]));
+    }
 }

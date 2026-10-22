@@ -19,6 +19,9 @@ use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::decl::general_diagnostics::{
     GeneralDiagnosticsAttrReads as _, GeneralDiagnosticsAttrResponses as _,
 };
+use rs_matter::dm::clusters::decl::operational_credentials::{
+    self as op_creds, FabricDescriptorStruct, OperationalCredentialsAttrResponses as _,
+};
 use rs_matter::dm::clusters::decl::software_diagnostics::{
     self as sw_diag, SoftwareDiagnosticsAttrResponses as _, ThreadMetricsStruct,
 };
@@ -31,7 +34,7 @@ use rs_matter::tlv::{FromTLV, TLVArray};
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::Matter;
 
-use crate::api::ThreadMetric;
+use crate::api::{DeviceFabric, ThreadMetric};
 use crate::model::{DeviceHealth, DiagSet, GeneralDiag, SoftwareDiag};
 
 extern crate alloc;
@@ -64,6 +67,28 @@ pub(crate) fn health_cluster_ids(which: DiagSet) -> alloc::vec::Vec<u32> {
         clusters.push(sw_diag::FULL_CLUSTER.id);
     }
     clusters
+}
+
+/// The concrete paths of the fabrics a health snapshot covers, if `which`
+/// does: mandatory attributes, so a device rejects no subscription for them.
+pub(crate) fn fabric_paths(which: DiagSet) -> alloc::vec::Vec<AttrPath> {
+    if !which.fabrics {
+        return alloc::vec::Vec::new();
+    }
+
+    [
+        op_creds::AttributeId::Fabrics,
+        op_creds::AttributeId::SupportedFabrics,
+    ]
+    .into_iter()
+    .map(|attr| {
+        AttrPath::from_gp(&GenericPath::new(
+            Some(ROOT_ENDPOINT),
+            Some(op_creds::FULL_CLUSTER.id),
+            Some(attr as _),
+        ))
+    })
+    .collect()
 }
 
 /// Demux a `ReportData` response into a [`DeviceHealth`] snapshot, filling only
@@ -101,6 +126,19 @@ pub(crate) fn parse_health(resp: &ReportDataResp<'_>, which: DiagSet) -> DeviceH
             health.software = Some(s);
         }
     }
+    if which.fabrics {
+        let (cluster, attr) = (
+            op_creds::FULL_CLUSTER.id,
+            op_creds::AttributeId::Fabrics as u32,
+        );
+        let mut fabrics = alloc::vec::Vec::new();
+        if list_items(resp, cluster, attr, &mut fabrics, fabric) {
+            health.fabrics_appended = !has_whole_list(resp, cluster, attr);
+            health.fabrics = Some(fabrics);
+        }
+        health.supported_fabrics =
+            first(resp.operational_credentials_read_resp().supported_fabrics());
+    }
     health
 }
 
@@ -125,8 +163,48 @@ pub async fn read_health<C: Crypto + Copy>(
     if which.software {
         health.software = Some(read_software(matter, crypto, fab_idx, node_id).await?);
     }
+    if which.fabrics {
+        health.merge(read_fabrics(matter, crypto, fab_idx, node_id).await?);
+    }
 
     Ok(health)
+}
+
+/// Read the fabrics the device is on; every one, not only ours.
+async fn read_fabrics<C: Crypto>(
+    matter: &Matter<'_>,
+    crypto: C,
+    fab_idx: NonZeroU8,
+    node_id: u64,
+) -> Result<DeviceHealth, Error> {
+    let only = DiagSet {
+        general: false,
+        software: false,
+        thread: false,
+        wifi: false,
+        ethernet: false,
+        fabrics: true,
+    };
+    let paths = fabric_paths(only);
+
+    let exchange = Exchange::initiate(matter, crypto, fab_idx, node_id).await?;
+    let mut chunk = exchange
+        .read_with(|msg| {
+            msg.attr_requests_from(&paths)?
+                .fabric_filtered(false)?
+                .end()
+        })
+        .await?;
+
+    let mut health = DeviceHealth::default();
+    loop {
+        health.merge(parse_health(&chunk.response()?, only));
+
+        match chunk.complete().await? {
+            Some(next) => chunk = next,
+            None => return Ok(health),
+        }
+    }
 }
 
 /// First report from a scalar-attribute iterator. `None` on absence/error
@@ -275,6 +353,35 @@ where
     }
 
     seen
+}
+
+/// Whether `resp` has list attribute `attr` of `cluster` whole, rather than
+/// item by item.
+fn has_whole_list(resp: &ReportDataResp<'_>, cluster: u32, attr: u32) -> bool {
+    resp.attr_reports
+        .iter()
+        .flat_map(|reports| reports.iter())
+        .filter_map(Result::ok)
+        .any(|report| {
+            matches!(report, AttrResp::Data(data)
+                if data.path.cluster == Some(cluster)
+                    && data.path.attr == Some(attr)
+                    && data.path.list_index.is_none())
+        })
+}
+
+fn fabric(item: &FabricDescriptorStruct<'_>) -> Option<DeviceFabric> {
+    Some(DeviceFabric {
+        index: item.fabric_index().ok().flatten(),
+        vendor_id: item.vendor_id().ok()?,
+        label: item
+            .label()
+            .map(|label| alloc::string::ToString::to_string(&label))
+            .unwrap_or_default(),
+        fabric_id: item.fabric_id().ok()?,
+        node_id: item.node_id().ok()?,
+        ours: false,
+    })
 }
 
 fn thread_metric(item: &ThreadMetricsStruct<'_>) -> Option<ThreadMetric> {
