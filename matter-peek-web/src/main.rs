@@ -4,7 +4,7 @@
 //! fabric with their live health, logs and updates; commissioning (with mDNS
 //! discovery); and the OTA images.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 
 use futures::{SinkExt, StreamExt};
@@ -284,6 +284,8 @@ enum Msg {
     OtaUpdate(u64),
     /// How a device's (node_id) update goes.
     OtaProgress(u64, api::OtaProgress),
+    /// The update was announced to the device (node_id), or not: why.
+    OtaAnnounced(u64, Result<(), String>),
     /// The OTA updates the devices asked for; `None` if they could not be read.
     OtaUpdates(Option<wire::Response>),
     Step(StepLine),
@@ -381,6 +383,8 @@ struct App {
     ota_choice: HashMap<u64, String>,
     /// How each device's update goes (node_id → status line).
     ota_status: HashMap<u64, String>,
+    /// The devices an update is being announced to.
+    ota_announcing: HashSet<u64>,
     /// The logs popup, when open.
     logs: Option<LogsView>,
     /// The memory popup, while open.
@@ -474,6 +478,7 @@ impl Component for App {
             ota_images: Vec::new(),
             ota_choice: HashMap::new(),
             ota_status: HashMap::new(),
+            ota_announcing: HashSet::new(),
             logs: None,
             memory: None,
             share: None,
@@ -648,15 +653,28 @@ impl Component for App {
                 };
 
                 self.ota_progress.remove(&node_id);
+                self.ota_announcing.insert(node_id);
                 self.ota_status
                     .insert(node_id, format!("Announcing {name} to the device…"));
                 send_ota_update(ctx.link().clone(), node_id, name);
                 true
             }
             Msg::OtaProgress(node_id, progress) => {
+                self.ota_announcing.remove(&node_id);
                 self.ota_status
                     .insert(node_id, ota_progress_text(&progress));
                 self.ota_progress.insert(node_id, progress);
+                true
+            }
+            Msg::OtaAnnounced(node_id, result) => {
+                if !self.ota_announcing.remove(&node_id) {
+                    return false;
+                }
+                let status = match result {
+                    Ok(()) => "Announced; waiting for the device to ask for it…".to_string(),
+                    Err(e) => format!("Not announced: {e}"),
+                };
+                self.ota_status.insert(node_id, status);
                 true
             }
             Msg::OtaUpdates(resp) => {
@@ -2193,12 +2211,14 @@ fn response_error(response: wire::Response) -> String {
 /// until the device runs the new image.
 fn send_ota_update(link: html::Scope<App>, node_id: u64, name: String) {
     spawn_local(async move {
+        let failed = |message: String| {
+            link.send_message(Msg::OtaAnnounced(node_id, Err(message.clone())));
+            link.send_message(Msg::Error(message));
+        };
+
         let ws = match WebSocket::open(&ws_url()) {
             Ok(ws) => ws,
-            Err(e) => {
-                link.send_message(Msg::Error(format!("connect failed: {e}")));
-                return;
-            }
+            Err(e) => return failed(format!("connect failed: {e}")),
         };
         let (mut write, mut read) = ws.split();
 
@@ -2208,8 +2228,7 @@ fn send_ota_update(link: html::Scope<App>, node_id: u64, name: String) {
         };
         let json = serde_json::to_string(&client_msg).unwrap();
         if let Err(e) = write.send(Message::Text(json)).await {
-            link.send_message(Msg::Error(format!("send failed: {e}")));
-            return;
+            return failed(format!("send failed: {e}"));
         }
 
         while let Some(Ok(Message::Text(text))) = read.next().await {
@@ -2224,12 +2243,13 @@ fn send_ota_update(link: html::Scope<App>, node_id: u64, name: String) {
                     }
                 }
                 Ok(wire::ServerMsg::Response {
+                    response: wire::Response::Ok,
+                    ..
+                }) => link.send_message(Msg::OtaAnnounced(node_id, Ok(()))),
+                Ok(wire::ServerMsg::Response {
                     response: wire::Response::Error { message },
                     ..
-                }) => {
-                    link.send_message(Msg::Error(message));
-                    return;
-                }
+                }) => return failed(message),
                 _ => {}
             }
         }

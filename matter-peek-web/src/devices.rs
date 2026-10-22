@@ -432,6 +432,9 @@ impl App {
             (_, None) => "Update".to_string(),
         };
         let applied = matches!(progress, Some(api::OtaProgress::Applied { .. }));
+        // Announced, offered, downloading or applying: one at a time.
+        let running = self.ota_announcing.contains(&node_id)
+            || progress.is_some_and(api::OtaProgress::in_progress);
         let percent = match progress {
             Some(api::OtaProgress::Downloading { percent }) => Some(*percent),
             _ => None,
@@ -468,7 +471,8 @@ impl App {
                                 </select>
                             </div>
                         }
-                        <button class="button is-small is-link" disabled={offline}
+                        <button class="button is-small is-link" disabled={offline || running}
+                            title={running.then_some("An update is under way")}
                             onclick={link.callback(move |_| Msg::OtaUpdate(node_id))}>
                             { "Update" }
                         </button>

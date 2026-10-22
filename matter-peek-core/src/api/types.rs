@@ -665,15 +665,20 @@ pub struct OtaUpdateInfo {
     pub idle_secs: u64,
 }
 
-impl OtaUpdateInfo {
+impl OtaProgress {
     /// Whether the update is still going: offered, downloading or applying.
     pub fn in_progress(&self) -> bool {
         matches!(
-            self.progress,
-            OtaProgress::Offered { .. }
-                | OtaProgress::Downloading { .. }
-                | OtaProgress::Applying { .. }
+            self,
+            Self::Offered { .. } | Self::Downloading { .. } | Self::Applying { .. }
         )
+    }
+}
+
+impl OtaUpdateInfo {
+    /// Whether the update is still going: offered, downloading or applying.
+    pub fn in_progress(&self) -> bool {
+        self.progress.in_progress()
     }
 
     /// The time left to download, estimated from the pace so far.
