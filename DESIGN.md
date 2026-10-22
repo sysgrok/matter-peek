@@ -80,7 +80,7 @@ controller serves the CLI, the MCP server and mobile apps.
 |---|---|
 | Commissioning | `commission` (IP or BLE, network credentials, `remember`, a progress listener), `cancel_commission`, `read_qr_image`, `discover` (mDNS + BLE) |
 | Device list | `list_devices`, `sync`, `remember`, `set_tags`, `decommission` |
-| Health | `peek_device` (one-shot), `subscribe` (live; returns a `Subscription`, which stops when dropped) |
+| Health | `peek_device` (one-shot: also its heap, and the threads (tasks) of its software and their stacks, where it reports them), `subscribe` (live, General Diagnostics only: uptime, reboots, operating hours; returns a `Subscription`, which stops when dropped) |
 | Device | `read_network` (interfaces, known networks, Wi-Fi / Thread / Ethernet diagnostics), `change_network` (add or update, remove, connect, reorder a known network), `retrieve_logs`, `identify` |
 | OTA | `ota_images`, `ota_upload` (returns an `OtaUpload` to write chunks to), `ota_delete`, `ota_update` (a progress listener) |
 | Assistant | `assistant`, `set_assistant` (a key stays only for the same API address), `clear_assistant`: its model, kept in the store; never its key, which only `assistant_model` (Rust, for an agent in the same process) returns |

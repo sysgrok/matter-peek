@@ -20,15 +20,18 @@ use rs_matter::dm::clusters::decl::general_diagnostics::{
     GeneralDiagnosticsAttrReads as _, GeneralDiagnosticsAttrResponses as _,
 };
 use rs_matter::dm::clusters::decl::software_diagnostics::{
-    SoftwareDiagnosticsAttrReads as _, SoftwareDiagnosticsAttrResponses as _,
+    self as sw_diag, SoftwareDiagnosticsAttrResponses as _, ThreadMetricsStruct,
 };
 use rs_matter::dm::EndptId;
 use rs_matter::error::Error;
 use rs_matter::im::client::ImClient as _;
-use rs_matter::im::encoding::ReportDataResp;
+use rs_matter::im::encoding::{AttrResp, ReportDataResp};
+use rs_matter::im::{AttrPath, GenericPath};
+use rs_matter::tlv::{FromTLV, TLVArray};
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::Matter;
 
+use crate::api::ThreadMetric;
 use crate::model::{DeviceHealth, DiagSet, GeneralDiag, SoftwareDiag};
 
 extern crate alloc;
@@ -92,6 +95,7 @@ pub(crate) fn parse_health(resp: &ReportDataResp<'_>, which: DiagSet) -> DeviceH
             current_heap_free: first(reads.current_heap_free()),
             current_heap_used: first(reads.current_heap_used()),
             current_heap_high_watermark: first(reads.current_heap_high_watermark()),
+            thread_metrics: None,
         };
         if s != SoftwareDiag::default() {
             health.software = Some(s);
@@ -175,40 +179,127 @@ async fn read_general<C: Crypto>(
     Ok(diag)
 }
 
+/// The whole of Software Diagnostics, so that attributes a device does not
+/// have are left out rather than refused; with its threads' stacks, which a
+/// device sends item by item where the list does not fit a chunk.
 async fn read_software<C: Crypto>(
     matter: &Matter<'_>,
     crypto: C,
     fab_idx: NonZeroU8,
     node_id: u64,
 ) -> Result<SoftwareDiag, Error> {
-    let exchange = Exchange::initiate(matter, crypto, fab_idx, node_id).await?;
+    let paths = [AttrPath::from_gp(&GenericPath::new(
+        Some(ROOT_ENDPOINT),
+        Some(sw_diag::FULL_CLUSTER.id),
+        None,
+    ))];
 
+    let exchange = Exchange::initiate(matter, crypto, fab_idx, node_id).await?;
     let mut chunk = exchange
-        .read_with(|msg| {
-            msg.attr_requests()?
-                .software_diagnostics_read()
-                .current_heap_free(ROOT_ENDPOINT)?
-                .current_heap_used(ROOT_ENDPOINT)?
-                .current_heap_high_watermark(ROOT_ENDPOINT)?
-                .end()?
-                .fabric_filtered(true)?
-                .end()
-        })
+        .read_with(|msg| msg.attr_requests_from(&paths)?.fabric_filtered(true)?.end())
         .await?;
 
-    let diag = {
-        let resp = chunk.response()?;
-        let reads = resp.software_diagnostics_read_resp();
-        SoftwareDiag {
-            current_heap_free: first(reads.current_heap_free()),
-            current_heap_used: first(reads.current_heap_used()),
-            current_heap_high_watermark: first(reads.current_heap_high_watermark()),
+    let mut diag = SoftwareDiag::default();
+    loop {
+        {
+            let resp = chunk.response()?;
+            let reads = resp.software_diagnostics_read_resp();
+            diag.current_heap_free = first(reads.current_heap_free()).or(diag.current_heap_free);
+            diag.current_heap_used = first(reads.current_heap_used()).or(diag.current_heap_used);
+            diag.current_heap_high_watermark =
+                first(reads.current_heap_high_watermark()).or(diag.current_heap_high_watermark);
+            thread_metrics(&resp, &mut diag.thread_metrics);
         }
-    };
 
-    while let Some(next) = chunk.complete().await? {
-        chunk = next;
+        match chunk.complete().await? {
+            Some(next) => chunk = next,
+            None => break,
+        }
     }
 
     Ok(diag)
+}
+
+/// The ThreadMetrics in `resp`, onto `into`: a whole list replaces it, an item
+/// is appended to it.
+fn thread_metrics(resp: &ReportDataResp<'_>, into: &mut Option<alloc::vec::Vec<ThreadMetric>>) {
+    let reports = resp
+        .attr_reports
+        .iter()
+        .flat_map(|reports| reports.iter())
+        .filter_map(Result::ok);
+
+    for report in reports {
+        let AttrResp::Data(data) = report else {
+            continue;
+        };
+        if data.path.cluster != Some(sw_diag::FULL_CLUSTER.id)
+            || data.path.attr != Some(sw_diag::AttributeId::ThreadMetrics as _)
+        {
+            continue;
+        }
+
+        if data.path.list_index.is_some() {
+            if let Ok(item) = ThreadMetricsStruct::from_tlv(&data.data) {
+                into.get_or_insert_with(alloc::vec::Vec::new)
+                    .extend(thread_metric(&item));
+            }
+        } else if let Ok(list) = TLVArray::<ThreadMetricsStruct>::from_tlv(&data.data) {
+            *into = Some(
+                list.iter()
+                    .filter_map(|item| thread_metric(&item.ok()?))
+                    .collect(),
+            );
+        }
+    }
+}
+
+fn thread_metric(item: &ThreadMetricsStruct<'_>) -> Option<ThreadMetric> {
+    Some(ThreadMetric {
+        id: item.id().ok()?,
+        name: item
+            .name()
+            .ok()
+            .flatten()
+            .map(|name| alloc::string::ToString::to_string(&name)),
+        stack_size: item.stack_size().ok().flatten(),
+        stack_free_current: item.stack_free_current().ok().flatten(),
+        stack_free_minimum: item.stack_free_minimum().ok().flatten(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use rs_matter::tlv::TLVElement;
+
+    use super::*;
+
+    #[test]
+    fn thread_metric_with_every_field() {
+        // id 7, name "main", stack free now 1024, least free 512, size 4096.
+        let tlv = [
+            0x15, 0x24, 0x00, 0x07, 0x2C, 0x01, 0x04, b'm', b'a', b'i', b'n', 0x25, 0x02, 0x00,
+            0x04, 0x25, 0x03, 0x00, 0x02, 0x25, 0x04, 0x00, 0x10, 0x18,
+        ];
+        let item = ThreadMetricsStruct::from_tlv(&TLVElement::new(&tlv)).unwrap();
+
+        let metric = thread_metric(&item).unwrap();
+        assert_eq!(metric.id, 7);
+        assert_eq!(metric.name.as_deref(), Some("main"));
+        assert_eq!(metric.stack_free_current, Some(1024));
+        assert_eq!(metric.stack_free_minimum, Some(512));
+        assert_eq!(metric.stack_size, Some(4096));
+        assert_eq!(metric.stack_peak(), Some(3584));
+
+        // Only the id and the name, as some devices send them.
+        let tlv = [
+            0x15, 0x24, 0x00, 0x09, 0x2C, 0x01, 0x03, b'I', b'D', b'L', 0x18,
+        ];
+        let item = ThreadMetricsStruct::from_tlv(&TLVElement::new(&tlv)).unwrap();
+        let metric = thread_metric(&item).unwrap();
+        assert_eq!(
+            (metric.id, metric.stack_size, metric.stack_peak()),
+            (9, None, None)
+        );
+    }
 }

@@ -245,6 +245,9 @@ impl DeviceHealth {
             base.current_heap_high_watermark = s
                 .current_heap_high_watermark
                 .or(base.current_heap_high_watermark);
+            if s.thread_metrics.is_some() {
+                base.thread_metrics = s.thread_metrics;
+            }
         }
     }
 }
@@ -262,12 +265,51 @@ pub struct GeneralDiag {
 }
 
 /// Part of the Software Diagnostics cluster (`0x0034`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SoftwareDiag {
     pub current_heap_free: Option<u64>,
     pub current_heap_used: Option<u64>,
     pub current_heap_high_watermark: Option<u64>,
+    /// The threads (tasks) of its software and their stacks, where it says;
+    /// only a one-shot read (`peek_device`) asks for them.
+    #[serde(default)]
+    pub thread_metrics: Option<Vec<ThreadMetric>>,
+}
+
+/// A thread (task) of a device's software, as Software Diagnostics' Thread
+/// Metrics give it; sizes in bytes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ThreadMetric {
+    pub id: u64,
+    pub name: Option<String>,
+    pub stack_size: Option<u32>,
+    /// Free now.
+    pub stack_free_current: Option<u32>,
+    /// The least free since it booted.
+    pub stack_free_minimum: Option<u32>,
+}
+
+impl ThreadMetric {
+    /// The most of its stack it used since it booted: its size less the least
+    /// free.
+    pub fn stack_peak(&self) -> Option<u32> {
+        Some(self.stack_size?.saturating_sub(self.stack_free_minimum?))
+    }
+
+    /// How it ranks by the stack it has to spare, the least first: by the
+    /// share of its stack it never used, else by the bytes it never used.
+    pub fn spare_rank(&self) -> (u8, u64) {
+        match (
+            self.stack_size.filter(|size| *size > 0),
+            self.stack_free_minimum,
+        ) {
+            (Some(size), Some(least)) => (0, least as u64 * 1000 / size as u64),
+            (None, Some(least)) => (1, least as u64),
+            _ => (2, 0),
+        }
+    }
 }
 
 /// The state of a live health subscription.

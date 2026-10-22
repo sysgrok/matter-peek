@@ -194,7 +194,9 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
             "peek_device",
             "Re-address a listed device by its node id over a fresh CASE \
              session (no re-commissioning) and read its health diagnostics \
-             (uptime, reboot count, heap).",
+             (uptime, reboot count, heap, and the threads/tasks of its \
+             software with their stack size, peak use and free stack, where \
+             the device reports them).",
             json!({
                 "type": "object",
                 "properties": {

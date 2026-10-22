@@ -1266,11 +1266,60 @@ fn health_text(health: &api::DeviceHealth) -> String {
         ));
     }
 
-    if parts.is_empty() {
-        "(no health data)".into()
+    let mut text = if parts.is_empty() {
+        "(no health data)".to_string()
     } else {
         parts.join("; ")
+    };
+    if let Some(threads) = health
+        .software
+        .as_ref()
+        .and_then(|s| s.thread_metrics.as_ref())
+    {
+        text.push('\n');
+        text.push_str(&threads_text(threads));
     }
+
+    text
+}
+
+/// The threads (tasks) of a device's software: the one with the least stack
+/// to spare first.
+fn threads_text(threads: &[api::ThreadMetric]) -> String {
+    if threads.is_empty() {
+        return "Tasks: none reported".into();
+    }
+
+    let mut threads: Vec<&api::ThreadMetric> = threads.iter().collect();
+    threads.sort_by_key(|t| t.spare_rank());
+
+    let bytes = |v: Option<u32>| v.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
+    let mut lines = vec![format!(
+        "Tasks ({}):\n  {:<10} {:>8} {:>15} {:>10} {:>9}",
+        threads.len(),
+        "NAME",
+        "STACK",
+        "PEAK USE",
+        "LEAST FREE",
+        "FREE NOW"
+    )];
+    for t in threads {
+        let name = t.name.clone().unwrap_or_else(|| format!("#{}", t.id));
+        let peak = match (t.stack_peak(), t.stack_size) {
+            (Some(peak), Some(size)) if size > 0 => {
+                format!("{peak} ({}%)", peak as u64 * 100 / size as u64)
+            }
+            (peak, _) => bytes(peak),
+        };
+        lines.push(format!(
+            "  {name:<10} {:>8} {peak:>15} {:>10} {:>9}",
+            bytes(t.stack_size),
+            bytes(t.stack_free_minimum),
+            bytes(t.stack_free_current)
+        ));
+    }
+
+    lines.join("\n")
 }
 
 fn ota_progress_text(progress: &api::OtaProgress) -> String {

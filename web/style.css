@@ -313,6 +313,37 @@ pre.log-text { max-height: 70vh; margin: 0; padding: .75rem 0; overflow: auto; b
 .pill.is-up::before { opacity: 1; box-shadow: 0 0 0 3px hsla(var(--bulma-success-h), var(--bulma-success-s), var(--bulma-success-l), .25); }
 .net-tabs a { gap: .1rem; }
 .net-count { margin-left: .45rem; min-width: 1.4rem; padding: 0 .4rem; border-radius: 999px; background: var(--bulma-background); font-size: .75rem; text-align: center; }
+/* A device's tasks and heap. */
+.tasks-section { margin-bottom: 2rem; }
+.tasks-section-title { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; margin-bottom: .75rem; font-weight: 600; color: var(--bulma-text-strong); }
+.tasks-section-hint { font-size: .8rem; font-weight: 400; color: var(--bulma-text-weak); }
+.tasks-note, .tasks-error { display: flex; align-items: flex-start; gap: .55rem; margin-bottom: .75rem; padding: .7rem .85rem; border-radius: 10px; font-size: .85rem; background: hsla(var(--info-hsl), .1); }
+.tasks-note > svg { flex: none; margin-top: .1rem; color: var(--bulma-info); }
+.tasks-error { background: hsla(var(--danger-hsl), .1); }
+.tasks-error > svg { flex: none; margin-top: .1rem; color: var(--bulma-danger); }
+.heap-card { padding: 1rem 1.1rem; border: 1px solid var(--bulma-border); border-radius: var(--bulma-radius-large); background: var(--bulma-scheme-main); }
+.heap-figures { display: flex; flex-wrap: wrap; gap: .5rem 2rem; margin-top: .8rem; }
+.heap-figure { display: flex; flex-direction: column; }
+.task-list { border: 1px solid var(--bulma-border); border-radius: var(--bulma-radius-large); overflow: hidden; background: var(--bulma-scheme-main); }
+.task-row { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem 1.25rem; padding: .7rem .9rem; }
+.task-row + .task-row { border-top: 1px solid var(--bulma-border-weak); }
+.task-name { flex: 1 1 10rem; min-width: 0; display: flex; align-items: baseline; gap: .5rem; }
+.task-name-text { font-weight: 600; color: var(--bulma-text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-id { font-size: .75rem; color: var(--bulma-text-weak); }
+.task-stack { flex: 2 1 18rem; display: flex; align-items: center; gap: .7rem; min-width: 0; }
+.task-percent { flex: none; width: 2.6rem; text-align: right; font-size: .85rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.task-figures { font-size: .8rem; color: var(--bulma-text-weak); }
+.stack-bar { position: relative; flex: 0 0 8rem; height: .5rem; border-radius: 999px; background: var(--bulma-background); overflow: visible; }
+.stack-bar.is-wide { flex: none; width: 100%; height: .6rem; }
+.stack-bar-fill { display: block; height: 100%; border-radius: inherit; }
+.stack-bar-mark { position: absolute; top: -.2rem; bottom: -.2rem; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--bulma-text-weak); }
+.stack-bar-fill.is-fine { background: var(--bulma-success); }
+.stack-bar-fill.is-tight { background: var(--bulma-warning); }
+.stack-bar-fill.is-critical { background: var(--bulma-danger); }
+.task-percent.is-fine { color: var(--bulma-success); }
+.task-percent.is-tight { color: var(--bulma-warning-dark, var(--bulma-warning)); }
+.task-percent.is-critical { color: var(--bulma-danger); }
+
 .net-section { margin-bottom: 2rem; }
 .net-section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem; margin-bottom: .75rem; }
 .net-section-title { display: flex; align-items: center; flex-wrap: wrap; font-weight: 600; color: var(--bulma-text-strong); }

@@ -23,6 +23,17 @@ impl DiagSet {
         wifi: true,
         ethernet: true,
     };
+
+    /// What a live subscription follows: General Diagnostics. The rest is
+    /// read when asked for; Software Diagnostics' thread metrics, for one,
+    /// change all the time.
+    pub const LIVE: Self = Self {
+        general: true,
+        software: false,
+        thread: false,
+        wifi: false,
+        ethernet: false,
+    };
 }
 
 /// A device the controller has commissioned and can address.

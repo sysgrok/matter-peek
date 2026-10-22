@@ -206,7 +206,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         let subscription = self.controller.subscribe_health(
             &self.reports,
             handle,
-            DiagSet::ALL,
+            DiagSet::LIVE,
             &retry,
             |health| with_watch(&mut |watch| watch.report(node_id, health.clone())),
             |state| {

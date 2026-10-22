@@ -24,6 +24,7 @@ mod camera;
 mod commission;
 mod devices;
 mod icons;
+mod memory;
 mod network;
 mod ui;
 mod updates;
@@ -126,6 +127,8 @@ enum Ask {
 enum Msg {
     SelectTab(Tab),
     Assistant(AssistantMsg),
+    /// In a device's memory popup.
+    Memory(memory::MemoryMsg),
     /// Open or close the navigation drawer (on phones).
     ToggleDrawer,
     Ask(Ask),
@@ -340,6 +343,8 @@ struct App {
     ota_status: HashMap<u64, String>,
     /// The logs popup, when open.
     logs: Option<LogsView>,
+    /// The memory popup, while open.
+    memory: Option<memory::MemoryView>,
     /// The network popup, when open.
     network_view: Option<NetworkView>,
     /// The Assistant page.
@@ -411,6 +416,7 @@ impl Component for App {
             ota_choice: HashMap::new(),
             ota_status: HashMap::new(),
             logs: None,
+            memory: None,
             network_view: None,
             assistant: Assistant::default(),
             chat_scroll: NodeRef::default(),
@@ -443,6 +449,7 @@ impl Component for App {
                 true
             }
             Msg::Assistant(msg) => self.update_assistant(ctx, msg),
+            Msg::Memory(msg) => self.update_memory(ctx, msg),
             Msg::ToggleDrawer => {
                 self.drawer_open = !self.drawer_open;
                 true
@@ -1251,6 +1258,7 @@ impl Component for App {
                 { self.view_discover_modal(link) }
                 { self.view_camera_modal(link) }
                 { self.view_logs_modal(link) }
+                { self.view_memory_modal(link) }
                 { self.view_settings_modal(link) }
                 { self.view_network_modal(link) }
                 { self.view_ask(link) }

@@ -226,6 +226,9 @@ impl App {
                         { ui::icon_button(Icon::Logs, "Logs", classes!("is-small", "is-soft"), offline,
                             Some("Retrieve its diagnostic logs"),
                             link.callback(move |_| Msg::OpenLogs(node_id))) }
+                        { ui::icon_button(Icon::Chip, "Memory", classes!("is-small", "is-soft"), offline,
+                            Some("Its heap, and the stacks of its tasks"),
+                            link.callback(move |_| Msg::Memory(crate::memory::MemoryMsg::Open(node_id)))) }
                     </div>
                     <div class="device-actions-end">
                         if !d.remembered {
@@ -251,7 +254,6 @@ impl App {
         let default = LiveSub::default();
         let health = &sub.unwrap_or(&default).health;
         let g = health.general.unwrap_or_default();
-        let sw = health.software.unwrap_or_default();
 
         let tiles = [
             (Icon::Clock, "Uptime", g.up_time_secs.map(display::duration)),
@@ -264,13 +266,6 @@ impl App {
                 Icon::Timer,
                 "Operating",
                 g.total_operational_hours.map(|hours| format!("{hours} h")),
-            ),
-            (Icon::Chip, "Heap free", sw.current_heap_free.map(ui::bytes)),
-            (Icon::Chip, "Heap used", sw.current_heap_used.map(ui::bytes)),
-            (
-                Icon::Chip,
-                "Heap peak",
-                sw.current_heap_high_watermark.map(ui::bytes),
             ),
         ]
         .into_iter()
@@ -506,7 +501,7 @@ impl App {
     }
 
     /// The title of a listed device, else its node ID.
-    fn device_title(&self, node_id: u64) -> String {
+    pub(crate) fn device_title(&self, node_id: u64) -> String {
         self.stored
             .iter()
             .find(|d| d.handle.node_id == node_id)
