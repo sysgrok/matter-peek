@@ -74,9 +74,9 @@ periodically, like the server), so to share the store with the web UI, run
 
 | Tools | Access |
 |-------|--------|
-| `discover`, `list_devices`, `peek_device`, `read_network`, `thread_mesh`, `thread_findings`, `retrieve_logs`, `read_qr_image`, `ota_images`, `ota_updates`, `commissioning_window` | read-only |
+| `discover`, `list_devices`, `list_fabrics`, `peek_device`, `read_network`, `thread_mesh`, `thread_findings`, `retrieve_logs`, `read_qr_image`, `ota_images`, `ota_updates`, `commissioning_window` | read-only |
 | `identify` | acts on the device (it blinks); not read-only, so agents ask first |
-| `commission`, `decommission`, `remember`, `set_tags`, `sync`, `add_network`, `remove_network`, `connect_network`, `reorder_network`, `ota_upload`, `ota_delete`, `ota_update`, `open_commissioning_window`, `close_commissioning_window` | **mutating** |
+| `commission`, `decommission`, `remember`, `set_tags`, `sync`, `add_network`, `remove_network`, `connect_network`, `reorder_network`, `ota_upload`, `ota_delete`, `ota_update`, `open_commissioning_window`, `close_commissioning_window`, `remove_device_fabric`, `create_fabric`, `rename_fabric`, `set_default_fabric`, `delete_fabric` | **mutating** |
 
 The mutating tools touch real devices, so only `--allow-mutate` offers them:
 without it they are hidden from `tools/list` and rejected at `tools/call`. The
@@ -102,6 +102,21 @@ To see what a strong model makes of the tools alone, `scripts/claude-eval.sh`
 runs Claude Code with only these tools: no auto-memory, CLAUDE.md, user
 settings or Claude Code tools of its own.
 
+### Fabrics: several homes
+
+matter-peek keeps devices on fabrics of its own, each with a root CA of its
+own and a name: homes, customers, or test and production apart. One is the
+default, and can't be deleted. The web UI shows one fabric at a time (picked
+at the top, remembered by the browser): its devices, the Thread mesh of its
+devices, and the fabric a commission puts a device into. The CLI works in
+`--fabric <name|#index|all>` (or `MATTER_PEEK_FABRIC`), else the default, and
+manages them with `matter-peek fabric list|create|rename|default|delete`
+(`delete --decommission` or `--forget` for a fabric with devices); MCP has
+`list_fabrics` and `create/rename/set_default/delete_fabric`, and a `fabric`
+argument on the tools that list or commission (`mcp --fabric` sets the
+default). Devices keep their node IDs unique across fabrics, so every tool
+about one device names it by node ID alone.
+
 ### Sharing a device with another ecosystem
 
 A device on our fabric can join another controller's too (Google Home, Home
@@ -118,7 +133,9 @@ The fabrics a device is on (the controllers it belongs to: ours, Google,
 Apple, Home Assistant, ... by their vendor, or the label their controller set)
 come with its health: live on the device card (a click shows each one's
 vendor, fabric ID and the device's node ID there), in `matter-peek peek
-<node>` and in the MCP tool `peek_device`.
+<node>` and in the MCP tool `peek_device`. Another controller's fabric can be
+removed from a device (the popup, `matter-peek remove-fabric <node> <index>`,
+MCP `remove_device_fabric`); ours is removed by decommissioning.
 
 ### Thread mesh
 

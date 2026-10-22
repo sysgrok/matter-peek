@@ -44,6 +44,10 @@ struct Cli {
     /// Print the API's responses and events as JSON.
     #[arg(long, global = true)]
     json: bool,
+    /// Work in this fabric of ours: its name, its index (#2), or all. Else
+    /// the default one.
+    #[arg(long, global = true, env = "MATTER_PEEK_FABRIC", value_name = "FABRIC")]
+    fabric: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -52,9 +56,16 @@ struct Cli {
 enum Command {
     /// List the devices on our fabric. Without --server, that is the remembered
     /// ones: the others are found by `sync`, which a server runs on its own.
-    List,
-    /// Sync the device list with the devices on our fabric.
+    List {
+        /// On all our fabrics.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Sync the device list with the devices on our fabrics.
     Sync,
+    /// Our fabrics: the "homes" devices are commissioned into.
+    #[command(subcommand)]
+    Fabric(FabricCmd),
     /// Find the commissionable devices on the local network.
     Discover {
         /// A discriminator or a setup code, to narrow to one device.
@@ -153,6 +164,9 @@ enum Command {
         #[arg(default_value_t = 3)]
         secs: u16,
     },
+    /// Remove another controller's fabric from a device, by the device's index
+    /// of it (as `peek` lists the fabrics): that controller loses the device.
+    RemoveFabric { node: Node, index: u8 },
     /// Remove our fabric from a device and drop it from the list.
     Decommission {
         node: Node,
@@ -319,6 +333,30 @@ enum ThreadView {
 }
 
 #[derive(Subcommand)]
+enum FabricCmd {
+    /// List our fabrics.
+    List,
+    /// Create a fabric, with a root CA of its own.
+    Create { name: String },
+    /// Rename a fabric (by name or #index).
+    Rename { fabric: String, name: String },
+    /// Make a fabric the default: what a command without --fabric works in.
+    Default { fabric: String },
+    /// Delete a fabric; not the default. Refused while it has devices, unless
+    /// --decommission or --forget.
+    Delete {
+        fabric: String,
+        /// Decommission its devices first.
+        #[arg(long, conflicts_with = "forget")]
+        decommission: bool,
+        /// Forget its devices: they keep the dead fabric until another
+        /// controller removes it.
+        #[arg(long)]
+        forget: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Ota {
     /// List the stored OTA images.
     Images,
@@ -391,10 +429,16 @@ fn main() -> ExitCode {
 
 /// Run the command; `Ok(false)` when the API answered with an error.
 async fn run(cli: Cli) -> io::Result<bool> {
+    let fabric = cli
+        .fabric
+        .as_deref()
+        .map(api::FabricRef::parse)
+        .unwrap_or_default();
+
     // Its own connection, for as long as stdin is open.
     match cli.command {
         Command::Mcp { allow_mutate } => {
-            mcp::serve(cli.server, allow_mutate).await?;
+            mcp::serve(cli.server, fabric, allow_mutate).await?;
             return Ok(true);
         }
         Command::Chat {
@@ -408,6 +452,7 @@ async fn run(cli: Cli) -> io::Result<bool> {
                 show_thinking,
                 verbose,
                 allow_mutate,
+                fabric: fabric.clone(),
             };
             return chat::chat(cli.server, args).await;
         }
@@ -427,8 +472,45 @@ async fn run(cli: Cli) -> io::Result<bool> {
     let out = Out { json: cli.json };
 
     match cli.command {
-        Command::List => devices(&out, call(&conn, &out, wire::Request::ListDevices).await?),
-        Command::Sync => devices(&out, call(&conn, &out, wire::Request::Sync).await?),
+        Command::List { all } => {
+            let fabric = if all { api::FabricRef::All } else { fabric };
+            let request = wire::Request::ListDevices { fabric };
+
+            devices(&out, call(&conn, &out, request).await?)
+        }
+        Command::Sync => devices(
+            &out,
+            call(&conn, &out, wire::Request::Sync { fabric }).await?,
+        ),
+        Command::Fabric(cmd) => {
+            let request = match cmd {
+                FabricCmd::List => wire::Request::Fabrics,
+                FabricCmd::Create { name } => wire::Request::CreateFabric { name },
+                FabricCmd::Rename { fabric, name } => wire::Request::RenameFabric {
+                    fabric: api::FabricRef::parse(&fabric),
+                    name,
+                },
+                FabricCmd::Default { fabric } => wire::Request::SetDefaultFabric {
+                    fabric: api::FabricRef::parse(&fabric),
+                },
+                FabricCmd::Delete {
+                    fabric,
+                    decommission,
+                    forget,
+                } => wire::Request::DeleteFabric {
+                    fabric: api::FabricRef::parse(&fabric),
+                    deletion: if decommission {
+                        api::FabricDeletion::Decommission
+                    } else if forget {
+                        api::FabricDeletion::Forget
+                    } else {
+                        api::FabricDeletion::Refuse
+                    },
+                },
+            };
+
+            fabrics(&out, call(&conn, &out, request).await?)
+        }
         Command::Discover { filter, max } => {
             let (discriminator, setup_code) = discover_filter(filter);
             let request = wire::Request::Discover {
@@ -507,6 +589,7 @@ async fn run(cli: Cli) -> io::Result<bool> {
                 via,
                 setup_code,
                 remember,
+                fabric,
             };
 
             Ok(match call(&conn, &out, request).await? {
@@ -635,6 +718,25 @@ async fn run(cli: Cli) -> io::Result<bool> {
 
             window(&out, call(&conn, &out, request).await?)
         }
+        Command::RemoveFabric { node, index } => {
+            let request = wire::Request::RemoveDeviceFabric {
+                node_id: node.0,
+                fabric_index: index,
+            };
+
+            match call(&conn, &out, request).await? {
+                Some(wire::Response::Peek { health, .. }) => {
+                    if !out.json {
+                        println!("Removed fabric #{index}.");
+                        if let Some(fabrics) = &health.fabrics {
+                            println!("{}", fabrics_text(fabrics, health.supported_fabrics));
+                        }
+                    }
+                    Ok(true)
+                }
+                other => Ok(other.is_some()),
+            }
+        }
         Command::Decommission { node, force } => {
             let request = wire::Request::Decommission {
                 node_id: node.0,
@@ -657,7 +759,7 @@ async fn run(cli: Cli) -> io::Result<bool> {
         Command::Ota(Ota::Update { node, name }) => update(&conn, &out, node.0, name).await,
         Command::Assistant { action } => assistant(&conn, &out, action).await,
         Command::Thread { view } => {
-            let response = call(&conn, &out, wire::Request::ReadThreadMesh).await?;
+            let response = call(&conn, &out, wire::Request::ReadThreadMesh { fabric }).await?;
             if let Some(wire::Response::ThreadMesh { mesh }) = &response {
                 if !out.json {
                     let findings_only = matches!(view, Some(ThreadView::Findings));
@@ -827,6 +929,30 @@ fn ok(out: &Out, response: Option<wire::Response>, text: &str) -> io::Result<boo
     Ok(response.is_some())
 }
 
+fn fabrics(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
+    let Some(wire::Response::Fabrics { fabrics }) = response else {
+        return Ok(response.is_some());
+    };
+
+    if out.json {
+        return Ok(true);
+    }
+
+    for fabric in fabrics {
+        println!(
+            "#{:<3} {:<24} fabric {}  our node {}  {} device(s){}",
+            fabric.index,
+            fabric.name,
+            display::hex_u64(fabric.fabric_id),
+            display::hex_u64(fabric.node_id),
+            fabric.devices,
+            if fabric.default { "  (default)" } else { "" }
+        );
+    }
+
+    Ok(true)
+}
+
 fn devices(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
     let Some(wire::Response::Devices { devices, notice }) = response else {
         return Ok(response.is_some());
@@ -842,6 +968,10 @@ fn devices(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
     if devices.is_empty() {
         println!("No devices on our fabric.");
     }
+    // Which fabric each is on, when they are on several.
+    let fabrics = devices
+        .iter()
+        .any(|d| d.handle.fabric_index != devices[0].handle.fabric_index);
 
     for d in &devices {
         let mut line = format!(
@@ -850,6 +980,9 @@ fn devices(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
             d.title(),
             d.vendor().unwrap_or_else(|| "unknown".into())
         );
+        if fabrics {
+            line = format!("[{}]  {line}", d.fabric);
+        }
         if d.is_test_vendor() {
             line.push_str(" (test vendor)");
         }

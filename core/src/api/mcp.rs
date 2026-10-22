@@ -25,7 +25,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use crate::api::{self, display, wire};
+use crate::api::{self, display, wire, FabricRef};
 
 use jsonrpc::Response;
 
@@ -53,19 +53,28 @@ const MUTATING_TOOLS: &[&str] = &[
     "reorder_network",
     "open_commissioning_window",
     "close_commissioning_window",
+    "remove_device_fabric",
+    "create_fabric",
+    "rename_fabric",
+    "set_default_fabric",
+    "delete_fabric",
 ];
 
 /// What an agent should know about the tools, for its instructions.
 pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-only tools \
      (discover, list_devices, peek_device, read_network, retrieve_logs, identify, \
-     read_qr_image, ota_images, ota_updates, commissioning_window) are always \
-     available. The tools that change devices \
+     read_qr_image, ota_images, ota_updates, commissioning_window, \
+     list_fabrics) are always available. The tools that change devices \
      or the stored state (commission, decommission, remember, set_tags, \
      sync, ota_upload, ota_delete, ota_update, add_network, remove_network, \
-     connect_network, reorder_network) are available only if the \
-     operator allowed them (e.g. `matter-peek mcp --allow-mutate`). \
-     A device is named by its node_id: the number list_devices gives, or its \
-     hex form (\"0x1B67B\"). A failed tool says why in plain words, with \
+     connect_network, reorder_network, open/close_commissioning_window, \
+     remove_device_fabric, create/rename/set_default/delete_fabric) are \
+     available only if the operator allowed them (e.g. `matter-peek mcp \
+     --allow-mutate`). Our devices are on fabrics of ours (\"homes\", see \
+     list_fabrics); the tools that list or commission take an optional \
+     `fabric`, else the default one. A device is named by its node_id \
+     across all of them: the number list_devices gives, or its hex form \
+     (\"0x1B67B\"). A failed tool says why in plain words, with \
      the error code in parentheses: pass that on to the user, with what they \
      can do about it.";
 
@@ -77,6 +86,8 @@ const ACTING_TOOLS: &[&str] = &["identify"];
 /// fabric, its network or its firmware, or lose an image.
 const DESTRUCTIVE_TOOLS: &[&str] = &[
     "decommission",
+    "delete_fabric",
+    "remove_device_fabric",
     "ota_delete",
     "ota_update",
     "add_network",
@@ -187,10 +198,20 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
         ),
         tool(
             "list_devices",
-            "List the devices on our fabric, with their identity, versions, fingerprint, \
-             tags, whether they are online and whether they are remembered. \
-             Remembered devices are listed also while offline; the others only \
-             once commissioned or found by a sync since the server started.",
+            "List the devices on a fabric of ours (the default one unless \
+             `fabric` names another, or all), with the fabric they are on, \
+             their identity, versions, fingerprint, tags, whether they are \
+             online and whether they are remembered. Remembered devices are \
+             listed also while offline; the others only once commissioned or \
+             found by a sync since the server started.",
+            json!({ "type": "object", "properties": { "fabric": fabric_schema() } }),
+        ),
+        tool(
+            "list_fabrics",
+            "List our fabrics: the \"homes\" devices are commissioned into, each \
+             with a root CA of its own: name, index, fabric ID, our node ID on \
+             it, how many devices are on it, and which is the default (what a \
+             tool naming no fabric gets).",
             json!({ "type": "object", "properties": {} }),
         ),
         tool(
@@ -242,8 +263,9 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
              signal each way), the routes to routers with no known link, the \
              border routers and the findings. Only nodes our Thread devices \
              report or the LAN advertises are known; whether a sleepy device \
-             uses CSL is not. Reads each Thread device in turn: a few seconds.",
-            json!({ "type": "object", "properties": {} }),
+             uses CSL is not. Reads each Thread device of `fabric` (default: \
+             the default fabric; or all) in turn: a few seconds.",
+            json!({ "type": "object", "properties": { "fabric": fabric_schema() } }),
         ),
         tool(
             "thread_findings",
@@ -254,8 +276,9 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
              credentials, no route from this machine to the Thread network. \
              With the networks and the nodes counted by role; for the nodes \
              themselves (which are sleepy, whose parent is whose), use \
-             thread_mesh.",
-            json!({ "type": "object", "properties": {} }),
+             thread_mesh. Of the Thread devices of `fabric` (default: the \
+             default fabric; or all).",
+            json!({ "type": "object", "properties": { "fabric": fabric_schema() } }),
         ),
         tool(
             "retrieve_logs",
@@ -338,7 +361,8 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
     if caps.allow_mutate {
         tools.push(tool(
             "commission",
-            "Commission a Matter device onto our fabric, reaching it over the \
+            "Commission a Matter device onto a fabric of ours (`fabric`, else \
+             the default one), reaching it over the \
              network at peer_addr, or over Bluetooth LE with ble=true (then \
              giving it the Wi-Fi or Thread network to join). It is listed from \
              then on. With remember=true a record of it is also kept (see \
@@ -353,7 +377,8 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
                     "wifi_password": { "type": "string", "description": "The password of that Wi-Fi network." },
                     "thread_dataset": { "type": "string", "description": "Over Bluetooth: the Thread network the device joins, as its operational dataset in hex." },
                     "setup_code": { "type": "string", "description": "Setup passcode, manual pairing code or MT: QR code payload (default 20202021)." },
-                    "remember": { "type": "boolean", "description": "Also keep a record of the device. Default false." }
+                    "remember": { "type": "boolean", "description": "Also keep a record of the device. Default false." },
+                    "fabric": fabric_schema()
                 }
             }),
         ));
@@ -371,6 +396,23 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
                     "force": { "type": "boolean", "description": "Drop it from the list without contacting the device. Default false." }
                 },
                 "required": ["node_id"]
+            }),
+        ));
+        tools.push(tool(
+            "remove_device_fabric",
+            "Remove another controller's fabric from a device, by the device's \
+             index of it (`index` of the fabrics peek_device lists): that \
+             controller (Google Home, Home Assistant, Apple Home, ...) loses the \
+             device until it is shared with it again. Frees a fabric slot. Not \
+             our own fabric: that is decommission. Returns the device's fabrics \
+             then. MUTATING — alters the device's fabric table.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node_id": node_id_schema(),
+                    "fabric_index": { "type": "integer", "description": "The device's index of the fabric to remove." }
+                },
+                "required": ["node_id", "fabric_index"]
             }),
         ));
         tools.push(tool(
@@ -455,10 +497,59 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
         ));
         tools.push(tool(
             "sync",
-            "Re-sync the stored device list with the devices on our fabric: add \
-             the ones not listed and refresh the others' identity. MUTATING — \
-             changes the stored device list.",
-            json!({ "type": "object", "properties": {} }),
+            "Re-sync the stored device list with the devices on our fabrics: \
+             add the ones not listed and refresh the others' identity; returns \
+             the devices on `fabric` (default: the default fabric; or all). \
+             MUTATING — changes the stored device list.",
+            json!({ "type": "object", "properties": { "fabric": fabric_schema() } }),
+        ));
+        tools.push(tool(
+            "create_fabric",
+            "Create a fabric of ours (a \"home\"), with a root CA of its own, to \
+             commission devices into. MUTATING.",
+            json!({
+                "type": "object",
+                "properties": { "name": { "type": "string", "description": "Its name, unique among ours (1 to 32 characters)." } },
+                "required": ["name"]
+            }),
+        ));
+        tools.push(tool(
+            "rename_fabric",
+            "Rename a fabric of ours. MUTATING.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "fabric": fabric_schema(),
+                    "name": { "type": "string", "description": "Its new name." }
+                },
+                "required": ["fabric", "name"]
+            }),
+        ));
+        tools.push(tool(
+            "set_default_fabric",
+            "Make a fabric of ours the default: what a tool naming no fabric \
+             gets. MUTATING.",
+            json!({
+                "type": "object",
+                "properties": { "fabric": fabric_schema() },
+                "required": ["fabric"]
+            }),
+        ));
+        tools.push(tool(
+            "delete_fabric",
+            "Delete a fabric of ours, with its root CA; not the default. Its \
+             devices: refused while there are any, unless devices=decommission \
+             (remove the fabric from each, as decommission) or devices=forget \
+             (drop them from the list; they keep the dead fabric in a slot \
+             until another controller removes it). MUTATING — can't be undone.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "fabric": fabric_schema(),
+                    "devices": { "type": "string", "enum": ["refuse", "decommission", "forget"], "description": "What becomes of its devices (default refuse)." }
+                },
+                "required": ["fabric"]
+            }),
         ));
         tools.push(tool(
             "ota_upload",
@@ -546,6 +637,12 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
 }
 
 /// A device, as the tools name it.
+/// A fabric of ours: by name, index (`#2`) or, where a tool takes several,
+/// `all`.
+fn fabric_schema() -> Value {
+    json!({ "type": "string", "description": "A fabric of ours: its name or index (\"#2\"); \"all\" for every one, where it makes sense. Default: the default fabric." })
+}
+
 fn node_id_schema() -> Value {
     json!({
         "type": ["integer", "string"],
@@ -687,8 +784,46 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
                 .map(str::to_string),
             max: args.get("max").and_then(Value::as_u64).unwrap_or(16) as u8,
         },
-        "list_devices" => wire::Request::ListDevices,
-        "sync" => wire::Request::Sync,
+        "list_devices" => wire::Request::ListDevices {
+            fabric: arg_fabric(args),
+        },
+        "list_fabrics" => wire::Request::Fabrics,
+        "create_fabric" => wire::Request::CreateFabric {
+            name: arg_str(args, "name")?,
+        },
+        "rename_fabric" => wire::Request::RenameFabric {
+            fabric: arg_one_fabric(args)?,
+            name: arg_str(args, "name")?,
+        },
+        "set_default_fabric" => wire::Request::SetDefaultFabric {
+            fabric: arg_one_fabric(args)?,
+        },
+        "delete_fabric" => wire::Request::DeleteFabric {
+            fabric: arg_one_fabric(args)?,
+            deletion: match args.get("devices").and_then(Value::as_str) {
+                None | Some("refuse") => api::FabricDeletion::Refuse,
+                Some("decommission") => api::FabricDeletion::Decommission,
+                Some("forget") => api::FabricDeletion::Forget,
+                Some(other) => {
+                    return Err((
+                        jsonrpc::INVALID_PARAMS,
+                        format!("'devices' is refuse, decommission or forget, not {other}"),
+                    ))
+                }
+            },
+        },
+        "sync" => wire::Request::Sync {
+            fabric: arg_fabric(args),
+        },
+        "remove_device_fabric" => wire::Request::RemoveDeviceFabric {
+            node_id: arg_node(args)?,
+            fabric_index: u8::try_from(arg_u64(args, "fabric_index")?).map_err(|_| {
+                (
+                    jsonrpc::INVALID_PARAMS,
+                    "'fabric_index' is 1 to 254".to_string(),
+                )
+            })?,
+        },
         "decommission" => wire::Request::Decommission {
             node_id: arg_node(args)?,
             force: args.get("force").and_then(Value::as_bool).unwrap_or(false),
@@ -721,7 +856,9 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
         "read_network" => wire::Request::ReadNetwork {
             node_id: arg_node(args)?,
         },
-        "thread_mesh" | "thread_findings" => wire::Request::ReadThreadMesh,
+        "thread_mesh" | "thread_findings" => wire::Request::ReadThreadMesh {
+            fabric: arg_fabric(args),
+        },
         "add_network" => wire::Request::ChangeNetwork {
             node_id: arg_node(args)?,
             endpoint: arg_endpoint(args)?,
@@ -792,6 +929,7 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
                 .get("remember")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            fabric: arg_fabric(args),
         },
         "set_tags" => wire::Request::SetTags {
             node_id: arg_node(args)?,
@@ -833,6 +971,26 @@ fn commission_via(args: &Value) -> Result<api::CommissionVia, ToolErr> {
         addr: opt_str("ble_addr"),
         network,
     })
+}
+
+/// The `fabric` argument: a name, an index (`#2`) or `all`; the default
+/// fabric without one.
+fn arg_fabric(args: &Value) -> FabricRef {
+    args.get("fabric")
+        .and_then(Value::as_str)
+        .map(FabricRef::parse)
+        .unwrap_or_default()
+}
+
+/// The `fabric` argument, which a tool needs.
+fn arg_one_fabric(args: &Value) -> Result<FabricRef, ToolErr> {
+    match arg_fabric(args) {
+        FabricRef::Default => Err((
+            jsonrpc::INVALID_PARAMS,
+            "missing 'fabric': its name or index".to_string(),
+        )),
+        fabric => Ok(fabric),
+    }
 }
 
 fn arg_u64(args: &Value, key: &str) -> Result<u64, ToolErr> {
@@ -942,6 +1100,14 @@ fn labelled(response: &wire::Response) -> Value {
             for (d, v) in ble_devices.iter().zip(entries(&mut value, "ble_devices")) {
                 v["vendor"] = json!(display::vendor_label(d.vendor_id, None));
                 v["product"] = json!(display::product_label(d.vendor_id, d.product_id, None));
+            }
+        }
+        wire::Response::Fabrics { fabrics } => {
+            for (f, v) in fabrics.iter().zip(entries(&mut value, "fabrics")) {
+                v["fabric_id"] = json!(display::hex_u64(f.fabric_id));
+                v["compressed_fabric_id"] = json!(display::hex_u64(f.compressed_fabric_id));
+                v["node_id"] = json!(display::hex_u64(f.node_id));
+                v["vendor"] = json!(display::vendor_label(f.vendor_id, None));
             }
         }
         wire::Response::CommissioningWindow { window } => {
@@ -1054,6 +1220,10 @@ fn labelled(response: &wire::Response) -> Value {
                 v["vendor"] = json!(display::vendor_label(fabric.vendor_id, None));
                 v["fabric"] = json!(display::hex_u64(fabric.fabric_id));
                 v["node"] = json!(display::hex_u64(fabric.node_id));
+                // Says who issued it, which `ours` and `name` tell more plainly.
+                if let Some(fabric) = v.as_object_mut() {
+                    fabric.remove("root_key");
+                }
             }
         }
         _ => {}

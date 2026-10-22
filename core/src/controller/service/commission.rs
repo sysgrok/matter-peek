@@ -17,8 +17,9 @@ use rs_matter::transport::network::Address;
 
 use crate::api::{
     CommissionListener, CommissionResult, CommissionStep, CommissionVia, Discovered,
-    DiscoveredDevice, NetworkCredentials, PeekError, StepStatus,
+    DiscoveredDevice, FabricRef, NetworkCredentials, PeekError, StepStatus,
 };
+use crate::fabrics::OurFabric;
 use crate::matter::CommissionFlow;
 use crate::model::CommissionOutcome;
 use crate::ota::OtaImageStore;
@@ -119,9 +120,11 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         via: &CommissionVia,
         setup_code: &str,
         remember: bool,
+        fabric: &FabricRef,
         progress: Option<&dyn CommissionListener>,
     ) -> Result<CommissionResult, PeekError> {
         let code = SetupCode::parse(setup_code).map_err(invalid_setup_code)?;
+        let fabric = self.our_fabric(fabric)?;
 
         let reach = match via {
             CommissionVia::Ip { addr } => Reach::Ip(
@@ -135,7 +138,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             },
         };
 
-        self.commission_flow(reach, code.passcode, remember, progress)
+        self.commission_flow(&fabric, reach, code.passcode, remember, progress)
             .await
     }
 
@@ -143,6 +146,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// then list the device and, with `remember`, keep a record of it.
     async fn commission_flow(
         &self,
+        fabric: &OurFabric,
         reach: Reach,
         passcode: u32,
         remember: bool,
@@ -182,7 +186,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 network,
             } => {
                 return match self
-                    .commission_ble(&filter, addr, network, passcode, device_node_id)
+                    .commission_ble(fabric, &filter, addr, network, passcode, device_node_id)
                     .await
                 {
                     Ok(outcome) => {
@@ -208,8 +212,8 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         let outcome = match self
             .controller
             .commission(
-                &self.ca,
-                self.fab_idx,
+                &fabric.ca,
+                fabric.fab_idx,
                 peer_addr,
                 passcode,
                 device_node_id,
@@ -258,6 +262,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     #[cfg(feature = "ble")]
     async fn commission_ble(
         &self,
+        fabric: &OurFabric,
         filter: &CommissionableFilter,
         addr: Option<rs_matter::transport::network::BtAddr>,
         network: Option<NetworkCredentials>,
@@ -284,8 +289,8 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         ble::commission_ble(
             self.matter,
             self.crypto,
-            &self.ca,
-            self.fab_idx,
+            &fabric.ca,
+            fabric.fab_idx,
             self.btp,
             filter,
             addr,
@@ -299,6 +304,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     #[cfg(not(feature = "ble"))]
     async fn commission_ble(
         &self,
+        _fabric: &OurFabric,
         _filter: &CommissionableFilter,
         _addr: Option<rs_matter::transport::network::BtAddr>,
         _network: Option<NetworkCredentials>,
@@ -318,10 +324,10 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         outcome: CommissionOutcome,
         remember: bool,
     ) -> Result<CommissionResult, PeekError> {
-        if let Err(e) = self
-            .matter
-            .with_state(|state| self.store.save_fabric(state.fabrics.fabric(self.fab_idx)?))
-        {
+        if let Err(e) = self.matter.with_state(|state| {
+            self.store
+                .save_fabric(state.fabrics.fabric(outcome.handle.fabric_index)?)
+        }) {
             error!("service: saving our fabric failed: {e:?}");
         }
 

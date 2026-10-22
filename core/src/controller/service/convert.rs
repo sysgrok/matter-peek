@@ -21,9 +21,15 @@ pub(super) fn handle(handle: DeviceHandle) -> api::DeviceHandle {
 
 /// A listed device; `online` is whether it is reachable as far as we know
 /// (`None` before the first sync), `remembered` whether it has a record.
-pub(super) fn device(d: StoredDevice, online: Option<bool>, remembered: bool) -> api::DeviceInfo {
+pub(super) fn device(
+    d: StoredDevice,
+    fabric: alloc::string::String,
+    online: Option<bool>,
+    remembered: bool,
+) -> api::DeviceInfo {
     api::DeviceInfo {
         handle: handle(d.handle),
+        fabric,
         unique_id: d.unique_id,
         serial_number: d.serial_number,
         node_label: d.node_label,

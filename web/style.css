@@ -653,3 +653,52 @@ pre.log-text { max-height: 70vh; margin: 0; padding: .75rem 0; overflow: auto; b
   .fabric-row { flex-wrap: wrap; }
   .fabric-ids { align-items: flex-start; width: 100%; padding-left: 3.1rem; }
 }
+
+/* Our fabrics: the switcher, its menu, the drawer's list and the popup */
+.fabric-dot { display: inline-block; flex: none; width: .65rem; height: .65rem; border-radius: 50%; background: var(--fabric-color); box-shadow: 0 0 0 2px hsla(0, 0%, 100%, .7); }
+.fabric-dot.is-color-0 { --fabric-color: #3b82f6; }
+.fabric-dot.is-color-1 { --fabric-color: #10b981; }
+.fabric-dot.is-color-2 { --fabric-color: #f59e0b; }
+.fabric-dot.is-color-3 { --fabric-color: #8b5cf6; }
+.fabric-dot.is-color-4 { --fabric-color: #ec4899; }
+.fabric-dot.is-color-5 { --fabric-color: #14b8a6; }
+.fabric-dot.is-color-6 { --fabric-color: #ef4444; }
+.fabric-dot.is-color-7 { --fabric-color: #64748b; }
+.fabric-switcher { position: relative; flex: none; margin-left: -1rem; }
+.fabric-switch { display: inline-flex; align-items: center; gap: .45rem; max-width: 14rem; padding: .3rem .6rem; border: 1px solid var(--bulma-border-weak); border-radius: 999px; background: var(--bulma-scheme-main); color: var(--bulma-text-strong); font: inherit; font-size: .85rem; font-weight: 600; cursor: pointer; }
+.fabric-switch:hover, .fabric-switch.is-open { background: var(--bulma-background); }
+.fabric-switch > svg { flex: none; color: var(--bulma-text-weak); }
+.fabric-switch-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fabric-menu-backdrop { position: fixed; inset: 0; z-index: 30; }
+.fabric-menu { position: absolute; top: calc(100% + .4rem); left: 0; z-index: 31; min-width: 16rem; padding: .4rem; border: 1px solid var(--bulma-border-weak); border-radius: 12px; background: var(--bulma-scheme-main); box-shadow: 0 12px 32px hsla(220, 30%, 10%, .18); }
+.fabric-menu-title { padding: .35rem .6rem .3rem; font-size: .68rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--bulma-text-weak); }
+.fabric-choice { display: flex; align-items: center; gap: .55rem; padding: .45rem .6rem; border-radius: 8px; color: var(--bulma-text); font-size: .88rem; cursor: pointer; }
+.fabric-choice:hover { background: var(--bulma-background); color: var(--bulma-text-strong); }
+.fabric-choice.is-active { background: hsla(var(--link-hsl), .1); color: var(--bulma-link); font-weight: 600; }
+.fabric-choice.is-manage { margin-top: .3rem; border-top: 1px solid var(--bulma-border-weak); border-radius: 0 0 8px 8px; color: var(--bulma-text-weak); }
+.fabric-choice.is-manage > svg { flex: none; }
+.fabric-choice-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fabric-choice-default { font-size: .7rem; color: var(--bulma-text-weak); }
+.fabric-choice-count { min-width: 1.4rem; padding: 0 .4rem; border-radius: 999px; background: var(--bulma-background); font-size: .72rem; text-align: center; color: var(--bulma-text-weak); }
+.drawer-fabrics { padding: .6rem .75rem; border-bottom: 1px solid var(--bulma-border-weak); }
+.commission-into { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+.commission-into-hint { font-size: .8rem; color: var(--bulma-text-weak); }
+.modal .modal-card.manage-card { width: min(720px, calc(100vw - 32px)); }
+.manage-intro { margin-bottom: .9rem; font-size: .85rem; color: var(--bulma-text-weak); }
+.manage-list { display: flex; flex-direction: column; gap: .6rem; }
+.manage-row { display: flex; align-items: flex-start; gap: .85rem; padding: .75rem .85rem; border: 1px solid var(--bulma-border-weak); border-radius: 12px; }
+.manage-row > .fabric-dot { margin-top: .4rem; }
+.manage-row.is-default { border-color: hsla(var(--link-hsl), .45); }
+.manage-main { flex: 1; min-width: 0; }
+.manage-title { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; font-weight: 600; color: var(--bulma-text-strong); }
+.manage-sub { margin-top: .15rem; font-size: .72rem; color: var(--bulma-text-weak); overflow-wrap: anywhere; }
+.manage-rename, .manage-create { display: flex; flex-wrap: wrap; gap: .5rem; }
+.manage-rename .input, .manage-create .input { flex: 1; min-width: 10rem; }
+.manage-create { margin-top: 1rem; }
+.manage-delete { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .6rem; font-size: .82rem; }
+.manage-actions { display: flex; flex: none; gap: .2rem; }
+@media (max-width: 768px) {
+  .appbar-inner .fabric-switcher { margin-left: auto; }
+  .fabric-switch { max-width: 9.5rem; }
+  .fabric-menu { left: auto; right: 0; }
+}

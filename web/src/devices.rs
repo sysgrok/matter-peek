@@ -36,12 +36,16 @@ impl App {
                 )
             })
             .count();
+        let fabric = self
+            .visible_fabric()
+            .map(|fabric| fabric.name.clone())
+            .unwrap_or_else(|| "our fabric".into());
         let subtitle = if count == 0 {
-            html! { "The devices on our fabric, live" }
+            html! { format!("The devices on {fabric}, live") }
         } else {
             html! {
                 <>
-                    { format!("{count} device{} on our fabric", if count == 1 { "" } else { "s" }) }
+                    { format!("{count} device{} on {fabric}", if count == 1 { "" } else { "s" }) }
                     <span class="dot-sep"></span>
                     <span class="live-count">{ format!("{live} live") }</span>
                 </>

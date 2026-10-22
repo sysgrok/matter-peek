@@ -7,7 +7,7 @@ use embassy_time::{Duration, Instant};
 use rs_matter::crypto::Crypto;
 use rs_matter::persist::KvBlobStore;
 
-use crate::api::{BorderRouter, NetworkKind, PeekError, ThreadMesh, UnreadDevice};
+use crate::api::{BorderRouter, FabricRef, NetworkKind, PeekError, ThreadMesh, UnreadDevice};
 use crate::explain::describe;
 use crate::mesh::{self, DeviceRead, HostRoute, MeshInput};
 use crate::ota::OtaImageStore;
@@ -18,11 +18,14 @@ use super::Ctx;
 const BORDER_ROUTERS_KEPT: Duration = Duration::from_secs(600);
 
 impl<C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'_, C, S, O> {
-    /// Read the networking of our Thread devices, one after another, the
-    /// Wi-Fi channels of our Wi-Fi devices, and what the LAN advertises, into
-    /// the mesh. Devices known to be offline are not tried.
-    pub(super) async fn read_thread_mesh(&self) -> Result<ThreadMesh, PeekError> {
-        let devices = self.list_devices(None)?.devices;
+    /// Read the networking of our Thread devices on `fabric`, one after
+    /// another, the Wi-Fi channels of our Wi-Fi devices there, and what the LAN
+    /// advertises, into the mesh. Devices known to be offline are not tried.
+    pub(super) async fn read_thread_mesh(
+        &self,
+        fabric: &FabricRef,
+    ) -> Result<ThreadMesh, PeekError> {
+        let devices = self.list_devices_on(fabric, None)?.devices;
         let mut input = MeshInput::default();
 
         for device in &devices {
@@ -71,14 +74,12 @@ impl<C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'_, C, S, O> {
         let fresh = crate::mdns::border_routers(&[]).await;
         input.border_routers = self.recent_border_routers(fresh);
         input.hosts = crate::mdns::matter_hosts().await;
-        input.our_fabric = self
-            .matter
-            .with_state(|state| {
-                Ok::<_, rs_matter::error::Error>(
-                    state.fabrics.fabric(self.fab_idx)?.compressed_fabric_id(),
-                )
-            })
-            .ok();
+        input.our_fabrics = self
+            .fabrics
+            .borrow()
+            .iter()
+            .map(|fabric| fabric.compressed_fabric_id)
+            .collect();
 
         let mut names = self.thread_names.borrow_mut();
         for router in &input.border_routers {

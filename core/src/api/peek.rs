@@ -86,22 +86,73 @@ impl MatterPeek {
         self.call(|reply| Op::ReadQrImage { image, reply }).await
     }
 
-    /// Commission a device onto our fabric, reaching it `via` IP or Bluetooth,
-    /// with its passcode, manual pairing code or QR code payload. It is listed
-    /// from then on; `remember` also keeps a record of it. `progress` follows
-    /// the steps.
+    /// Commission a device onto `fabric` of ours, reaching it `via` IP or
+    /// Bluetooth, with its passcode, manual pairing code or QR code payload. It
+    /// is listed from then on; `remember` also keeps a record of it.
+    /// `progress` follows the steps.
     pub async fn commission(
         &self,
         via: CommissionVia,
         setup_code: String,
         remember: bool,
+        fabric: FabricRef,
         progress: Option<Arc<dyn CommissionListener>>,
     ) -> Result<CommissionResult, PeekError> {
         self.call(|reply| Op::Commission {
             via,
             setup_code,
             remember,
+            fabric,
             progress,
+            reply,
+        })
+        .await
+    }
+
+    /// Our fabrics.
+    pub async fn fabrics(&self) -> Result<Vec<FabricInfo>, PeekError> {
+        self.call(Op::Fabrics).await
+    }
+
+    /// Create a fabric of ours named `name`, with a root CA of its own;
+    /// answers our fabrics.
+    pub async fn create_fabric(&self, name: String) -> Result<Vec<FabricInfo>, PeekError> {
+        self.call(|reply| Op::CreateFabric { name, reply }).await
+    }
+
+    /// Rename `fabric` of ours; answers our fabrics.
+    pub async fn rename_fabric(
+        &self,
+        fabric: FabricRef,
+        name: String,
+    ) -> Result<Vec<FabricInfo>, PeekError> {
+        self.call(|reply| Op::RenameFabric {
+            fabric,
+            name,
+            reply,
+        })
+        .await
+    }
+
+    /// Make `fabric` of ours the default; answers our fabrics.
+    pub async fn set_default_fabric(
+        &self,
+        fabric: FabricRef,
+    ) -> Result<Vec<FabricInfo>, PeekError> {
+        self.call(|reply| Op::SetDefaultFabric { fabric, reply })
+            .await
+    }
+
+    /// Delete `fabric` of ours, doing with its devices as `deletion` says; not
+    /// the default. Answers our fabrics.
+    pub async fn delete_fabric(
+        &self,
+        fabric: FabricRef,
+        deletion: FabricDeletion,
+    ) -> Result<Vec<FabricInfo>, PeekError> {
+        self.call(|reply| Op::DeleteFabric {
+            fabric,
+            deletion,
             reply,
         })
         .await
@@ -144,15 +195,16 @@ impl MatterPeek {
             .await
     }
 
-    /// The devices on our fabric.
-    pub async fn list_devices(&self) -> Result<DeviceList, PeekError> {
-        self.call(Op::ListDevices).await
+    /// The devices on `fabric` of ours, or on all of them.
+    pub async fn list_devices(&self, fabric: FabricRef) -> Result<DeviceList, PeekError> {
+        self.call(|reply| Op::ListDevices { fabric, reply }).await
     }
 
-    /// Sync the device list with the devices on our fabric: list the ones not
+    /// Sync the device list with the devices on our fabrics: list the ones not
     /// listed yet, refresh the others' identity, and note which are online.
-    pub async fn sync(&self) -> Result<DeviceList, PeekError> {
-        self.call(Op::Sync).await
+    /// Answers the devices on `fabric`, or on all of them.
+    pub async fn sync(&self, fabric: FabricRef) -> Result<DeviceList, PeekError> {
+        self.call(|reply| Op::Sync { fabric, reply }).await
     }
 
     /// Keep a record of a listed device, so it can be tagged and stays listed
@@ -190,12 +242,14 @@ impl MatterPeek {
         self.call(|reply| Op::PeekDevice { node_id, reply }).await
     }
 
-    /// The Thread mesh as our Thread devices see it: their networks, the
-    /// nodes and links their neighbour and route tables show, the border
-    /// routers on the LAN, and what is wrong with it. Reads the devices one
-    /// after another, so it takes a few seconds.
-    pub async fn read_thread_mesh(&self) -> Result<ThreadMesh, PeekError> {
-        self.call(Op::ReadThreadMesh).await
+    /// The Thread mesh as our Thread devices on `fabric` (or on all our
+    /// fabrics) see it: their networks, the nodes and links their neighbour
+    /// and route tables show, the border routers on the LAN, and what is wrong
+    /// with it. Reads the devices one after another, so it takes a few
+    /// seconds.
+    pub async fn read_thread_mesh(&self, fabric: FabricRef) -> Result<ThreadMesh, PeekError> {
+        self.call(|reply| Op::ReadThreadMesh { fabric, reply })
+            .await
     }
 
     /// Read the networking of a listed device: its interfaces and addresses,
@@ -279,6 +333,23 @@ impl MatterPeek {
     /// The stored OTA images.
     pub async fn ota_images(&self) -> Result<Vec<OtaImageInfo>, PeekError> {
         self.call(Op::OtaImages).await
+    }
+
+    /// Remove another controller's fabric from the device, by the device's
+    /// index of it (as [`DeviceFabric::index`] gives it): that controller loses
+    /// the device. Answers the device's fabrics then. Not our own fabric: that
+    /// is [`decommission`](Self::decommission).
+    pub async fn remove_device_fabric(
+        &self,
+        node_id: u64,
+        fabric_index: u8,
+    ) -> Result<DeviceHealth, PeekError> {
+        self.call(|reply| Op::RemoveDeviceFabric {
+            node_id,
+            fabric_index,
+            reply,
+        })
+        .await
     }
 
     /// Open a commissioning window on the device for `timeout_secs` (3 to 15
@@ -502,11 +573,37 @@ pub(crate) enum Op {
         via: CommissionVia,
         setup_code: String,
         remember: bool,
+        fabric: FabricRef,
         progress: Option<Arc<dyn CommissionListener>>,
         reply: Reply<CommissionResult>,
     },
-    ListDevices(Reply<DeviceList>),
-    Sync(Reply<DeviceList>),
+    Fabrics(Reply<Vec<FabricInfo>>),
+    CreateFabric {
+        name: String,
+        reply: Reply<Vec<FabricInfo>>,
+    },
+    RenameFabric {
+        fabric: FabricRef,
+        name: String,
+        reply: Reply<Vec<FabricInfo>>,
+    },
+    SetDefaultFabric {
+        fabric: FabricRef,
+        reply: Reply<Vec<FabricInfo>>,
+    },
+    DeleteFabric {
+        fabric: FabricRef,
+        deletion: FabricDeletion,
+        reply: Reply<Vec<FabricInfo>>,
+    },
+    ListDevices {
+        fabric: FabricRef,
+        reply: Reply<DeviceList>,
+    },
+    Sync {
+        fabric: FabricRef,
+        reply: Reply<DeviceList>,
+    },
     Remember {
         node_id: u64,
         reply: Reply<DeviceList>,
@@ -558,6 +655,11 @@ pub(crate) enum Op {
     },
     OtaImages(Reply<Vec<OtaImageInfo>>),
     OtaUpdates(Reply<Vec<OtaUpdateInfo>>),
+    RemoveDeviceFabric {
+        node_id: u64,
+        fabric_index: u8,
+        reply: Reply<DeviceHealth>,
+    },
     OpenWindow {
         node_id: u64,
         timeout_secs: Option<u16>,
@@ -600,7 +702,10 @@ pub(crate) enum Op {
         reply: Reply<()>,
     },
     Assistant(Reply<Option<ModelConfig>>),
-    ReadThreadMesh(Reply<ThreadMesh>),
+    ReadThreadMesh {
+        fabric: FabricRef,
+        reply: Reply<ThreadMesh>,
+    },
     /// Keep the assistant's model; `None` forgets it.
     SetAssistant {
         model: Option<ModelConfig>,

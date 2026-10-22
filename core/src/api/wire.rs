@@ -58,6 +58,24 @@ pub enum Request {
         /// The device's passcode, manual pairing code or QR code payload.
         setup_code: String,
         remember: bool,
+        /// The fabric of ours to commission it onto.
+        #[serde(default)]
+        fabric: FabricRef,
+    },
+    /// See `MatterPeek::fabrics`. Answered with [`Response::Fabrics`].
+    Fabrics,
+    /// See `MatterPeek::create_fabric`. Answered with [`Response::Fabrics`].
+    CreateFabric { name: String },
+    /// See `MatterPeek::rename_fabric`. Answered with [`Response::Fabrics`].
+    RenameFabric { fabric: FabricRef, name: String },
+    /// See `MatterPeek::set_default_fabric`. Answered with
+    /// [`Response::Fabrics`].
+    SetDefaultFabric { fabric: FabricRef },
+    /// See `MatterPeek::delete_fabric`. Answered with [`Response::Fabrics`].
+    DeleteFabric {
+        fabric: FabricRef,
+        #[serde(default)]
+        deletion: FabricDeletion,
     },
     /// See `MatterPeek::read_qr_image`; the picture is base64-encoded.
     /// Answered with [`Response::SetupCode`].
@@ -70,9 +88,15 @@ pub enum Request {
         max: u8,
     },
     /// See `MatterPeek::list_devices`. Answered with [`Response::Devices`].
-    ListDevices,
+    ListDevices {
+        #[serde(default)]
+        fabric: FabricRef,
+    },
     /// See `MatterPeek::peek_device`. Answered with [`Response::Peek`].
     PeekDevice { node_id: u64 },
+    /// See `MatterPeek::remove_device_fabric`. Answered with
+    /// [`Response::Peek`], the device's fabrics.
+    RemoveDeviceFabric { node_id: u64, fabric_index: u8 },
     /// See `MatterPeek::read_network`. Answered with [`Response::Network`].
     ReadNetwork { node_id: u64 },
     /// See `MatterPeek::change_network`. Answered with [`Response::Network`].
@@ -109,7 +133,10 @@ pub enum Request {
     /// See `MatterPeek::decommission`. Answered with [`Response::Devices`].
     Decommission { node_id: u64, force: bool },
     /// See `MatterPeek::sync`. Answered with [`Response::Devices`].
-    Sync,
+    Sync {
+        #[serde(default)]
+        fabric: FabricRef,
+    },
     /// See `MatterPeek::remember`. Answered with [`Response::Devices`].
     Remember { node_id: u64 },
     /// See `MatterPeek::set_tags`. Answered with [`Response::Devices`].
@@ -151,6 +178,10 @@ pub enum Request {
         chat_id: Option<String>,
         text: String,
         allow_changes: bool,
+        /// The fabric of ours the tools are about, unless the question names
+        /// another: the one the asker looks at.
+        #[serde(default)]
+        fabric: FabricRef,
     },
     /// Answer the assistant's request to run a tool ([`ChatEvent::Approve`]).
     /// Answered with [`Response::Ok`].
@@ -166,7 +197,10 @@ pub enum Request {
     ChatDelete { chat_id: String },
     /// See `MatterPeek::read_thread_mesh`. Answered with
     /// [`Response::ThreadMesh`].
-    ReadThreadMesh,
+    ReadThreadMesh {
+        #[serde(default)]
+        fabric: FabricRef,
+    },
     /// See `MatterPeek::assistant`. Answered with [`Response::Assistant`].
     Assistant,
     /// See `MatterPeek::set_assistant`. Answered with [`Response::Assistant`].
@@ -200,6 +234,22 @@ impl Request {
                 | Self::AssistantModels { .. }
                 | Self::AssistantTest { .. }
         )
+    }
+
+    /// Have a request that names no fabric of ours be about `fabric`: the
+    /// one a client works in.
+    pub fn default_fabric(&mut self, fabric: &FabricRef) {
+        match self {
+            Self::Commission { fabric: of, .. }
+            | Self::ListDevices { fabric: of }
+            | Self::Sync { fabric: of }
+            | Self::ReadThreadMesh { fabric: of }
+                if *of == FabricRef::Default =>
+            {
+                *of = fabric.clone();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -251,6 +301,9 @@ pub enum Response {
     },
     OtaUpdates {
         updates: Vec<OtaUpdateInfo>,
+    },
+    Fabrics {
+        fabrics: Vec<FabricInfo>,
     },
     CommissioningWindow {
         window: CommissioningWindow,

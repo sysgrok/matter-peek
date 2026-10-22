@@ -56,7 +56,7 @@ impl App {
                             },
                             Some(list) => html! {
                                 <div class="fabrics-list">
-                                    { for list.iter().map(view_fabric) }
+                                    { for list.iter().map(|fabric| view_fabric(node_id, fabric, link)) }
                                 </div>
                             },
                         } }
@@ -78,7 +78,17 @@ impl App {
     }
 }
 
-fn view_fabric(fabric: &DeviceFabric) -> Html {
+fn view_fabric(node_id: u64, fabric: &DeviceFabric, link: &Scope<App>) -> Html {
+    let remove = fabric.index.filter(|_| !fabric.ours).map(|index| {
+        let name = fabric.name();
+        html! {
+            <button class="icon-action is-danger" title={format!("Remove {name} from the device")}
+                onclick={link.callback(move |_| Msg::Ask(crate::Ask::RemoveFabric(node_id, index, name.clone())))}>
+                { icon(Icon::Trash, 17) }
+            </button>
+        }
+    });
+
     html! {
         <div class={classes!("fabric-row", fabric.ours.then_some("is-ours"))}>
             <span class="tile-icon is-other">{ icon(Icon::Fabrics, 20) }</span>
@@ -100,6 +110,7 @@ fn view_fabric(fabric: &DeviceFabric) -> Html {
                 <span title="Fabric ID">{ format!("fabric {}", display::hex_u64(fabric.fabric_id)) }</span>
                 <span title="The device's node ID on the fabric">{ format!("node {}", display::hex_u64(fabric.node_id)) }</span>
             </div>
+            { remove.unwrap_or_default() }
         </div>
     }
 }

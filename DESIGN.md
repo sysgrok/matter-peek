@@ -263,6 +263,30 @@ the device queries and downloads over BDX, reported to an `OtaListener`. The
 service also keeps the latest update of each device, for an hour after its
 last progress (`ota_updates`), so that any client can follow it.
 
+### Fabrics of ours
+- Each fabric of ours has a root CA of its own (RCAC signing directly), a
+  random 64-bit fabric ID, our node ID 112233 and vendor 0xFFF1. rs-matter
+  persists the fabric (`FabricPersist`); we persist, in one blob, each one's
+  name, color and CA signing key, and the default. A store of the
+  single-fabric versions migrates on start: its fabric becomes the default,
+  "Home", and its lone CA key moves into that blob.
+- rs-matter is built with `max-fabrics-16` and `max-sessions-64` on the host:
+  a controller holds a CASE session per device it follows, across fabrics.
+- Node IDs come from one counter for all fabrics, so a node ID names a device
+  across them, and only the operations about a fabric take one (`FabricRef`:
+  default, all, index or name): list, sync, commission, the Thread mesh. The
+  visible fabric is the client's: the web filters the device list itself;
+  `mcp --fabric` and the assistant's chat replace "default" in their requests
+  (`Request::default_fabric`).
+- Sync browses every fabric; a device without a record leaves the list when
+  its own fabric no longer advertises it.
+- A device's fabric is ours when its root public key and fabric ID are those
+  of one of our fabrics (our first fabric's ID, 1, is also chip-tool's).
+- A fabric created or deleted at run time must be (re)advertised, but
+  rs-matter signals its mDNS responder only on its own changes. Setting the
+  ICD advertisement to another value and back, with no await in between,
+  signals it; it then finds the advertisement as it was.
+
 ### Sharing (commissioning windows)
 `open_commissioning_window` opens an enhanced window (Administrator
 Commissioning, a timed invoke over CASE): a random passcode and discriminator,

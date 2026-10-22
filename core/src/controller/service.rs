@@ -11,7 +11,6 @@
 //! image store and the UDP network (see [`crate::host`] for this host's).
 
 use core::cell::{Cell, RefCell};
-use core::num::NonZeroU8;
 use core::pin::pin;
 use core::sync::atomic::AtomicBool;
 
@@ -35,8 +34,8 @@ use rs_matter::transport::network::{NetworkReceive, NetworkSend, NoNetwork};
 use rs_matter::Matter;
 
 use crate::api::{BorderRouter, Op, PeekConfig, PeekError, Service};
-use crate::ca::{CaTier, ControllerCa};
-use crate::matter::{Controller, FabricIdentity};
+use crate::fabrics::OurFabrics;
+use crate::matter::Controller;
 use crate::mdns::Mdns;
 use crate::model::StoredDevice;
 use crate::node;
@@ -51,6 +50,7 @@ use window::OpenedWindow;
 mod commission;
 mod convert;
 mod devices;
+mod fabrics;
 mod mesh;
 mod netconfig;
 mod ota;
@@ -89,8 +89,8 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     matter: &'a Matter<'a>,
     crypto: &'a C,
     controller: Controller<'a, C>,
-    ca: ControllerCa,
-    fab_idx: NonZeroU8,
+    /// Our fabrics, and the default.
+    fabrics: RefCell<OurFabrics>,
     store: ControllerStore<'a, S>,
     /// Set by `MatterPeek::cancel_commission`, checked by the commission.
     cancel: Arc<AtomicBool>,
@@ -147,7 +147,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         loop {
             match select(service.ops.recv(), Timer::at(next_sync)).await {
                 Either::First(Ok(op)) => {
-                    if matches!(op, Op::Sync(_)) {
+                    if matches!(op, Op::Sync { .. }) {
                         next_sync = after(SYNC_PERIOD_SECS);
                     }
 
@@ -187,16 +187,42 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 via,
                 setup_code,
                 remember,
+                fabric,
                 progress,
                 reply,
             } => {
                 let commissioned = self
-                    .commission(&via, &setup_code, remember, progress.as_deref())
+                    .commission(&via, &setup_code, remember, &fabric, progress.as_deref())
                     .await;
                 let _ = reply.send(commissioned).await;
             }
-            Op::ListDevices(reply) => {
-                let _ = reply.send(self.list_devices(None)).await;
+            Op::Fabrics(reply) => {
+                let _ = reply.send(Ok(self.fabric_infos())).await;
+            }
+            Op::CreateFabric { name, reply } => {
+                let _ = reply.send(self.create_fabric(&name)).await;
+            }
+            Op::RenameFabric {
+                fabric,
+                name,
+                reply,
+            } => {
+                let _ = reply.send(self.rename_fabric(&fabric, &name)).await;
+            }
+            Op::SetDefaultFabric { fabric, reply } => {
+                let _ = reply.send(self.set_default_fabric(&fabric)).await;
+            }
+            Op::DeleteFabric {
+                fabric,
+                deletion,
+                reply,
+            } => {
+                let _ = reply
+                    .send(self.delete_fabric(&fabric, deletion).await)
+                    .await;
+            }
+            Op::ListDevices { fabric, reply } => {
+                let _ = reply.send(self.list_devices_on(&fabric, None)).await;
             }
             Op::Assistant(reply) => {
                 let model = self
@@ -212,8 +238,8 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                     .map_err(|e| failed("cannot keep the assistant's model", e));
                 let _ = reply.send(saved).await;
             }
-            Op::Sync(reply) => {
-                let _ = reply.send(self.sync().await).await;
+            Op::Sync { fabric, reply } => {
+                let _ = reply.send(self.sync(&fabric).await).await;
             }
             Op::Remember { node_id, reply } => {
                 let _ = reply.send(self.remember(node_id)).await;
@@ -238,8 +264,8 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             Op::ReadNetwork { node_id, reply } => {
                 let _ = reply.send(self.read_network(node_id).await).await;
             }
-            Op::ReadThreadMesh(reply) => {
-                let _ = reply.send(self.read_thread_mesh().await).await;
+            Op::ReadThreadMesh { fabric, reply } => {
+                let _ = reply.send(self.read_thread_mesh(&fabric).await).await;
             }
             Op::ChangeNetwork {
                 node_id,
@@ -277,6 +303,15 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             }
             Op::OtaUpdates(reply) => {
                 let _ = reply.send(Ok(self.ota_updates())).await;
+            }
+            Op::RemoveDeviceFabric {
+                node_id,
+                fabric_index,
+                reply,
+            } => {
+                let _ = reply
+                    .send(self.remove_device_fabric(node_id, fabric_index).await)
+                    .await;
             }
             Op::OpenWindow {
                 node_id,
@@ -397,19 +432,13 @@ async fn run<'a, C, S, O, N, M>(
     }
     let matter: &Matter = matter;
 
-    let (ca, fab_idx) = match ControllerCa::ensure(
-        &crypto,
-        matter,
-        &store,
-        FabricIdentity::default(),
-        CaTier::RcacDirect,
-    ) {
-        Ok(v) => v,
+    let fabrics = match OurFabrics::load(&crypto, matter, &store) {
+        Ok(fabrics) => fabrics,
         Err(e) => {
-            error!("service: CA init failed: {e:?}");
+            error!("service: our fabrics cannot be loaded: {e:?}");
             refuse_all(
                 service,
-                PeekError::failed("the controller CA cannot be set up"),
+                PeekError::failed("the controller's fabrics cannot be set up"),
             )
             .await;
             return;
@@ -421,9 +450,14 @@ async fn run<'a, C, S, O, N, M>(
     #[cfg(feature = "ble")]
     let btp = rs_matter::transport::network::btp::Btp::new();
 
-    // Our OTA Provider: the devices on our fabric may ask it for updates.
-    if let Err(e) = node::allow_ota_requestors(matter, &store, fab_idx) {
-        warn!("service: cannot open our OTA Provider to the devices: {e:?}");
+    // Our OTA Provider: the devices on our fabrics may ask it for updates.
+    for fabric in fabrics.iter() {
+        if let Err(e) = node::allow_ota_requestors(matter, &store, fabric.fab_idx) {
+            warn!(
+                "service: cannot open our OTA Provider to the devices on {}: {e:?}",
+                fabric.name
+            );
+        }
     }
 
     let ota_followers = Rc::new(RefCell::new(Vec::new()));
@@ -436,8 +470,7 @@ async fn run<'a, C, S, O, N, M>(
         matter,
         crypto: &crypto,
         controller,
-        ca,
-        fab_idx,
+        fabrics: RefCell::new(fabrics),
         store,
         cancel: service.cancel.clone(),
         subs: RefCell::new(BTreeMap::new()),
@@ -520,7 +553,12 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             Op::Discover { reply, .. } => refuse(reply, error).await,
             Op::ReadQrImage { reply, .. } => refuse(reply, error).await,
             Op::Commission { reply, .. } => refuse(reply, error).await,
-            Op::ListDevices(reply) | Op::Sync(reply) => refuse(reply, error).await,
+            Op::ListDevices { reply, .. } | Op::Sync { reply, .. } => refuse(reply, error).await,
+            Op::Fabrics(reply)
+            | Op::CreateFabric { reply, .. }
+            | Op::RenameFabric { reply, .. }
+            | Op::SetDefaultFabric { reply, .. }
+            | Op::DeleteFabric { reply, .. } => refuse(reply, error).await,
             Op::Remember { reply, .. }
             | Op::SetTags { reply, .. }
             | Op::Decommission { reply, .. } => refuse(reply, error).await,
@@ -539,9 +577,10 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             Op::OpenWindow { reply, .. }
             | Op::CloseWindow { reply, .. }
             | Op::Window { reply, .. } => refuse(reply, error).await,
+            Op::RemoveDeviceFabric { reply, .. } => refuse(reply, error).await,
             Op::OtaUploadChunk { reply, .. } => refuse(reply, error).await,
             Op::Assistant(reply) => refuse(reply, error).await,
-            Op::ReadThreadMesh(reply) => refuse(reply, error).await,
+            Op::ReadThreadMesh { reply, .. } => refuse(reply, error).await,
             Op::SetAssistant { reply, .. } => refuse(reply, error).await,
             Op::Unwatch { .. } | Op::OtaUploadDiscard { .. } => {}
         }

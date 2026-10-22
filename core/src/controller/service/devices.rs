@@ -13,7 +13,8 @@ use rs_matter::error::{Error, ErrorCode};
 use rs_matter::persist::KvBlobStore;
 
 use crate::api::{
-    DeviceHealth, DeviceList, LogIntent, NetworkInfo, NetworkKind, PeekError, SubscriptionState,
+    DeviceHealth, DeviceList, FabricRef, LogIntent, NetworkInfo, NetworkKind, PeekError,
+    SubscriptionState,
 };
 use crate::model::{
     match_device, DeviceHandle, DeviceIdentity, DiagSet, MatchResult, StoredDevice,
@@ -60,11 +61,51 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             .map(|(d, remembered)| {
                 let node_id = d.handle.node_id;
                 let online = online.as_ref().map(|o| o.contains(&node_id));
-                convert::device(d, online, remembered)
+                let fabric = self.fabric_name(d.handle.fabric_index);
+                convert::device(d, fabric, online, remembered)
             })
             .collect();
 
         Ok(DeviceList { devices, notice })
+    }
+
+    /// The listed devices on `fabric`, with `notice` as
+    /// [`list_devices`](Self::list_devices).
+    pub(super) fn list_devices_on(
+        &self,
+        fabric: &FabricRef,
+        notice: Option<String>,
+    ) -> Result<DeviceList, PeekError> {
+        let fabrics: Vec<u8> = self
+            .our_fabrics(fabric)?
+            .iter()
+            .map(|fabric| fabric.fab_idx.get())
+            .collect();
+        let mut list = self.list_devices(notice)?;
+
+        list.devices
+            .retain(|d| fabrics.contains(&d.handle.fabric_index));
+
+        Ok(list)
+    }
+
+    /// Drop a listed device without contacting it: its subscription, its
+    /// sessions and its record.
+    pub(super) fn forget_device(&self, node_id: u64) -> Result<(), PeekError> {
+        let dev = self.lookup_device(node_id)?;
+
+        self.stop_watch(node_id);
+        self.controller.forget_sessions(dev.handle);
+        self.set_online(node_id, false);
+        self.transient
+            .borrow_mut()
+            .retain(|d| d.handle.node_id != node_id);
+        self.update_devices(
+            |devices| devices.retain(|d| d.handle.node_id != node_id),
+            None,
+        )?;
+
+        Ok(())
     }
 
     /// Re-address a listed device over CASE and read its health.
@@ -89,21 +130,65 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         Ok(health)
     }
 
-    /// Mark our fabric among those `health` has of device `node_id`: the one
-    /// with our fabric ID, on which the device has its node ID with us.
-    pub(super) fn mark_our_fabric(&self, node_id: u64, health: &mut DeviceHealth) {
+    /// Remove another controller's fabric from the device, by the device's
+    /// index of it; answers its fabrics then. Our own is refused: that is
+    /// decommissioning.
+    pub(super) async fn remove_device_fabric(
+        &self,
+        node_id: u64,
+        index: u8,
+    ) -> Result<DeviceHealth, PeekError> {
+        let dev = self.lookup_device(node_id)?;
+        let fabrics = |e| failed("cannot read its fabrics", e);
+
+        let mut before = self
+            .controller
+            .read_fabrics(dev.handle)
+            .await
+            .map_err(fabrics)?;
+        self.mark_our_fabric(node_id, &mut before);
+
+        let fabric = before
+            .fabrics
+            .iter()
+            .flatten()
+            .find(|fabric| fabric.index == Some(index))
+            .ok_or_else(|| PeekError::failed(format!("it has no fabric #{index}")))?;
+        if fabric.ours {
+            return Err(PeekError::failed(
+                "that is our own fabric: decommission the device instead",
+            ));
+        }
+
+        self.controller
+            .remove_device_fabric(dev.handle, index)
+            .await
+            .map_err(|e| failed("cannot remove the fabric", e))?;
+
+        let mut after = self
+            .controller
+            .read_fabrics(dev.handle)
+            .await
+            .map_err(fabrics)?;
+        self.mark_our_fabric(node_id, &mut after);
+
+        Ok(after)
+    }
+
+    /// Mark our fabrics among those `health` has of a device: those of our
+    /// root CAs, with our fabric IDs.
+    pub(super) fn mark_our_fabric(&self, _node_id: u64, health: &mut DeviceHealth) {
         let Some(fabrics) = health.fabrics.as_mut() else {
             return;
         };
-        let Ok(fabric_id) = self
-            .matter
-            .with_state(|state| Ok::<_, Error>(state.fabrics.fabric(self.fab_idx)?.fabric_id()))
-        else {
-            return;
-        };
+        let ours = self.fabrics.borrow();
 
         for fabric in fabrics {
-            fabric.ours = fabric.fabric_id == fabric_id && fabric.node_id == node_id;
+            let mine = ours.iter().find(|mine| {
+                mine.fabric_id == fabric.fabric_id && hex(&mine.root_key) == fabric.root_key
+            });
+            fabric.ours = mine.is_some();
+            fabric.our_name = mine.map(|mine| mine.name.clone());
         }
     }
 
@@ -321,35 +406,41 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
 
     /// Re-sync the device list with our fabric, refreshing the identity of every
     /// reachable device, and answer with the list.
-    pub(super) async fn sync(&self) -> Result<DeviceList, PeekError> {
+    pub(super) async fn sync(&self, fabric: &FabricRef) -> Result<DeviceList, PeekError> {
+        self.our_fabrics(fabric)?;
+
         let notice = self
             .sync_devices(true)
             .await
             .map_err(|e| failed("sync failed", e))?;
 
-        self.list_devices(notice)
+        self.list_devices_on(fabric, notice)
     }
 
-    /// Align the device list with the devices advertising on our fabric: list
+    /// Align the device list with the devices advertising on our fabrics: list
     /// those not listed yet (keeping no record of them), drop those without a
     /// record that are gone and, if `refresh`, re-read the others' identity.
     /// Notes which devices are online. Returns a notice of what changed, if
     /// anything did.
     pub(super) async fn sync_devices(&self, refresh: bool) -> Result<Option<String>, Error> {
-        let advertised = self.controller.browse_fabric(self.fab_idx).await?;
-        info!("sync: {} device(s) on our fabric", advertised.len());
+        let fabrics: Vec<_> = self.fabrics.borrow().iter().cloned().collect();
+        let mut advertised = Vec::new();
+        for fabric in &fabrics {
+            let nodes = self.controller.browse_fabric(fabric.fab_idx).await?;
+            info!("sync: {} device(s) on {}", nodes.len(), fabric.name);
+            advertised.extend(nodes.into_iter().map(|node_id| DeviceHandle {
+                fabric_index: fabric.fab_idx,
+                node_id,
+            }));
+        }
 
         let mut remembered = self.store.load_devices()?;
         let mut found = 0;
 
-        for &node_id in &advertised {
-            // In use on our fabric, so never to be handed out again.
+        for &handle in &advertised {
+            let node_id = handle.node_id;
+            // In use on a fabric of ours, so never to be handed out again.
             self.store.reserve_node_id(node_id)?;
-
-            let handle = DeviceHandle {
-                fabric_index: self.fab_idx,
-                node_id,
-            };
 
             let record = remembered.iter().position(|d| d.handle.node_id == node_id);
             let listed = record.is_some()
@@ -397,12 +488,12 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         // Without a record, a device is listed only while it is on our fabric.
         self.transient
             .borrow_mut()
-            .retain(|d| advertised.contains(&d.handle.node_id));
+            .retain(|d| advertised.contains(&d.handle));
 
-        *self.online.borrow_mut() = Some(advertised.into_iter().collect());
+        *self.online.borrow_mut() = Some(advertised.iter().map(|d| d.node_id).collect());
 
         Ok((found > 0)
-            .then(|| format!("{found} device(s) found on our fabric were added to the list.")))
+            .then(|| format!("{found} device(s) found on our fabrics were added to the list.")))
     }
 
     /// Keep a record of a listed device.
@@ -510,6 +601,11 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             .map(|d| d.handle.node_id)
             .collect()
     }
+}
+
+/// `bytes` in uppercase hex, as [`DeviceFabric::root_key`](crate::api::DeviceFabric) has them.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
 
 /// Update a device's identity from a fresh read, keeping a label the device no

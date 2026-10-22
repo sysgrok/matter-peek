@@ -171,7 +171,7 @@ pub async fn read_health<C: Crypto + Copy>(
 }
 
 /// Read the fabrics the device is on; every one, not only ours.
-async fn read_fabrics<C: Crypto>(
+pub(crate) async fn read_fabrics<C: Crypto>(
     matter: &Matter<'_>,
     crypto: C,
     fab_idx: NonZeroU8,
@@ -380,7 +380,12 @@ fn fabric(item: &FabricDescriptorStruct<'_>) -> Option<DeviceFabric> {
             .unwrap_or_default(),
         fabric_id: item.fabric_id().ok()?,
         node_id: item.node_id().ok()?,
+        root_key: item
+            .root_public_key()
+            .map(|key| key.iter().map(|b| alloc::format!("{b:02X}")).collect())
+            .unwrap_or_default(),
         ours: false,
+        our_name: None,
     })
 }
 

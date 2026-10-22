@@ -45,6 +45,7 @@ pub enum ThreadMsg {
 
 impl App {
     pub(crate) fn update_thread(&mut self, ctx: &Context<Self>, msg: ThreadMsg) -> bool {
+        let fabric = self.fabric_ref();
         let page = &mut self.thread;
 
         match msg {
@@ -56,7 +57,7 @@ impl App {
                 page.error = None;
                 request_loop(
                     ctx.link().clone(),
-                    wire::Request::ReadThreadMesh,
+                    wire::Request::ReadThreadMesh { fabric },
                     |response| Msg::Thread(ThreadMsg::Loaded(response)),
                     |e| Msg::Thread(ThreadMsg::Failed(e)),
                 );

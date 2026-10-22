@@ -38,6 +38,7 @@ mod controller {
     pub mod diagnostics;
     pub mod discovery;
     pub mod explain;
+    pub mod fabrics;
     #[cfg(feature = "std")]
     pub mod host;
     pub mod logs;

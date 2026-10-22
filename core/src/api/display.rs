@@ -93,12 +93,15 @@ impl DeviceInfo {
 }
 
 impl DeviceFabric {
-    /// What to call the fabric: ours `matter-peek`; another by its label, else
-    /// by the name of its controller's vendor (`Google LLC`), else by the
-    /// vendor ID.
+    /// What to call the fabric: ours `matter-peek · Home`; another by its
+    /// label, else by the name of its controller's vendor (`Google LLC`), else
+    /// by the vendor ID.
     pub fn name(&self) -> String {
         if self.ours {
-            "matter-peek".to_string()
+            match &self.our_name {
+                Some(name) => format!("matter-peek · {name}"),
+                None => "matter-peek".to_string(),
+            }
         } else if !self.label.is_empty() {
             self.label.clone()
         } else {

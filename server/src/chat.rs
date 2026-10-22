@@ -30,7 +30,7 @@ use matter_peek_core::api::wire::{
     Approval, ChatEvent, ChatSummary, ChatView, ClientMsg, Event, Request, Response, ServerMsg,
     WireSession,
 };
-use matter_peek_core::api::{AssistantUpdate, MatterPeek};
+use matter_peek_core::api::{AssistantUpdate, FabricRef, MatterPeek};
 
 use crate::llm::Ureq;
 
@@ -141,7 +141,8 @@ impl Chats {
                 chat_id,
                 text,
                 allow_changes,
-            } => self.ask(chat_id, text, allow_changes, &out).await,
+                fabric,
+            } => self.ask(chat_id, text, allow_changes, fabric, &out).await,
             Request::ChatApprove {
                 chat_id,
                 call_id,
@@ -327,6 +328,7 @@ impl Chats {
         chat_id: Option<String>,
         text: String,
         allow_changes: bool,
+        fabric: FabricRef,
         out: &async_channel::Sender<ServerMsg>,
     ) -> Result<Response, String> {
         let llm = self.model().await?;
@@ -362,7 +364,12 @@ impl Chats {
         let caps = Caps {
             allow_mutate: allow_changes,
         };
-        let mut agent = Agent::new(provider, Tools::new(self.peek.clone()), caps, llm.think);
+        let mut agent = Agent::new(
+            provider,
+            Tools::new(self.peek.clone(), fabric),
+            caps,
+            llm.think,
+        );
         agent.restore(history);
 
         let listener = Listener {
@@ -587,20 +594,29 @@ impl AgentListener for Listener<'_> {
     }
 }
 
-/// The assistant's tools, run against the server's controller in process.
-struct Tools(WireSession);
+/// The assistant's tools, run against the server's controller in process,
+/// about `fabric` unless one names another.
+struct Tools {
+    session: WireSession,
+    fabric: FabricRef,
+}
 
 impl Tools {
-    fn new(peek: Arc<MatterPeek>) -> Self {
+    fn new(peek: Arc<MatterPeek>, fabric: FabricRef) -> Self {
         // Nobody listens to the events of the tools' requests.
         let (out, _) = async_channel::unbounded();
-        Self(WireSession::new(peek, out))
+        Self {
+            session: WireSession::new(peek, out),
+            fabric,
+        }
     }
 }
 
 impl Dispatch for Tools {
-    async fn dispatch(&self, request: Request) -> Result<Response, String> {
-        Ok(self.0.answer(request).await)
+    async fn dispatch(&self, mut request: Request) -> Result<Response, String> {
+        request.default_fabric(&self.fabric);
+
+        Ok(self.session.answer(request).await)
     }
 }
 

@@ -41,6 +41,9 @@ pub struct ChatArgs {
     pub show_thinking: bool,
     pub verbose: bool,
     pub allow_mutate: bool,
+    /// The fabric of ours the assistant's tools are about, unless asked for
+    /// another.
+    pub fabric: matter_peek_core::api::FabricRef,
 }
 
 /// Chat with the assistant of the server at `server`, else of a controller
@@ -50,7 +53,7 @@ pub async fn chat(server: Option<String>, args: ChatArgs) -> io::Result<bool> {
     if server.is_none() {
         terminal.note("Looking for the devices on our fabric…");
     }
-    let dispatch = mcp::dispatch(server).await?;
+    let dispatch = mcp::dispatch(server, args.fabric.clone()).await?;
     let conn = dispatch.connection().await.map_err(io::Error::other)?;
 
     let assistant = match conn.call(Request::Assistant, |_| ()).await? {
@@ -91,6 +94,7 @@ pub async fn chat(server: Option<String>, args: ChatArgs) -> io::Result<bool> {
         conn: &conn,
         id: None,
         allow_changes: args.allow_mutate,
+        fabric: args.fabric.clone(),
         terminal: &terminal,
     };
 
@@ -140,6 +144,8 @@ struct Chat<'a> {
     /// `None` until the assistant starts a new one.
     id: Option<String>,
     allow_changes: bool,
+    /// The fabric of ours the tools are about, unless asked for another.
+    fabric: matter_peek_core::api::FabricRef,
     terminal: &'a Terminal,
 }
 
@@ -152,6 +158,7 @@ impl Chat<'_> {
                 chat_id: self.id.clone(),
                 text: question.into(),
                 allow_changes: self.allow_changes,
+                fabric: self.fabric.clone(),
             })
             .await?;
 

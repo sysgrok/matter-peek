@@ -36,7 +36,17 @@ impl App {
 
         html! {
             <div class="narrow">
-                { ui::page_header("Commission", html! { "Add a device to our fabric" }, html! {}) }
+                { ui::page_header("Commission", match self.visible_fabric() {
+                    Some(fabric) => html! {
+                        <span class="commission-into">
+                            { "Add a device to " }
+                            { crate::our_fabrics::dot(fabric.color) }
+                            <strong>{ fabric.name.clone() }</strong>
+                            <span class="commission-into-hint">{ " · the fabric shown, at the top" }</span>
+                        </span>
+                    },
+                    None => html! { "Add a device to our fabric" },
+                }, html! {}) }
                 { self.view_recommission_warning(link) }
 
                 <div class="form-card">

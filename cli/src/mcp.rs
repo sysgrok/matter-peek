@@ -16,7 +16,7 @@ use futures_lite::StreamExt;
 use log::{debug, info, warn};
 
 use matter_peek_core::api::mcp::{handle, jsonrpc, Caps, Dispatch};
-use matter_peek_core::api::{wire, PeekConfig};
+use matter_peek_core::api::{wire, FabricRef, PeekConfig};
 use matter_peek_server::client::{self, Connection};
 
 /// A [`Dispatch`] over a connection to the API: to a controller in this
@@ -26,6 +26,8 @@ use matter_peek_server::client::{self, Connection};
 pub(crate) struct ApiDispatch {
     url: Option<String>,
     conn: RefCell<Option<Rc<Connection>>>,
+    /// The fabric of ours a tool naming none is about.
+    fabric: FabricRef,
 }
 
 impl ApiDispatch {
@@ -47,7 +49,8 @@ impl ApiDispatch {
 }
 
 impl Dispatch for ApiDispatch {
-    async fn dispatch(&self, request: wire::Request) -> Result<wire::Response, String> {
+    async fn dispatch(&self, mut request: wire::Request) -> Result<wire::Response, String> {
+        request.default_fabric(&self.fabric);
         // Events are not surfaced: a tool call is request/response.
         match self.connection().await?.call(request.clone(), |_| ()).await {
             Ok(response) => Ok(response),
@@ -77,7 +80,11 @@ impl Dispatch for ApiDispatch {
 
 /// Serve the MCP tools on stdin/stdout until stdin closes: through the server at
 /// `server`, else through a controller started in this process.
-pub async fn serve(server: Option<String>, allow_mutate: bool) -> io::Result<()> {
+pub async fn serve(
+    server: Option<String>,
+    fabric: FabricRef,
+    allow_mutate: bool,
+) -> io::Result<()> {
     info!(
         "mcp: starting, {} (mutating tools {})",
         match &server {
@@ -87,14 +94,15 @@ pub async fn serve(server: Option<String>, allow_mutate: bool) -> io::Result<()>
         if allow_mutate { "ENABLED" } else { "disabled" }
     );
 
-    stdio_loop(&dispatch(server).await?, Caps { allow_mutate }).await
+    stdio_loop(&dispatch(server, fabric).await?, Caps { allow_mutate }).await
 }
 
 /// The API, for an agent: through the server at `server`, else through a
 /// controller started in this process now, so that a store held by another
 /// process fails here, and synced, so that the first tool call sees the
-/// devices on our fabric that are not remembered too.
-pub(crate) async fn dispatch(server: Option<String>) -> io::Result<ApiDispatch> {
+/// devices on our fabrics that are not remembered too. A tool naming no fabric
+/// is about `fabric`.
+pub(crate) async fn dispatch(server: Option<String>, fabric: FabricRef) -> io::Result<ApiDispatch> {
     let Some(url) = server else {
         // Long-lived, like a server: keep the device list in sync.
         let conn = client::connect_in_process(PeekConfig {
@@ -104,9 +112,13 @@ pub(crate) async fn dispatch(server: Option<String>) -> io::Result<ApiDispatch> 
         let dispatch = ApiDispatch {
             url: None,
             conn: RefCell::new(Some(Rc::new(conn))),
+            fabric,
         };
 
-        if let Err(e) = dispatch.dispatch(wire::Request::Sync).await {
+        let sync = wire::Request::Sync {
+            fabric: FabricRef::All,
+        };
+        if let Err(e) = dispatch.dispatch(sync).await {
             warn!("the first sync failed: {e}");
         }
 
@@ -116,6 +128,7 @@ pub(crate) async fn dispatch(server: Option<String>) -> io::Result<ApiDispatch> 
     Ok(ApiDispatch {
         url: Some(url),
         conn: RefCell::new(None),
+        fabric,
     })
 }
 

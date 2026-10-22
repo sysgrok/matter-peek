@@ -32,6 +32,8 @@ web-sys = { version = "0.3", features = [
     "CanvasRenderingContext2d",
     # Copying a pairing code.
     "Clipboard",
+    # Remembering the fabric shown.
+    "Storage",
 ] }
 js-sys = "0.3"
 # OTA image uploads: read the picked file, send it base64-encoded.

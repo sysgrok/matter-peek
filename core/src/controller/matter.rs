@@ -554,6 +554,37 @@ impl<'a, C: Crypto> Controller<'a, C> {
         Ok(())
     }
 
+    /// Remove another controller's fabric from the device, by the device's
+    /// index of it.
+    pub async fn remove_device_fabric(
+        &self,
+        dev: DeviceHandle,
+        device_fab_idx: u8,
+    ) -> Result<(), Error> {
+        let exchange =
+            Exchange::initiate(self.matter, self.crypto, dev.fabric_index, dev.node_id).await?;
+
+        exchange
+            .operational_credentials()
+            .remove_fabric(0, |req| req.fabric_index(device_fab_idx)?.end())
+            .await?
+            .complete()
+            .await?;
+
+        info!(
+            "removed fabric index {device_fab_idx} from device 0x{:016X}",
+            dev.node_id
+        );
+
+        Ok(())
+    }
+
+    /// The fabrics the device is on, every one.
+    pub async fn read_fabrics(&self, dev: DeviceHandle) -> Result<DeviceHealth, Error> {
+        crate::diagnostics::read_fabrics(self.matter, self.crypto, dev.fabric_index, dev.node_id)
+            .await
+    }
+
     /// The device's index of our fabric.
     async fn device_fabric_index(&self, dev: DeviceHandle) -> Result<u8, Error> {
         let exchange =

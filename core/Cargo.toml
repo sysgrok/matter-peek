@@ -35,6 +35,8 @@ controller = [
 # it in.
 std = [
     "controller",
+    "rs-matter/max-fabrics-16",
+    "rs-matter/max-sessions-64",
     "rs-matter/os",
     "rs-matter/qr-scan",
     "async-channel/std",

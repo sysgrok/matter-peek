@@ -70,14 +70,26 @@ impl WireSession {
                 via,
                 setup_code,
                 remember,
+                fabric,
             } => {
                 let steps = Arc::new(Steps {
                     req_id,
                     out: out.clone(),
                 });
-                peek.commission(via, setup_code, remember, Some(steps))
+                peek.commission(via, setup_code, remember, fabric, Some(steps))
                     .await
                     .map(Response::Commissioned)
+            }
+            Request::Fabrics => peek.fabrics().await.map(fabrics),
+            Request::CreateFabric { name } => peek.create_fabric(name).await.map(fabrics),
+            Request::RenameFabric { fabric, name } => {
+                peek.rename_fabric(fabric, name).await.map(fabrics)
+            }
+            Request::SetDefaultFabric { fabric } => {
+                peek.set_default_fabric(fabric).await.map(fabrics)
+            }
+            Request::DeleteFabric { fabric, deletion } => {
+                peek.delete_fabric(fabric, deletion).await.map(fabrics)
             }
             Request::ReadQrImage { image } => match BASE64.decode(image) {
                 Ok(image) => peek
@@ -99,9 +111,16 @@ impl WireSession {
                     devices: found.devices,
                     ble_devices: found.ble_devices,
                 }),
-            Request::ListDevices => peek.list_devices().await.map(devices),
+            Request::ListDevices { fabric } => peek.list_devices(fabric).await.map(devices),
             Request::PeekDevice { node_id } => peek
                 .peek_device(node_id)
+                .await
+                .map(|health| Response::Peek { node_id, health }),
+            Request::RemoveDeviceFabric {
+                node_id,
+                fabric_index,
+            } => peek
+                .remove_device_fabric(node_id, fabric_index)
                 .await
                 .map(|health| Response::Peek { node_id, health }),
             Request::ReadNetwork { node_id } => {
@@ -156,7 +175,7 @@ impl WireSession {
             Request::Decommission { node_id, force } => {
                 peek.decommission(node_id, force).await.map(devices)
             }
-            Request::Sync => peek.sync().await.map(devices),
+            Request::Sync { fabric } => peek.sync(fabric).await.map(devices),
             Request::Remember { node_id } => peek.remember(node_id).await.map(devices),
             Request::SetTags { node_id, tags } => peek.set_tags(node_id, tags).await.map(devices),
             Request::Cancel => {
@@ -193,8 +212,8 @@ impl WireSession {
                     .await
                     .map(|()| Response::Ok)
             }
-            Request::ReadThreadMesh => {
-                peek.read_thread_mesh()
+            Request::ReadThreadMesh { fabric } => {
+                peek.read_thread_mesh(fabric)
                     .await
                     .map(|mesh| Response::ThreadMesh {
                         mesh: Box::new(mesh),
@@ -280,6 +299,10 @@ fn devices(list: DeviceList) -> Response {
         devices: list.devices,
         notice: list.notice,
     }
+}
+
+fn fabrics(fabrics: Vec<FabricInfo>) -> Response {
+    Response::Fabrics { fabrics }
 }
 
 fn window(window: CommissioningWindow) -> Response {

@@ -148,6 +148,7 @@ pub enum AssistantMsg {
 impl App {
     pub(crate) fn update_assistant(&mut self, ctx: &Context<Self>, msg: AssistantMsg) -> bool {
         let link = ctx.link();
+        let fabric = self.fabric_ref();
         let assistant = &mut self.assistant;
 
         match msg {
@@ -278,6 +279,7 @@ impl App {
                         chat_id,
                         text,
                         allow_changes,
+                        fabric,
                     },
                 );
                 self.scroll_chat = true;

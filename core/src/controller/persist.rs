@@ -57,6 +57,8 @@ const CA_KEY: u16 = VENDOR_KEYS_START + 1;
 const NEXT_NODE_ID_KEY: u16 = VENDOR_KEYS_START + 2;
 /// The assistant's model, with its API key.
 const ASSISTANT_KEY: u16 = VENDOR_KEYS_START + 3;
+/// Our fabrics: their names, colors and CA signing keys, and the default.
+const FABRICS_KEY: u16 = VENDOR_KEYS_START + 4;
 
 /// Owns a shared KV store and exposes the controller's persistence operations:
 /// load/save our fabric (via rs-matter) and our device records. Generic over the
@@ -118,6 +120,66 @@ impl<'a, S: KvBlobStore> ControllerStore<'a, S> {
                 let mut key = rs_matter::crypto::CanonPkcSecretKey::new();
                 key.try_load_from_slice(&blob.signing_key)?;
                 Ok(Some((tier, key)))
+            }
+            None => Ok(None),
+        })
+    }
+
+    /// Forget the CA signing key of a single-fabric store, once moved into the
+    /// fabric records.
+    pub fn remove_ca(&self) -> Result<(), Error> {
+        self.kv.access(|kv, buf| kv.remove(CA_KEY, buf))
+    }
+
+    /// Forget a fabric of ours that rs-matter persisted.
+    pub fn remove_fabric(&self, fab_idx: core::num::NonZeroU8) -> Result<(), Error> {
+        FabricPersist::new(&self.kv).remove(fab_idx)
+    }
+
+    /// Persist our fabrics and which is the default.
+    pub fn save_fabrics(&self, default: u8, fabrics: &[FabricRecord]) -> Result<(), Error> {
+        let wire = FabricsBlob {
+            default,
+            fabrics: fabrics
+                .iter()
+                .map(|fabric| FabricRecordWire {
+                    fab_idx: fabric.fab_idx.get(),
+                    name: fabric.name.clone(),
+                    color: fabric.color,
+                    icac_tier: matches!(fabric.tier, crate::ca::CaTier::Icac),
+                    signing_key: OctetsVec::from_vec(fabric.signing_key.access().to_vec()),
+                })
+                .collect(),
+        };
+
+        Persist::new(&self.kv).store_tlv(FABRICS_KEY, wire)
+    }
+
+    /// Load our fabrics and which is the default, if persisted.
+    pub fn load_fabrics(&self) -> Result<Option<(u8, Vec<FabricRecord>)>, Error> {
+        self.kv.access(|kv, buf| match kv.load(FABRICS_KEY, buf)? {
+            Some(data) => {
+                let blob = FabricsBlob::from_tlv(&TLVElement::new(data))?;
+                let mut fabrics = Vec::new();
+                for wire in blob.fabrics {
+                    let Some(fab_idx) = core::num::NonZeroU8::new(wire.fab_idx) else {
+                        continue;
+                    };
+                    let mut signing_key = rs_matter::crypto::CanonPkcSecretKey::new();
+                    signing_key.try_load_from_slice(&wire.signing_key)?;
+                    fabrics.push(FabricRecord {
+                        fab_idx,
+                        name: wire.name,
+                        color: wire.color,
+                        tier: if wire.icac_tier {
+                            crate::ca::CaTier::Icac
+                        } else {
+                            crate::ca::CaTier::RcacDirect
+                        },
+                        signing_key,
+                    });
+                }
+                Ok(Some((blob.default, fabrics)))
             }
             None => Ok(None),
         })
@@ -274,6 +336,31 @@ fn opt_str(s: &str) -> Option<String> {
 // the wire form is a flat, TLV-friendly mirror. Kept separate so the model stays
 // transport-agnostic and free of TLV derives.
 // ---------------------------------------------------------------------------
+
+/// A fabric of ours, as persisted: rs-matter persists the fabric itself, we
+/// its name, color and CA signing key.
+pub struct FabricRecord {
+    pub fab_idx: core::num::NonZeroU8,
+    pub name: String,
+    pub color: u8,
+    pub tier: crate::ca::CaTier,
+    pub signing_key: rs_matter::crypto::CanonPkcSecretKey,
+}
+
+#[derive(ToTLV, FromTLV)]
+struct FabricsBlob {
+    default: u8,
+    fabrics: Vec<FabricRecordWire>,
+}
+
+#[derive(ToTLV, FromTLV)]
+struct FabricRecordWire {
+    fab_idx: u8,
+    name: String,
+    color: u8,
+    icac_tier: bool,
+    signing_key: OctetsVec,
+}
 
 /// Persisted controller-CA secret: the signing key + which tier it signs as.
 #[derive(ToTLV, FromTLV)]

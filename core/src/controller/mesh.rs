@@ -50,8 +50,8 @@ pub(crate) struct MeshInput {
     pub unread: Vec<UnreadDevice>,
     pub border_routers: Vec<BorderRouter>,
     pub hosts: Vec<MatterHost>,
-    /// Our compressed fabric ID: the hosts on it are our devices.
-    pub our_fabric: Option<u64>,
+    /// Our compressed fabric IDs: the hosts on them are our devices.
+    pub our_fabrics: Vec<u64>,
     /// The Wi-Fi channels our Wi-Fi devices are on, by device title.
     pub wifi_channels: Vec<(String, u16)>,
     /// The border routers' OMR prefixes, and whether this machine routes to
@@ -288,7 +288,7 @@ impl Builder {
         for host in &input.hosts {
             let sleep = host_sleep(host);
 
-            if input.our_fabric == Some(host.compressed_fabric_id) {
+            if input.our_fabrics.contains(&host.compressed_fabric_id) {
                 let ours = MeshNodeKind::Device {
                     node_id: host.node_id,
                 };
@@ -1318,7 +1318,7 @@ mod tests {
         const OURS: u64 = 0xEADD;
 
         let mut input = healthy();
-        input.our_fabric = Some(OURS);
+        input.our_fabrics = alloc::vec![OURS];
         input.border_routers[0].omr_prefix = Some("fdac:bcdf:a3c9:1::/64".into());
         input.devices[1].network.icd = Some(IcdInfo {
             mode: Some(IcdMode::Lit),

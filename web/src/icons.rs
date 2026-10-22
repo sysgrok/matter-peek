@@ -47,6 +47,7 @@ pub enum Icon {
     Share,
     Copy,
     Fabrics,
+    ChevronDown,
     Check,
     CheckCircle,
     XCircle,
@@ -370,6 +371,7 @@ pub fn icon(glyph: Icon, size: u32) -> Html {
             </>
         },
         Icon::ChevronRight => html! { <path d="M9 18l6-6-6-6" /> },
+        Icon::ChevronDown => html! { <path d="M6 9l6 6 6-6" /> },
         Icon::UpdateArrow => html! {
             <>
                 <circle cx="12" cy="12" r="10" />

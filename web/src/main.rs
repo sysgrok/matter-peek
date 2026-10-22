@@ -27,6 +27,7 @@ mod fabrics;
 mod icons;
 mod memory;
 mod network;
+mod our_fabrics;
 mod share;
 mod thread;
 mod ui;
@@ -124,6 +125,10 @@ enum Network {
 #[derive(Clone, PartialEq)]
 enum Ask {
     Decommission(u64),
+    /// Another controller's fabric on a device: its index, and its name.
+    RemoveFabric(u64, u8, String),
+    /// A fabric of ours, and what becomes of its devices.
+    DeleteFabric(u8, api::FabricDeletion),
     DeleteImage(String),
     DeleteChat(String),
     /// The assistant's model, and its key.
@@ -139,6 +144,8 @@ enum Msg {
     Share(share::ShareMsg),
     /// In a device's fabrics popup.
     Fabrics(fabrics::FabricsMsg),
+    /// Our fabrics: the one shown, and managing them.
+    OurFabrics(our_fabrics::FabricsMsg),
     /// On the Thread page.
     Thread(thread::ThreadMsg),
     /// Open or close the navigation drawer (on phones).
@@ -367,6 +374,16 @@ struct App {
     share: Option<share::ShareView>,
     /// The device whose fabrics popup is open.
     fabrics_of: Option<u64>,
+    /// Our fabrics, as last read.
+    fabrics: Vec<api::FabricInfo>,
+    /// The fabric picked to show; else the default.
+    fabric: Option<u8>,
+    /// The devices on all our fabrics; `stored` has those of the one shown.
+    all_devices: Vec<api::DeviceInfo>,
+    /// The fabric menu of the top bar is open.
+    fabric_menu: bool,
+    /// The fabrics popup, while open.
+    manage: Option<our_fabrics::ManageView>,
     thread: thread::ThreadPage,
     /// The network popup, when open.
     network_view: Option<NetworkView>,
@@ -444,6 +461,11 @@ impl Component for App {
             memory: None,
             share: None,
             fabrics_of: None,
+            fabrics: Vec::new(),
+            fabric: our_fabrics::remembered_visible(),
+            all_devices: Vec::new(),
+            fabric_menu: false,
+            manage: None,
             thread: Default::default(),
             network_view: None,
             assistant: Assistant::default(),
@@ -472,7 +494,12 @@ impl Component for App {
                     self.busy_stored = true;
                     self.loading = Some(Loading::List);
                     self.set_status(None);
-                    send_request(ctx.link().clone(), wire::Request::ListDevices);
+                    send_request(
+                        ctx.link().clone(),
+                        wire::Request::ListDevices {
+                            fabric: api::FabricRef::All,
+                        },
+                    );
                 }
                 // Devices offer updates to the images, and show those running.
                 if matches!(tab, Tab::Devices | Tab::Updates) {
@@ -488,6 +515,7 @@ impl Component for App {
             Msg::Memory(msg) => self.update_memory(ctx, msg),
             Msg::Share(msg) => self.update_share(ctx, msg),
             Msg::Fabrics(msg) => self.update_fabrics(msg),
+            Msg::OurFabrics(msg) => self.update_fabrics_list(ctx, msg),
             Msg::Thread(msg) => self.update_thread(ctx, msg),
             Msg::ToggleDrawer => {
                 self.drawer_open = !self.drawer_open;
@@ -501,6 +529,23 @@ impl Component for App {
                 match self.ask.take() {
                     Some(Ask::Decommission(node_id)) => {
                         ctx.link().send_message(Msg::Decommission(node_id))
+                    }
+                    Some(Ask::DeleteFabric(index, deletion)) => {
+                        ctx.link()
+                            .send_message(Msg::OurFabrics(our_fabrics::FabricsMsg::Deleted(
+                                index, deletion,
+                            )))
+                    }
+                    Some(Ask::RemoveFabric(node_id, fabric_index, _)) => {
+                        self.loading = Some(Loading::Device(node_id));
+                        self.error = None;
+                        send_request(
+                            ctx.link().clone(),
+                            wire::Request::RemoveDeviceFabric {
+                                node_id,
+                                fabric_index,
+                            },
+                        );
                     }
                     Some(Ask::DeleteImage(name)) => ctx.link().send_message(Msg::OtaDelete(name)),
                     Some(Ask::DeleteChat(chat_id)) => {
@@ -817,7 +862,12 @@ impl Component for App {
                 self.loading = Some(Loading::List);
                 self.set_status(None);
                 self.error = None;
-                send_request(ctx.link().clone(), wire::Request::ListDevices);
+                send_request(
+                    ctx.link().clone(),
+                    wire::Request::ListDevices {
+                        fabric: api::FabricRef::All,
+                    },
+                );
                 true
             }
             Msg::Sync => {
@@ -825,7 +875,12 @@ impl Component for App {
                 self.set_status(Some("Syncing with the devices on our fabric…".into()));
                 self.error = None;
                 self.notice = None;
-                send_request(ctx.link().clone(), wire::Request::Sync);
+                send_request(
+                    ctx.link().clone(),
+                    wire::Request::Sync {
+                        fabric: api::FabricRef::All,
+                    },
+                );
                 true
             }
             Msg::Refresh(node_id) => {
@@ -1185,10 +1240,10 @@ impl Component for App {
                             .iter()
                             .map(|d| (d.handle.node_id, d.tags.join(", ")))
                             .collect();
-                        self.stored = devices;
                         // A dashboard watches everything: auto-subscribe every
-                        // listed device (and drop panels for any that vanished).
-                        self.sync_subscriptions(ctx);
+                        // listed device of the fabric shown (and drop panels for
+                        // any that vanished).
+                        self.set_devices(ctx, devices);
                     }
                     wire::Response::Peek { node_id, health } => {
                         // A Refresh result: merge the fresh read into the device's
@@ -1213,6 +1268,8 @@ impl Component for App {
                     }
                     // The share popup's own.
                     wire::Response::CommissioningWindow { .. } => {}
+                    // The fabric module's own.
+                    wire::Response::Fabrics { .. } => {}
                     // The Assistant page's requests answer to it.
                     // The Assistant page's own.
                     wire::Response::Chats { .. }
@@ -1270,7 +1327,12 @@ impl Component for App {
                         self.result = Some(other);
                         self.busy_stored = true;
                         self.loading = Some(Loading::List);
-                        send_request(ctx.link().clone(), wire::Request::ListDevices);
+                        send_request(
+                            ctx.link().clone(),
+                            wire::Request::ListDevices {
+                                fabric: api::FabricRef::All,
+                            },
+                        );
                         self.tab = Tab::Devices;
                     }
                     wire::Response::Error { message } => self.error = Some(message),
@@ -1338,6 +1400,7 @@ impl Component for App {
                 { self.view_logs_modal(link) }
                 { self.view_memory_modal(link) }
                 { self.view_fabrics_modal(link) }
+                { self.view_manage_modal(link) }
                 { self.view_share_modal(link) }
                 { self.view_settings_modal(link) }
                 { self.view_network_modal(link) }
@@ -1349,6 +1412,8 @@ impl Component for App {
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
         // The app opens on the Devices tab; load it as if the user picked it.
         if first_render {
+            ctx.link()
+                .send_message(Msg::OurFabrics(our_fabrics::FabricsMsg::Load));
             ctx.link().send_message(Msg::SelectTab(Tab::Devices));
         }
 
@@ -1609,6 +1674,7 @@ impl App {
             via: self.commission_via(),
             setup_code,
             remember: self.remember,
+            fabric: self.fabric_ref(),
         };
         send_request(ctx.link().clone(), req);
 
@@ -1674,6 +1740,7 @@ impl App {
                             <span class="brand-mark">{ icon(Icon::Logo, 20) }</span>
                             <span class="brand-name">{ "matter-peek" }</span>
                         </a>
+                        { self.view_fabric_switcher(link) }
                         <nav class="appbar-nav">
                             { for pages.into_iter().map(|page| link_to("appbar-link", page)) }
                             <a class={classes!("appbar-link", "is-assistant", assistant)}
@@ -1695,6 +1762,11 @@ impl App {
                             <p class="drawer-tagline">{ "The Matter diagnostics tool" }</p>
                         </div>
                     </div>
+                    if !self.fabrics.is_empty() {
+                        <div class="drawer-fabrics">
+                            { self.view_fabric_choices(link) }
+                        </div>
+                    }
                     <nav class="drawer-nav">
                         { for pages.into_iter().map(|page| link_to("drawer-link", page)) }
                     </nav>
@@ -1758,6 +1830,37 @@ impl App {
                     "Decommission",
                 )
             }
+            Ask::DeleteFabric(index, deletion) => {
+                let name = self
+                    .fabrics
+                    .iter()
+                    .find(|fabric| fabric.index == *index)
+                    .map(|fabric| fabric.name.clone())
+                    .unwrap_or_else(|| format!("#{index}"));
+                (
+                    format!("Delete the fabric {name}?"),
+                    match deletion {
+                        api::FabricDeletion::Decommission => {
+                            "Each of its devices is decommissioned first: the fabric is removed from it, if it is reached, and it leaves the list. Then the fabric and its root CA are gone for good."
+                        }
+                        api::FabricDeletion::Forget => {
+                            "Its devices leave the list without being contacted: they keep the dead fabric in a slot until another controller removes it. The fabric and its root CA are gone for good."
+                        }
+                        api::FabricDeletion::Refuse => {
+                            "The fabric and its root CA are gone for good."
+                        }
+                    }
+                    .to_string(),
+                    "Delete",
+                )
+            }
+            Ask::RemoveFabric(node_id, _, name) => (
+                format!("Remove {name} from {}?", self.device_title(*node_id)),
+                format!(
+                    "{name} loses the device until it is shared with it again. Our fabric stays."
+                ),
+                "Remove",
+            ),
             Ask::DeleteChat(_) => (
                 "Delete this chat?".to_string(),
                 "Its conversation is gone for good.".to_string(),
@@ -2245,7 +2348,7 @@ fn textarea_value(e: InputEvent) -> String {
         .unwrap_or_default()
 }
 
-fn input_value(e: InputEvent) -> String {
+pub(crate) fn input_value(e: InputEvent) -> String {
     use wasm_bindgen::JsCast;
     use web_sys::HtmlInputElement;
     e.target()

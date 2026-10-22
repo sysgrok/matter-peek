@@ -177,11 +177,84 @@ pub struct DeviceList {
     pub notice: Option<String>,
 }
 
+/// A fabric of ours: a "home" devices are commissioned into, with a root CA
+/// of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct FabricInfo {
+    /// Its index: how the API names it, and the devices on it.
+    pub index: u8,
+    /// Its name, unique among ours.
+    pub name: String,
+    /// Its color: one of the front-ends' 8.
+    pub color: u8,
+    pub fabric_id: u64,
+    pub compressed_fabric_id: u64,
+    /// Our node ID on it.
+    pub node_id: u64,
+    pub vendor_id: u16,
+    /// Whether a request naming no fabric gets it. It can't be deleted.
+    pub default: bool,
+    /// The devices listed on it.
+    pub devices: u32,
+}
+
+/// Which of our fabrics a request is about.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "by", rename_all = "snake_case")]
+pub enum FabricRef {
+    /// The default fabric.
+    #[default]
+    Default,
+    /// Every fabric of ours, where a request can be about several.
+    All,
+    Index {
+        index: u8,
+    },
+    /// By name, whatever its case.
+    Name {
+        name: String,
+    },
+}
+
+impl FabricRef {
+    /// From what a user typed: `all`, a name, or an index (`2`, `#2`).
+    pub fn parse(text: &str) -> Self {
+        let text = text.trim();
+
+        match text.strip_prefix('#').unwrap_or(text).parse::<u8>() {
+            Ok(index) => Self::Index { index },
+            Err(_) if text.eq_ignore_ascii_case("all") => Self::All,
+            Err(_) => Self::Name { name: text.into() },
+        }
+    }
+}
+
+/// What becomes of the devices on a fabric we delete.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum FabricDeletion {
+    /// Refuse while there are any.
+    #[default]
+    Refuse,
+    /// Decommission each first: remove the fabric from it (if it is reached)
+    /// and drop it from the list.
+    Decommission,
+    /// Forget them: they keep the fabric, now dead, in a slot of theirs until
+    /// another controller removes it.
+    Forget,
+}
+
 /// A device on our fabric. See also its [`display`](super::display) helpers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DeviceInfo {
     pub handle: DeviceHandle,
+    /// The name of the fabric of ours it is on.
+    #[serde(default)]
+    pub fabric: String,
     /// BasicInformation `UniqueID` (stable across resets).
     pub unique_id: String,
     pub serial_number: String,
@@ -290,9 +363,15 @@ pub struct DeviceFabric {
     pub fabric_id: u64,
     /// The device's node ID on the fabric.
     pub node_id: u64,
-    /// Whether it is our fabric.
+    /// The public key of its root CA, in hex: who issued it.
+    #[serde(default)]
+    pub root_key: String,
+    /// Whether it is a fabric of ours.
     #[serde(default)]
     pub ours: bool,
+    /// Our name for it, if it is ours.
+    #[serde(default)]
+    pub our_name: Option<String>,
 }
 
 /// Part of the General Diagnostics cluster (`0x0033`).
@@ -1140,7 +1219,9 @@ mod tests {
             label: String::new(),
             fabric_id: index.into(),
             node_id: 0x1B669,
+            root_key: String::new(),
             ours: false,
+            our_name: None,
         }
     }
 

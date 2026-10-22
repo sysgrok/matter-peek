@@ -184,6 +184,16 @@ impl ControllerCa {
         self.tier
     }
 
+    /// The RCAC, as TLV.
+    pub fn rcac(&self) -> &[u8] {
+        &self.rcac
+    }
+
+    /// The ICAC, as TLV; empty in [`CaTier::RcacDirect`].
+    pub fn icac(&self) -> &[u8] {
+        &self.icac
+    }
+
     /// The RCAC's public key (P-256 SubjectPublicKey, 65-byte uncompressed EC
     /// point), parsed from our held RCAC cert. This is the canonical identity of
     /// the *fabric root*: a `FabricDescriptor.root_public_key` on a device equal
