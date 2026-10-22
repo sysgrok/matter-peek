@@ -4,7 +4,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 
 use log::{info, warn};
 
@@ -36,6 +36,10 @@ const DECOMMISSION_RETRY_DELAY_SECS: u64 = 2;
 /// device costs a full CASE timeout, and a cached advertisement can outlive the
 /// device.
 const DECOMMISSION_TIMEOUT_SECS: u64 = 30;
+
+/// How long the border routers are not asked again for Thread network names
+/// they did not have.
+const THREAD_NAMES_RETRY: Duration = Duration::from_secs(60);
 
 impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// The listed devices, with `notice` about the operation that produced the
@@ -84,18 +88,46 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         Ok(health)
     }
 
+    /// Name the Thread networks of `info` the device knows by no name, as the
+    /// border routers on the local network advertise them. Names they did not
+    /// have are asked for again a minute later at the earliest.
+    pub(super) async fn name_thread_networks(&self, info: &mut NetworkInfo) {
+        let missing: Vec<u64> = crate::network::unnamed_thread_networks(info)
+            .into_iter()
+            .filter(|xpan| !self.thread_names.borrow().contains_key(xpan))
+            .collect();
+        let asked_lately = self
+            .thread_names_missed
+            .get()
+            .is_some_and(|at| at.elapsed() < THREAD_NAMES_RETRY);
+
+        if !missing.is_empty() && !asked_lately {
+            let found = crate::mdns::thread_networks(&missing).await;
+
+            let mut names = self.thread_names.borrow_mut();
+            names.extend(found);
+            if missing.iter().any(|xpan| !names.contains_key(xpan)) {
+                self.thread_names_missed.set(Some(Instant::now()));
+            }
+        }
+
+        let names = self.thread_names.borrow();
+        crate::network::name_thread_networks(info, |xpan| names.get(&xpan).cloned());
+    }
+
     /// Read the networking of a listed device, noting the kind of network it is
     /// on in its listing.
     pub(super) async fn read_network(&self, node_id: u64) -> Result<NetworkInfo, PeekError> {
         let dev = self.lookup_device(node_id)?;
 
-        let info = self
+        let mut info = self
             .controller
             .read_network(dev.handle)
             .await
             .map_err(|e| failed(&format!("device 0x{node_id:016X} did not answer"), e))?;
 
         self.set_online(node_id, true);
+        self.name_thread_networks(&mut info).await;
 
         let kind = info
             .configs

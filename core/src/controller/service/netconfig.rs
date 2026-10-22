@@ -337,12 +337,15 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     }
 
     async fn read_network_of(&self, handle: DeviceHandle) -> Result<NetworkInfo, PeekError> {
-        self.controller.read_network(handle).await.map_err(|e| {
+        let mut info = self.controller.read_network(handle).await.map_err(|e| {
             failed(
                 &format!("device 0x{:016X} did not answer", handle.node_id),
                 e,
             )
-        })
+        })?;
+        self.name_thread_networks(&mut info).await;
+
+        Ok(info)
     }
 }
 

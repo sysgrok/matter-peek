@@ -15,6 +15,9 @@
 
 use core::future::Future;
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use rs_matter::crypto::Crypto;
 use rs_matter::error::Error;
 use rs_matter::transport::network::mdns::builtin::{BuiltinMdns, Host};
@@ -228,6 +231,113 @@ impl Mdns for NoMdns {
     }
 }
 
+/// The Thread networks the border routers on the local network advertise
+/// (MeshCoP, `_meshcop._udp`): their extended PAN IDs and names. Looks until
+/// all of `wanted` are found, the daemon has nothing more, or
+/// [`MESHCOP_WINDOW`] has passed. Avahi only; none with the other backends.
+pub(crate) async fn thread_networks(wanted: &[u64]) -> Vec<(u64, String)> {
+    #[cfg(feature = "mdns-avahi")]
+    match avahi_meshcop(wanted).await {
+        Ok(found) => found,
+        Err(e) => {
+            log::debug!("mdns: no Thread network names from Avahi: {e}");
+            Vec::new()
+        }
+    }
+
+    #[cfg(not(feature = "mdns-avahi"))]
+    {
+        let _ = wanted;
+        Vec::new()
+    }
+}
+
+/// How long [`thread_networks`] looks at most.
+#[cfg(feature = "mdns-avahi")]
+const MESHCOP_WINDOW: embassy_time::Duration = embassy_time::Duration::from_secs(2);
+
+#[cfg(feature = "mdns-avahi")]
+async fn avahi_meshcop(wanted: &[u64]) -> rs_matter::utils::zbus::Result<Vec<(u64, String)>> {
+    use embassy_futures::select::{select, select3, Either, Either3};
+    use embassy_time::{Instant, Timer};
+    use futures_util::StreamExt;
+    use rs_matter::utils::zbus_proxies::avahi::server2::Server2Proxy;
+    use rs_matter::utils::zbus_proxies::avahi::service_browser::ServiceBrowserProxy;
+
+    const IF_UNSPEC: i32 = -1;
+    const PROTO_UNSPEC: i32 = -1;
+
+    let connection = rs_matter::utils::zbus::Connection::system().await?;
+    let avahi = Server2Proxy::new(&connection).await?;
+    let path = avahi
+        .service_browser_prepare(IF_UNSPEC, PROTO_UNSPEC, "_meshcop._udp", "", 0)
+        .await?;
+    let browser = ServiceBrowserProxy::builder(&connection)
+        .path(path)?
+        .build()
+        .await?;
+    let mut items = browser.receive_item_new().await?;
+    let mut all_for_now = browser.receive_all_for_now().await?;
+    browser.start().await?;
+
+    let deadline = Instant::now() + MESHCOP_WINDOW;
+    let mut found = Vec::new();
+
+    while !wanted
+        .iter()
+        .all(|xpan| found.iter().any(|(seen, _)| seen == xpan))
+    {
+        let item = match select3(items.next(), all_for_now.next(), Timer::at(deadline)).await {
+            Either3::First(Some(item)) => item,
+            _ => break,
+        };
+        let Ok(args) = item.args() else { continue };
+
+        let resolve = avahi.resolve_service(
+            args.interface,
+            args.protocol,
+            args.name,
+            args.type_,
+            args.domain,
+            PROTO_UNSPEC,
+            0,
+        );
+        let resolved = match select(resolve, Timer::at(deadline)).await {
+            Either::First(Ok(resolved)) => resolved,
+            Either::First(Err(_)) => continue,
+            Either::Second(()) => break,
+        };
+
+        if let Some(network) = meshcop_network(&resolved.9) {
+            if !found.iter().any(|(xpan, _)| *xpan == network.0) {
+                found.push(network);
+            }
+        }
+    }
+
+    let _ = browser.free().await;
+
+    Ok(found)
+}
+
+/// The extended PAN ID (`xp`, 8 bytes) and name (`nn`) in a MeshCoP TXT
+/// record.
+#[cfg(any(feature = "mdns-avahi", test))]
+fn meshcop_network(txt: &[Vec<u8>]) -> Option<(u64, String)> {
+    let value = |key: &[u8]| {
+        txt.iter().find_map(|entry| {
+            entry
+                .strip_prefix(key)
+                .and_then(|rest| rest.strip_prefix(b"="))
+        })
+    };
+
+    let xpan = u64::from_be_bytes(value(b"xp")?.try_into().ok()?);
+    let name = core::str::from_utf8(value(b"nn")?).ok()?.trim();
+
+    (!name.is_empty()).then(|| (xpan, name.into()))
+}
+
 /// A connection to the system D-Bus.
 #[cfg(any(feature = "mdns-avahi", feature = "mdns-resolve"))]
 async fn system_bus() -> Result<rs_matter::utils::zbus::Connection, Error> {
@@ -276,4 +386,37 @@ fn interface() -> Result<(Ipv4Addr, rs_matter::transport::network::Ipv6Addr, u32
 
     log::info!("mdns: using interface {iname} ({ip}/{ipv6})");
     Ok((ip.octets().into(), ipv6.octets().into(), 0))
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+
+    use super::*;
+
+    #[test]
+    fn meshcop_txt_names_a_thread_network() {
+        // As a Google Nest Hub advertises it.
+        let txt = vec![
+            b"mn=Google Nest Hub".to_vec(),
+            b"nn=NEST-PAN-0FD8".to_vec(),
+            [
+                b"xp=".as_slice(),
+                &[0xB5, 0x66, 0x14, 0x7D, 0x38, 0xE3, 0x84, 0x20],
+            ]
+            .concat(),
+            b"tv=1.4.0".to_vec(),
+        ];
+        assert_eq!(
+            meshcop_network(&txt),
+            Some((0xB566_147D_38E3_8420, "NEST-PAN-0FD8".into()))
+        );
+
+        // A short `xp`, or no name: nothing.
+        assert_eq!(
+            meshcop_network(&[b"xp=12".to_vec(), b"nn=X".to_vec()]),
+            None
+        );
+        assert_eq!(meshcop_network(&txt[2..3]), None);
+    }
 }

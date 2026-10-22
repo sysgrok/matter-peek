@@ -111,6 +111,11 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     /// The listed devices we keep no record of (not remembered): commissioned
     /// without `remember`, or found by a sync, since the controller started.
     transient: RefCell<Vec<StoredDevice>>,
+    /// The names of Thread networks, by extended PAN ID, as border routers
+    /// advertise them.
+    thread_names: RefCell<BTreeMap<u64, String>>,
+    /// When the border routers were last asked for names they did not have.
+    thread_names_missed: Cell<Option<Instant>>,
     /// The Bluetooth side of the transport, for commissioning over BLE.
     #[cfg(feature = "ble")]
     btp: &'a rs_matter::transport::network::btp::Btp,
@@ -414,6 +419,8 @@ async fn run<'a, C, S, O, N, M>(
         next_upload_id: Cell::new(1),
         online: RefCell::new(None),
         transient: RefCell::new(Vec::new()),
+        thread_names: RefCell::new(BTreeMap::new()),
+        thread_names_missed: Cell::new(None),
         #[cfg(feature = "ble")]
         btp: &btp,
     };

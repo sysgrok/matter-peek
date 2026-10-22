@@ -463,6 +463,10 @@ fn known_networks(config: &api::NetworkConfig, view: &NetworkView, link: &Scope<
 
     let rows = config.networks.iter().enumerate().map(|(index, network)| {
         let id = network.id.clone();
+        // A Thread network known by name shows its extended PAN ID too.
+        let xpan = (kind == Some(api::NetworkKind::Thread))
+            .then(|| network.id.iter().map(|b| format!("{b:02X}")).collect::<String>());
+        let named = xpan.as_deref().is_none_or(|xpan| network.name != xpan);
         let failed = failed
             .filter(|(_, last)| *last == network.id.as_slice())
             .map(|(status, _)| status);
@@ -478,10 +482,12 @@ fn known_networks(config: &api::NetworkConfig, view: &NetworkView, link: &Scope<
                     { kind_icon(kind).map(|glyph| icon(glyph, 18)).unwrap_or_default() }
                 </span>
                 <div class="net-name">
-                    <span class={classes!(
-                        "net-name-text",
-                        (kind == Some(api::NetworkKind::Thread)).then_some("mono"),
-                    )}>{ network.name.clone() }</span>
+                    <span class={classes!("net-name-text", (!named).then_some("mono"))}>
+                        { network.name.clone() }
+                    </span>
+                    if let Some(xpan) = xpan.filter(|_| named) {
+                        <span class="net-name-id mono" title="Extended PAN ID">{ xpan }</span>
+                    }
                     if network.connected {
                         <span class="pill is-up" title="As the device reports it">{ "Connected" }</span>
                     }

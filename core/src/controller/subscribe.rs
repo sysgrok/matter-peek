@@ -399,7 +399,7 @@ where
     let window = Duration::from_secs(max_int as u64)
         + report_round_trip(matter, fab_idx, node_id) * ROUND_TRIPS;
     info!(
-        "subscription 0x{node_id:016X}: offline after {} ms without a report",
+        "subscription 0x{node_id:016X}: counted offline after {} ms without a report",
         window.as_millis()
     );
 
@@ -446,8 +446,10 @@ where
     let mut chunk = loop {
         match sender.tx().await? {
             TxOutcome::BuildRequest(builder) => {
+                // Our one subscription to a device replaces any earlier one,
+                // which the device may still hold after we gave it up.
                 sender = builder
-                    .keep_subs(true)?
+                    .keep_subs(false)?
                     .min_int_floor(MIN_INTERVAL_FLOOR_SECS)?
                     .max_int_ceil(MAX_INTERVAL_CEIL_SECS)?
                     .attr_requests_from(paths)?

@@ -40,7 +40,7 @@ use rs_matter::Matter;
 
 use crate::api::{
     KnownNetwork, NetworkConfig, NetworkInfo, NetworkInterfaceInfo, NetworkKind, NetworkStatus,
-    ThreadNeighbor, ThreadRole, WifiSecurity, WifiVersion,
+    ThreadDiag, ThreadNeighbor, ThreadRole, WifiSecurity, WifiVersion,
 };
 
 /// General Diagnostics lives on the root endpoint.
@@ -90,7 +90,7 @@ pub async fn read_network<C: Crypto>(
     }
 
     for config in &mut info.configs {
-        name_networks(config);
+        name_networks(config, info.thread.as_ref());
     }
     info.configs.sort_by_key(|config| config.endpoint);
 
@@ -501,11 +501,28 @@ fn config(info: &mut NetworkInfo, endpoint: EndptId) -> &mut NetworkConfig {
 }
 
 /// Name the networks of `config` by the kind of network: SSIDs and interface
-/// names as text, Thread extended PAN IDs in hex.
-fn name_networks(config: &mut NetworkConfig) {
+/// names as text; a Thread network by the name the device's Thread
+/// diagnostics give the one it is on, else by its extended PAN ID in hex.
+fn name_networks(config: &mut NetworkConfig, thread: Option<&ThreadDiag>) {
     let kind = config.kind;
+    // The diagnostics are of the network the device is on, which they may
+    // leave unidentified.
+    let connected: Option<Vec<u8>> = config
+        .networks
+        .iter()
+        .find(|network| network.connected)
+        .map(|network| network.id.clone());
+    let thread_name = |id: &[u8]| {
+        let thread = thread?;
+        let on = match thread.extended_pan_id {
+            Some(xpan) => extended_pan_id(id) == Some(xpan),
+            None => connected.as_deref() == Some(id),
+        };
+
+        on.then(|| thread.network_name.clone()).flatten()
+    };
     let name = |id: &[u8]| match kind {
-        Some(NetworkKind::Thread) => hex(id),
+        Some(NetworkKind::Thread) => thread_name(id).unwrap_or_else(|| hex(id)),
         _ => match core::str::from_utf8(id) {
             Ok(text) => text.to_string(),
             Err(_) => hex(id),
@@ -517,6 +534,55 @@ fn name_networks(config: &mut NetworkConfig) {
     }
 
     config.last_network = config.last_network_id.as_deref().map(name);
+}
+
+/// The extended PAN IDs of the Thread networks of `info` known by no name.
+pub fn unnamed_thread_networks(info: &NetworkInfo) -> Vec<u64> {
+    let mut unnamed: Vec<u64> = thread_configs(info)
+        .flat_map(|config| &config.networks)
+        .filter(|network| network.name == hex(&network.id))
+        .filter_map(|network| extended_pan_id(&network.id))
+        .collect();
+    unnamed.sort_unstable();
+    unnamed.dedup();
+
+    unnamed
+}
+
+/// Name the Thread networks of `info` known by no name with `name`, by their
+/// extended PAN ID.
+pub fn name_thread_networks(info: &mut NetworkInfo, name: impl Fn(u64) -> Option<String>) {
+    let name = |id: &[u8], current: &mut String| {
+        if *current == hex(id) {
+            if let Some(found) = extended_pan_id(id).and_then(&name) {
+                *current = found;
+            }
+        }
+    };
+
+    for config in info
+        .configs
+        .iter_mut()
+        .filter(|config| config.kind == Some(NetworkKind::Thread))
+    {
+        for network in &mut config.networks {
+            name(&network.id, &mut network.name);
+        }
+        if let (Some(id), Some(last)) = (&config.last_network_id, &mut config.last_network) {
+            name(id, last);
+        }
+    }
+}
+
+fn thread_configs(info: &NetworkInfo) -> impl Iterator<Item = &NetworkConfig> {
+    info.configs
+        .iter()
+        .filter(|config| config.kind == Some(NetworkKind::Thread))
+}
+
+/// The extended PAN ID a Thread network ID is.
+fn extended_pan_id(id: &[u8]) -> Option<u64> {
+    id.try_into().ok().map(u64::from_be_bytes)
 }
 
 pub(crate) fn status(status: NetworkCommissioningStatusEnum) -> NetworkStatus {
@@ -640,7 +706,9 @@ fn hex_val(b: u8) -> Option<u8> {
 mod test {
     use alloc::vec;
 
-    use super::decode_hex;
+    use alloc::string::{String, ToString};
+
+    use super::*;
 
     #[test]
     fn decode_hex_round_trips() {
@@ -651,5 +719,79 @@ mod test {
         );
         assert!(decode_hex("abc").is_err()); // odd length
         assert!(decode_hex("zz").is_err()); // non-hex
+    }
+
+    /// A device on Thread network `on`, knowing `known` too, with
+    /// diagnostics `thread`.
+    fn thread_device(on: u64, known: u64, thread: Option<ThreadDiag>) -> NetworkInfo {
+        let mut info = NetworkInfo {
+            thread,
+            ..Default::default()
+        };
+        let config = config(&mut info, 0);
+        config.kind = Some(NetworkKind::Thread);
+        config.networks = [(on, true), (known, false)]
+            .into_iter()
+            .map(|(xpan, connected)| KnownNetwork {
+                id: xpan.to_be_bytes().to_vec(),
+                name: String::new(),
+                connected,
+            })
+            .collect();
+        config.last_network_id = Some(on.to_be_bytes().to_vec());
+
+        let thread = info.thread.clone();
+        name_networks(&mut info.configs[0], thread.as_ref());
+
+        info
+    }
+
+    fn names(info: &NetworkInfo) -> Vec<&str> {
+        info.configs[0]
+            .networks
+            .iter()
+            .map(|network| network.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn thread_networks_named_by_their_diagnostics() {
+        let diag = ThreadDiag {
+            network_name: Some("NEST-PAN-0FD8".into()),
+            extended_pan_id: Some(0xB566_147D_38E3_8420),
+            ..Default::default()
+        };
+        let info = thread_device(0xB566_147D_38E3_8420, 0x1111_2222_3333_4444, Some(diag));
+        assert_eq!(names(&info), ["NEST-PAN-0FD8", "1111222233334444"]);
+        assert_eq!(
+            info.configs[0].last_network.as_deref(),
+            Some("NEST-PAN-0FD8")
+        );
+        assert_eq!(unnamed_thread_networks(&info), [0x1111_2222_3333_4444]);
+
+        // Diagnostics without the extended PAN ID name the connected one.
+        let diag = ThreadDiag {
+            network_name: Some("WPAN-1".into()),
+            ..Default::default()
+        };
+        let info = thread_device(1, 2, Some(diag));
+        assert_eq!(names(&info), ["WPAN-1", "0000000000000002"]);
+    }
+
+    #[test]
+    fn thread_networks_named_by_border_routers() {
+        // All null, as some devices report.
+        let mut info = thread_device(0xB566_147D_38E3_8420, 2, Some(ThreadDiag::default()));
+        assert_eq!(names(&info), ["B566147D38E38420", "0000000000000002"]);
+        assert_eq!(unnamed_thread_networks(&info), [2, 0xB566_147D_38E3_8420]);
+
+        name_thread_networks(&mut info, |xpan| {
+            (xpan == 0xB566_147D_38E3_8420).then(|| "NEST-PAN-0FD8".to_string())
+        });
+        assert_eq!(names(&info), ["NEST-PAN-0FD8", "0000000000000002"]);
+        assert_eq!(
+            info.configs[0].last_network.as_deref(),
+            Some("NEST-PAN-0FD8")
+        );
     }
 }

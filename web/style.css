@@ -328,6 +328,7 @@ pre.log-text { max-height: 70vh; margin: 0; padding: .75rem 0; overflow: auto; b
 .net-row-icon { flex: none; width: 2.1rem; height: 2.1rem; border-radius: 10px; display: flex; align-items: center; justify-content: center; color: var(--net-accent); background: color-mix(in srgb, var(--net-accent) 14%, transparent); }
 .net-name { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: .15rem .6rem; }
 .net-name-text { font-weight: 600; color: var(--bulma-text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.net-name-id { font-size: .75rem; color: var(--bulma-text-weak); }
 .icon-actions { flex: none; display: flex; gap: .1rem; }
 .icon-action { width: 2.1rem; height: 2.1rem; display: inline-flex; align-items: center; justify-content: center; border: none; border-radius: 8px; background: transparent; color: var(--bulma-text-weak); cursor: pointer; transition: background .15s, color .15s; }
 .icon-action:hover:not(:disabled) { background: var(--bulma-background); color: var(--bulma-text-strong); }

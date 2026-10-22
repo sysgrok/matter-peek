@@ -253,7 +253,8 @@ impl KeyArgs {
 }
 
 /// A change to the networks a device knows, each committed under a fail-safe.
-/// A network is named as `network` shows it: an SSID, a Thread extended PAN ID.
+/// A network is named as `network` shows it: an SSID; a Thread network by its
+/// name or its extended PAN ID.
 #[derive(Subcommand)]
 enum NetworkChange {
     /// Give the device a network, or new credentials for one it knows. New
@@ -1020,7 +1021,10 @@ async fn network_change(
                     .into_iter()
                     .filter(|config| config.endpoint == endpoint)
                     .flat_map(|config| config.networks)
-                    .find(|known| known.name.eq_ignore_ascii_case(&name)),
+                    .find(|known| {
+                        known.name.eq_ignore_ascii_case(&name)
+                            || hex(&known.id).eq_ignore_ascii_case(name.trim_start_matches("0x"))
+                    }),
                 wire::Response::Error { message } => {
                     eprintln!("error: {message}");
                     return Ok(None);
@@ -1105,7 +1109,14 @@ fn network_text(info: &api::NetworkInfo) -> String {
             } else {
                 ""
             };
-            let _ = writeln!(out, "  {}{mark}", network.name);
+            // A Thread network's name, with its extended PAN ID.
+            let id = hex(&network.id);
+            let also = if config.kind == Some(api::NetworkKind::Thread) && network.name != id {
+                format!("  {id}")
+            } else {
+                String::new()
+            };
+            let _ = writeln!(out, "  {}{also}{mark}", network.name);
         }
         if let Some(status) = config.last_status {
             let on = config
@@ -1270,4 +1281,9 @@ fn ota_progress_text(progress: &api::OtaProgress) -> String {
         api::OtaProgress::Applying { version } => format!("Applying version {version}..."),
         api::OtaProgress::Applied { version } => format!("Updated: runs version {version}"),
     }
+}
+
+/// `bytes` in uppercase hex.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02X}")).collect()
 }

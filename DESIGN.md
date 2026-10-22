@@ -219,6 +219,11 @@ of it is private to `core`.
   Thread, its extended PAN ID. A network's Connected flag is the fallback only:
   some devices get it wrong (the Shelly Gen4 keeps it on a position in the list,
   not on the network).
+- A device names its Thread networks only by extended PAN ID (their datasets
+  are write-only). The one it is on is named as its Thread Network Diagnostics
+  say; the others, and that one where the diagnostics are empty, as the border routers on the LAN advertise them (MeshCoP's
+  `nn` and `xp`, browsed through Avahi and kept for the controller's lifetime);
+  else by the extended PAN ID in hex.
 
 ### OTA
 We are the devices' OTA Provider: images are stored as files (uploaded in
