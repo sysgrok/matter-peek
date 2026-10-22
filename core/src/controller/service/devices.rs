@@ -407,6 +407,8 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             node_label: device.node_label,
             vendor_name: device.vendor_name,
             product_name: device.product_name,
+            hardware_version_string: device.hardware_version_string,
+            software_version_string: device.software_version_string,
             fingerprint: device.fingerprint,
             network: device.network,
         };
@@ -501,6 +503,8 @@ fn refresh_identity(device: &mut StoredDevice, ident: DeviceIdentity) {
     device.serial_number = ident.serial_number;
     device.vendor_name = ident.vendor_name;
     device.product_name = ident.product_name;
+    device.hardware_version_string = ident.hardware_version_string;
+    device.software_version_string = ident.software_version_string;
     device.fingerprint = ident.fingerprint;
     if ident.network.is_some() {
         device.network = ident.network;
@@ -536,6 +540,8 @@ pub(super) fn new_record(handle: DeviceHandle, ident: &DeviceIdentity) -> Stored
         node_label: ident.node_label.clone(),
         vendor_name: ident.vendor_name.clone(),
         product_name: ident.product_name.clone(),
+        hardware_version_string: ident.hardware_version_string.clone(),
+        software_version_string: ident.software_version_string.clone(),
         fingerprint: ident.fingerprint,
         tags: Vec::new(),
         network: ident.network,

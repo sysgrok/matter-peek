@@ -191,6 +191,12 @@ pub struct DeviceInfo {
     pub vendor_name: String,
     /// BasicInformation `ProductName` (empty if the device didn't serve it).
     pub product_name: String,
+    /// BasicInformation `HardwareVersionString` (empty if not served).
+    #[serde(default)]
+    pub hardware_version_string: String,
+    /// BasicInformation `SoftwareVersionString` (empty if not served).
+    #[serde(default)]
+    pub software_version_string: String,
     /// Per-model numeric fingerprint (vendor/product/hw/sw), for display and the
     /// re-match suggestion.
     pub fingerprint: Fingerprint,

@@ -167,6 +167,7 @@ html, body { background: var(--bulma-scheme-main-bis); min-height: 100vh; }
 .device-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .5rem 1rem; font-size: .82rem; }
 .device-facts dt { font-size: .68rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--bulma-text-weak); }
 .device-facts dd { margin: 0; color: var(--bulma-text-strong); overflow-wrap: anywhere; }
+.device-versions { display: flex; flex-direction: column; }
 .health-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: .5rem; }
 .health-tile { display: flex; align-items: center; gap: .6rem; padding: .55rem .7rem; border: 1px solid var(--bulma-border-weak); border-radius: 12px; background: var(--bulma-scheme-main-bis); }
 .health-tile-icon { flex: none; width: 1.9rem; height: 1.9rem; border-radius: 8px; display: flex; align-items: center; justify-content: center; background: hsla(var(--link-hsl), .12); color: var(--bulma-link); }

@@ -1,7 +1,7 @@
 //! Reading a device's identity in one round trip: its BasicInformation (the
 //! stable string identifiers `UniqueID` / `SerialNumber` / `NodeLabel`, its
-//! names, and a fingerprint from the mandatory numeric attributes as a
-//! fallback), and the kind of network it is on.
+//! names and version strings, and a fingerprint from the mandatory numeric
+//! attributes as a fallback), and the kind of network it is on.
 //!
 //! All reads are best-effort: an optional attribute the device doesn't serve
 //! comes back as an attribute-status error in that attribute's iterator, which
@@ -92,6 +92,14 @@ async fn try_read_basic_info<C: Crypto>(
             // The device's own names: more reliable than looking up its IDs.
             set_string(&mut identity.vendor_name, reads.vendor_name());
             set_string(&mut identity.product_name, reads.product_name());
+            set_string(
+                &mut identity.hardware_version_string,
+                reads.hardware_version_string(),
+            );
+            set_string(
+                &mut identity.software_version_string,
+                reads.software_version_string(),
+            );
             set(&mut fp.vendor_id, reads.vendor_id());
             set(&mut fp.product_id, reads.product_id());
             set(&mut fp.hardware_version, reads.hardware_version());

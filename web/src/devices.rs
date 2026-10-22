@@ -158,14 +158,8 @@ impl App {
             _ => ("Connecting", None, "Subscribing to its health".to_string()),
         };
 
-        let fp = &d.fingerprint;
-        let versions = format!(
-            "HW {} · SW {}",
-            fp.hardware_version
-                .map_or_else(|| "—".to_string(), |v| v.to_string()),
-            fp.software_version
-                .map_or_else(|| "—".to_string(), |v| v.to_string()),
-        );
+        let hardware = d.hardware_version().unwrap_or_else(|| "—".into());
+        let software = d.software_version().unwrap_or_else(|| "—".into());
         let refreshing = self.loading == Some(Loading::Device(node_id));
 
         html! {
@@ -207,7 +201,10 @@ impl App {
                     </div>
                     <div>
                         <dt>{ "Versions" }</dt>
-                        <dd>{ versions }</dd>
+                        <dd class="device-versions">
+                            <span>{ format!("HW {hardware}") }</span>
+                            <span>{ format!("SW {software}") }</span>
+                        </dd>
                     </div>
                 </dl>
 

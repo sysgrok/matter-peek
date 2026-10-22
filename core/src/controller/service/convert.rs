@@ -29,6 +29,8 @@ pub(super) fn device(d: StoredDevice, online: Option<bool>, remembered: bool) ->
         node_label: d.node_label,
         vendor_name: d.vendor_name,
         product_name: d.product_name,
+        hardware_version_string: d.hardware_version_string,
+        software_version_string: d.software_version_string,
         fingerprint: api::Fingerprint {
             vendor_id: d.fingerprint.vendor_id,
             product_id: d.fingerprint.product_id,

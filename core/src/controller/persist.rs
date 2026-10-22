@@ -349,6 +349,9 @@ struct StoredDeviceWire {
     // The kind of network the device is on (see `network_code`); appended last,
     // so earlier blobs decode it as `None`.
     network: Option<u8>,
+    // BasicInformation version strings; appended last, as `network`.
+    hardware_version_string: Option<String>,
+    software_version_string: Option<String>,
 }
 
 impl StoredDeviceList {
@@ -373,6 +376,8 @@ impl StoredDeviceList {
                     product_name: opt_str(&d.product_name),
                     pending_removal: None,
                     network: d.network.map(network_code),
+                    hardware_version_string: opt_str(&d.hardware_version_string),
+                    software_version_string: opt_str(&d.software_version_string),
                 })
                 .collect(),
         }
@@ -395,6 +400,8 @@ impl StoredDeviceList {
                     node_label: w.node_label,
                     vendor_name: w.vendor_name.unwrap_or_default(),
                     product_name: w.product_name.unwrap_or_default(),
+                    hardware_version_string: w.hardware_version_string.unwrap_or_default(),
+                    software_version_string: w.software_version_string.unwrap_or_default(),
                     fingerprint: crate::model::DeviceFingerprint {
                         vendor_id: w.fp_vendor_id,
                         product_id: w.fp_product_id,
@@ -476,6 +483,8 @@ mod tests {
             node_label: "label".to_string(),
             vendor_name: "Acme".to_string(),
             product_name: "Widget".to_string(),
+            hardware_version_string: "rev-b".to_string(),
+            software_version_string: "1.2.3".to_string(),
             fingerprint: fp(0x1234, 0x5678),
             tags: tags.iter().map(|t| t.to_string()).collect(),
             network: Some(NetworkKind::Thread),

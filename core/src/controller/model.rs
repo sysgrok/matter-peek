@@ -72,6 +72,10 @@ pub struct StoredDevice {
     pub vendor_name: alloc::string::String,
     /// BasicInformation `ProductName` — the product's own human-readable name.
     pub product_name: alloc::string::String,
+    /// BasicInformation `HardwareVersionString`, if read.
+    pub hardware_version_string: alloc::string::String,
+    /// BasicInformation `SoftwareVersionString`, if read.
+    pub software_version_string: alloc::string::String,
     /// Per-model numeric fingerprint (vendor/product/hw/sw) captured at commission
     /// — the fallback identity when no `unique_id`/`serial_number` is served, and
     /// what surfaces a "same model, maybe same unit?" re-match candidate.
@@ -103,6 +107,10 @@ pub struct DeviceIdentity {
     /// BasicInformation `ProductName` — the product's own human-readable name.
     /// Empty if the device leaves it blank.
     pub product_name: alloc::string::String,
+    /// BasicInformation `HardwareVersionString`; empty if not served.
+    pub hardware_version_string: alloc::string::String,
+    /// BasicInformation `SoftwareVersionString`; empty if not served.
+    pub software_version_string: alloc::string::String,
     /// Composite of the mandatory numeric BasicInformation attributes — not
     /// globally unique, but a stable per-model fingerprint and the fallback when
     /// the string identifiers are absent.
@@ -229,6 +237,8 @@ mod tests {
             node_label: "".to_string(),
             vendor_name: "".to_string(),
             product_name: "".to_string(),
+            hardware_version_string: "".to_string(),
+            software_version_string: "".to_string(),
             fingerprint,
             tags: vec!["keep-me".to_string()],
             network: None,
@@ -242,6 +252,8 @@ mod tests {
             node_label: "".to_string(),
             vendor_name: "".to_string(),
             product_name: "".to_string(),
+            hardware_version_string: "".to_string(),
+            software_version_string: "".to_string(),
             fingerprint,
             network: None,
         }

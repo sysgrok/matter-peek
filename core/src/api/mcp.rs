@@ -184,7 +184,7 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
         ),
         tool(
             "list_devices",
-            "List the devices on our fabric, with their identity, fingerprint, \
+            "List the devices on our fabric, with their identity, versions, fingerprint, \
              tags, whether they are online and whether they are remembered. \
              Remembered devices are listed also while offline; the others only \
              once commissioned or found by a sync since the server started.",
@@ -861,6 +861,8 @@ fn labelled(response: &wire::Response) -> Value {
                 v["node"] = json!(display::hex_u64(d.handle.node_id));
                 v["vendor"] = json!(d.vendor());
                 v["product"] = json!(d.product());
+                v["hardware_version"] = json!(d.hardware_version());
+                v["software_version"] = json!(d.software_version());
             }
         }
         wire::Response::Discovered { ble_devices, .. } => {

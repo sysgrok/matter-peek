@@ -735,6 +735,12 @@ fn devices(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
         if d.is_test_vendor() {
             line.push_str(" (test vendor)");
         }
+        if let Some(hw) = d.hardware_version() {
+            line.push_str(&format!("  hw {hw}"));
+        }
+        if let Some(sw) = d.software_version() {
+            line.push_str(&format!("  sw {sw}"));
+        }
         if let Some(kind) = d.network {
             line.push_str(&format!("  {}", kind.label()));
         }
