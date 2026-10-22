@@ -377,6 +377,41 @@ pub enum OtaProgress {
     Applied { version: u32 },
 }
 
+/// Whether a device's commissioning window is open, and how.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum WindowStatus {
+    Closed,
+    /// Open with a passcode of its opener's own.
+    Enhanced,
+    /// Open with the device's own setup code.
+    Basic,
+}
+
+/// A device's commissioning window, through which another controller can
+/// commission it too: with the code we show, while a window we opened is open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct CommissioningWindow {
+    pub node_id: u64,
+    pub status: WindowStatus,
+    /// The 11-digit manual pairing code, while a window we opened is open.
+    pub manual_code: Option<String>,
+    /// The QR code text (`MT:...`), likewise.
+    pub qr_code: Option<String>,
+    /// The QR code's modules, row by row, `1` dark.
+    pub qr_rows: Vec<String>,
+    pub discriminator: Option<u16>,
+    /// Seconds until the window we opened closes.
+    pub remaining_secs: Option<u64>,
+    /// The vendor of the controller that opened the window, as the device says.
+    pub opened_by_vendor: Option<u16>,
+    /// The fabrics the device is on, and how many it supports.
+    pub fabrics: Option<u8>,
+    pub supported_fabrics: Option<u8>,
+}
+
 /// The latest OTA update of a device that asked us for one since the
 /// controller started: the image, and how far it got.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

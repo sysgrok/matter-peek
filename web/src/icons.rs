@@ -44,6 +44,8 @@ pub enum Icon {
     Bluetooth,
     QrCode,
     Key,
+    Share,
+    Copy,
     Check,
     CheckCircle,
     XCircle,
@@ -249,6 +251,20 @@ pub fn icon(glyph: Icon, size: u32) -> Html {
                 <rect x="16" y="3" width="5" height="5" rx="1" />
                 <rect x="3" y="16" width="5" height="5" rx="1" />
                 <path d="M21 16h-3a2 2 0 0 0-2 2v3M21 21v.01M12 7v3a2 2 0 0 1-2 2H7M3 12h.01M12 3h.01M12 16v.01M16 12h1M21 12v.01M12 21v-1" />
+            </>
+        },
+        Icon::Share => html! {
+            <>
+                <circle cx="18" cy="5" r="3" />
+                <circle cx="6" cy="12" r="3" />
+                <circle cx="18" cy="19" r="3" />
+                <path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4" />
+            </>
+        },
+        Icon::Copy => html! {
+            <>
+                <rect x="9" y="9" width="13" height="13" rx="2" />
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
             </>
         },
         Icon::Key => html! {

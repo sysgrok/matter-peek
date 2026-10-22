@@ -470,6 +470,35 @@ impl<'a, C: Crypto> Controller<'a, C> {
         crate::ota::announce(self.matter, self.crypto, dev.fabric_index, dev.node_id).await
     }
 
+    /// Open an enhanced commissioning window on the device for `timeout_secs`.
+    pub async fn open_window(
+        &self,
+        dev: DeviceHandle,
+        timeout_secs: u16,
+    ) -> Result<crate::window::WindowCode, Error> {
+        crate::window::open(
+            self.matter,
+            self.crypto,
+            dev.fabric_index,
+            dev.node_id,
+            timeout_secs,
+        )
+        .await
+    }
+
+    /// Close the device's commissioning window.
+    pub async fn revoke_window(&self, dev: DeviceHandle) -> Result<(), Error> {
+        crate::window::revoke(self.matter, self.crypto, dev.fabric_index, dev.node_id).await
+    }
+
+    /// Read the device's commissioning window and fabrics.
+    pub async fn read_window(
+        &self,
+        dev: DeviceHandle,
+    ) -> Result<crate::window::WindowState, Error> {
+        crate::window::read(self.matter, self.crypto, dev.fabric_index, dev.node_id).await
+    }
+
     /// Read a device's stable identity (`UniqueID` / `SerialNumber` /
     /// `NodeLabel`) from BasicInformation over a fresh CASE session. Used to list
     /// a device once commissioned or found on our fabric.

@@ -226,6 +226,9 @@ impl App {
                         { ui::icon_button(Icon::Chip, "Memory", classes!("is-small", "is-soft"), offline,
                             Some("Its heap, and the stacks of its tasks"),
                             link.callback(move |_| Msg::Memory(crate::memory::MemoryMsg::Open(node_id)))) }
+                        { ui::icon_button(Icon::Share, "Share", classes!("is-small", "is-soft"), offline,
+                            Some("Let another app (Google Home, Home Assistant, …) commission it too"),
+                            link.callback(move |_| Msg::Share(crate::share::ShareMsg::Open(node_id)))) }
                     </div>
                     <div class="device-actions-end">
                         if !d.remembered {

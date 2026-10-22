@@ -46,6 +46,7 @@ use crate::subscribe::Reports;
 
 use ota::{OtaFollower, TrackedUpdate, Upload};
 use watch::{SubJob, Watch};
+use window::OpenedWindow;
 
 mod commission;
 mod convert;
@@ -54,6 +55,7 @@ mod mesh;
 mod netconfig;
 mod ota;
 mod watch;
+mod window;
 
 /// The first device NodeID the controller hands out (see
 /// [`ControllerStore::allocate_node_id`]).
@@ -105,6 +107,8 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     ota_followers: Rc<RefCell<Vec<OtaFollower>>>,
     /// The latest OTA update of each device, by node ID.
     ota_updates: Rc<RefCell<BTreeMap<u64, TrackedUpdate>>>,
+    /// The commissioning windows we opened, by node ID.
+    windows: RefCell<BTreeMap<u64, OpenedWindow>>,
     /// The OTA image uploads in progress, by ID.
     uploads: RefCell<BTreeMap<u32, Upload<'a, C, O>>>,
     next_upload_id: Cell<u32>,
@@ -274,6 +278,21 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             Op::OtaUpdates(reply) => {
                 let _ = reply.send(Ok(self.ota_updates())).await;
             }
+            Op::OpenWindow {
+                node_id,
+                timeout_secs,
+                reply,
+            } => {
+                let _ = reply
+                    .send(self.open_window(node_id, timeout_secs).await)
+                    .await;
+            }
+            Op::CloseWindow { node_id, reply } => {
+                let _ = reply.send(self.close_window(node_id).await).await;
+            }
+            Op::Window { node_id, reply } => {
+                let _ = reply.send(self.window(node_id).await).await;
+            }
             Op::OtaUploadBegin { size, reply } => {
                 let _ = reply.send(self.ota_upload_begin(size)).await;
             }
@@ -428,6 +447,7 @@ async fn run<'a, C, S, O, N, M>(
         ota,
         ota_followers,
         ota_updates,
+        windows: RefCell::new(BTreeMap::new()),
         uploads: RefCell::new(BTreeMap::new()),
         next_upload_id: Cell::new(1),
         online: RefCell::new(None),
@@ -516,6 +536,9 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             }
             Op::OtaUploadBegin { reply, .. } => refuse(reply, error).await,
             Op::OtaUpdates(reply) => refuse(reply, error).await,
+            Op::OpenWindow { reply, .. }
+            | Op::CloseWindow { reply, .. }
+            | Op::Window { reply, .. } => refuse(reply, error).await,
             Op::OtaUploadChunk { reply, .. } => refuse(reply, error).await,
             Op::Assistant(reply) => refuse(reply, error).await,
             Op::ReadThreadMesh(reply) => refuse(reply, error).await,

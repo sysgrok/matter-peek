@@ -53,6 +53,7 @@ mod controller {
     pub mod service;
     pub mod setup_code;
     pub mod subscribe;
+    pub mod window;
 }
 
 #[cfg(feature = "uniffi")]

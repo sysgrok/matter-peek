@@ -134,6 +134,19 @@ impl WireSession {
             Request::Identify { node_id, secs } => {
                 peek.identify(node_id, secs).await.map(|()| Response::Ok)
             }
+            Request::OpenCommissioningWindow {
+                node_id,
+                timeout_secs,
+            } => peek
+                .open_commissioning_window(node_id, timeout_secs)
+                .await
+                .map(window),
+            Request::CloseCommissioningWindow { node_id } => {
+                peek.close_commissioning_window(node_id).await.map(window)
+            }
+            Request::CommissioningWindow { node_id } => {
+                peek.commissioning_window(node_id).await.map(window)
+            }
             Request::Subscribe { node_id } => self.subscribe(node_id).await,
             Request::Unsubscribe { node_id } => {
                 // Dropping it stops it.
@@ -267,6 +280,10 @@ fn devices(list: DeviceList) -> Response {
         devices: list.devices,
         notice: list.notice,
     }
+}
+
+fn window(window: CommissioningWindow) -> Response {
+    Response::CommissioningWindow { window }
 }
 
 fn images(images: Vec<OtaImageInfo>) -> Response {

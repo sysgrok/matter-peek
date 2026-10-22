@@ -254,7 +254,21 @@ of it is private to `core`.
 ### OTA
 We are the devices' OTA Provider: images are stored as files (uploaded in
 chunks, checked as they arrive), `ota_update` announces us to the device, and
-the device queries and downloads over BDX, reported to an `OtaListener`.
+the device queries and downloads over BDX, reported to an `OtaListener`. The
+service also keeps the latest update of each device, for an hour after its
+last progress (`ota_updates`), so that any client can follow it.
+
+### Sharing (commissioning windows)
+`open_commissioning_window` opens an enhanced window (Administrator
+Commissioning, a timed invoke over CASE): a random passcode and discriminator,
+a 32-byte salt and 1000 PBKDF2 iterations; the device gets only the SPAKE2+
+verifier (`w0` and `L`, derived as rs-matter's PASE does, checked against
+CHIP's test vector). The manual code, the QR text (discovery: on the network)
+and its modules are kept in the service while the window is open, so a reload
+or another client shows them again. The device's `WindowStatus` decides what is
+shown: the window is ours when its `AdminFabricIndex` is the device's index of
+our fabric. The basic window is not offered: it needs the device's own setup
+code, which we do not keep.
 
 ---
 

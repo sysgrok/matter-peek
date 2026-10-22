@@ -219,6 +219,17 @@ pub fn software_version_label(version: u32, name: Option<String>) -> String {
     versioned(version, hex_u32(version), name)
 }
 
+/// An 11-digit manual pairing code in its groups, e.g. `3497-011-2332`; any
+/// other code as it is.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn pairing_code_label(code: &str) -> String {
+    if code.len() == 11 && code.bytes().all(|b| b.is_ascii_digit()) {
+        format!("{}-{}-{}", &code[..4], &code[4..7], &code[7..])
+    } else {
+        code.to_string()
+    }
+}
+
 /// A 16-bit ID, e.g. `0x1490`.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn hex_u16(id: u16) -> String {
@@ -376,6 +387,12 @@ mod tests {
         assert_eq!(software_version_label(1, Some("1".into())), "0x00000001");
         assert_eq!(hardware_version_label(4, Some("v4".into())), "v4 (0x0004)");
         assert_eq!(hardware_version_label(1, Some("0x0001".into())), "0x0001");
+    }
+
+    #[test]
+    fn pairing_codes_are_grouped() {
+        assert_eq!(pairing_code_label("34970112332"), "3497-011-2332");
+        assert_eq!(pairing_code_label("MT:Y.K90"), "MT:Y.K90");
     }
 
     #[test]

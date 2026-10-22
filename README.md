@@ -13,7 +13,8 @@ See [`DESIGN.md`](DESIGN.md) for the full architecture and roadmap.
 ## Status
 
 A local Matter controller for diagnostics: list the devices on our fabric (live
-health, logs, OTA updates) and commission new ones (with mDNS discovery) — from
+health, logs, OTA updates), commission new ones (with mDNS discovery) and share
+them with other ecosystems (Google Home, Home Assistant, ...) — from
 a web UI, a command line, or an AI agent over MCP, all through one API.
 
 ## Layout
@@ -72,9 +73,9 @@ periodically, like the server), so to share the store with the web UI, run
 
 | Tools | Access |
 |-------|--------|
-| `discover`, `list_devices`, `peek_device`, `read_network`, `thread_mesh`, `thread_findings`, `retrieve_logs`, `read_qr_image`, `ota_images` | read-only |
+| `discover`, `list_devices`, `peek_device`, `read_network`, `thread_mesh`, `thread_findings`, `retrieve_logs`, `read_qr_image`, `ota_images`, `ota_updates`, `commissioning_window` | read-only |
 | `identify` | acts on the device (it blinks); not read-only, so agents ask first |
-| `commission`, `decommission`, `remember`, `set_tags`, `sync`, `add_network`, `remove_network`, `connect_network`, `reorder_network`, `ota_upload`, `ota_delete`, `ota_update` | **mutating** |
+| `commission`, `decommission`, `remember`, `set_tags`, `sync`, `add_network`, `remove_network`, `connect_network`, `reorder_network`, `ota_upload`, `ota_delete`, `ota_update`, `open_commissioning_window`, `close_commissioning_window` | **mutating** |
 
 The mutating tools touch real devices, so only `--allow-mutate` offers them:
 without it they are hidden from `tools/list` and rejected at `tools/call`. The
@@ -99,6 +100,18 @@ Add `"--allow-mutate"` to `args` only when the agent may change devices, and
 To see what a strong model makes of the tools alone, `scripts/claude-eval.sh`
 runs Claude Code with only these tools: no auto-memory, CLAUDE.md, user
 settings or Claude Code tools of its own.
+
+### Sharing a device with another ecosystem
+
+A device on our fabric can join another controller's too (Google Home, Home
+Assistant, Apple Home, ...): the card's Share button, `matter-peek share
+<node> [--minutes 3..15]` (`--status`, `--close`) and the MCP tools
+`open_commissioning_window` / `close_commissioning_window` /
+`commissioning_window` open an enhanced commissioning window on it, with a
+passcode made for that window, and show the code to commission it with: the
+11-digit manual pairing code and the QR code (drawn in the web UI and the
+terminal). The window closes after 15 minutes (3 to 15), or when closed; the
+code works only while it is open. A device with no free fabric is refused.
 
 ### Thread mesh
 

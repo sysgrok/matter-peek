@@ -85,6 +85,19 @@ pub enum Request {
     RetrieveLogs { node_id: u64, intent: LogIntent },
     /// See `MatterPeek::identify`. Answered with [`Response::Ok`].
     Identify { node_id: u64, secs: u16 },
+    /// See `MatterPeek::open_commissioning_window`. Answered with
+    /// [`Response::CommissioningWindow`].
+    OpenCommissioningWindow {
+        node_id: u64,
+        #[serde(default)]
+        timeout_secs: Option<u16>,
+    },
+    /// See `MatterPeek::close_commissioning_window`. Answered with
+    /// [`Response::CommissioningWindow`].
+    CloseCommissioningWindow { node_id: u64 },
+    /// See `MatterPeek::commissioning_window`. Answered with
+    /// [`Response::CommissioningWindow`].
+    CommissioningWindow { node_id: u64 },
     /// Follow the health of a device on this connection (see
     /// `MatterPeek::subscribe`), as [`Event::HealthReport`]s and
     /// [`Event::SubscriptionState`]s, until [`Request::Unsubscribe`] or the
@@ -238,6 +251,9 @@ pub enum Response {
     },
     OtaUpdates {
         updates: Vec<OtaUpdateInfo>,
+    },
+    CommissioningWindow {
+        window: CommissioningWindow,
     },
     OtaUploadStarted {
         upload_id: u32,

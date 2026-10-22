@@ -26,6 +26,7 @@ mod devices;
 mod icons;
 mod memory;
 mod network;
+mod share;
 mod thread;
 mod ui;
 mod updates;
@@ -133,6 +134,8 @@ enum Msg {
     Assistant(AssistantMsg),
     /// In a device's memory popup.
     Memory(memory::MemoryMsg),
+    /// In a device's share popup.
+    Share(share::ShareMsg),
     /// On the Thread page.
     Thread(thread::ThreadMsg),
     /// Open or close the navigation drawer (on phones).
@@ -357,6 +360,8 @@ struct App {
     logs: Option<LogsView>,
     /// The memory popup, while open.
     memory: Option<memory::MemoryView>,
+    /// The share popup, while open.
+    share: Option<share::ShareView>,
     thread: thread::ThreadPage,
     /// The network popup, when open.
     network_view: Option<NetworkView>,
@@ -432,6 +437,7 @@ impl Component for App {
             ota_status: HashMap::new(),
             logs: None,
             memory: None,
+            share: None,
             thread: Default::default(),
             network_view: None,
             assistant: Assistant::default(),
@@ -474,6 +480,7 @@ impl Component for App {
             }
             Msg::Assistant(msg) => self.update_assistant(ctx, msg),
             Msg::Memory(msg) => self.update_memory(ctx, msg),
+            Msg::Share(msg) => self.update_share(ctx, msg),
             Msg::Thread(msg) => self.update_thread(ctx, msg),
             Msg::ToggleDrawer => {
                 self.drawer_open = !self.drawer_open;
@@ -1197,6 +1204,8 @@ impl Component for App {
                     // the reads of the running updates (`read_ota_updates`).
                     wire::Response::OtaUploadStarted { .. } | wire::Response::OtaUpdates { .. } => {
                     }
+                    // The share popup's own.
+                    wire::Response::CommissioningWindow { .. } => {}
                     // The Assistant page's requests answer to it.
                     // The Assistant page's own.
                     wire::Response::Chats { .. }
@@ -1321,6 +1330,7 @@ impl Component for App {
                 { self.view_camera_modal(link) }
                 { self.view_logs_modal(link) }
                 { self.view_memory_modal(link) }
+                { self.view_share_modal(link) }
                 { self.view_settings_modal(link) }
                 { self.view_network_modal(link) }
                 { self.view_ask(link) }
@@ -2236,7 +2246,7 @@ fn input_value(e: InputEvent) -> String {
         .unwrap_or_default()
 }
 
-fn select_value(e: Event) -> String {
+pub(crate) fn select_value(e: Event) -> String {
     use wasm_bindgen::JsCast;
     use web_sys::HtmlSelectElement;
     e.target()

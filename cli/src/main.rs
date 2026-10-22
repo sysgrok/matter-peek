@@ -132,6 +132,21 @@ enum Command {
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
+    /// Open a commissioning window on a device, so that another controller
+    /// (Google Home, Home Assistant, ...) can commission it too, and show the
+    /// code to commission it with.
+    Share {
+        node: Node,
+        /// How long the window stays open, 3 to 15 minutes.
+        #[arg(long, default_value_t = 15)]
+        minutes: u16,
+        /// Close the window instead, whoever opened it.
+        #[arg(long, conflicts_with = "status")]
+        close: bool,
+        /// Show the window instead: whether it is open, and its code.
+        #[arg(long)]
+        status: bool,
+    },
     /// Make a device identify itself (e.g. blink).
     Identify {
         node: Node,
@@ -600,6 +615,26 @@ async fn run(cli: Cli) -> io::Result<bool> {
                 &format!("Identifying for {secs} s."),
             )
         }
+        Command::Share {
+            node,
+            minutes,
+            close,
+            status,
+        } => {
+            let node_id = node.0;
+            let request = if close {
+                wire::Request::CloseCommissioningWindow { node_id }
+            } else if status {
+                wire::Request::CommissioningWindow { node_id }
+            } else {
+                wire::Request::OpenCommissioningWindow {
+                    node_id,
+                    timeout_secs: Some(minutes.saturating_mul(60)),
+                }
+            };
+
+            window(&out, call(&conn, &out, request).await?)
+        }
         Command::Decommission { node, force } => {
             let request = wire::Request::Decommission {
                 node_id: node.0,
@@ -705,6 +740,83 @@ async fn call(
     }
 
     Ok(Some(response))
+}
+
+fn window(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
+    let Some(wire::Response::CommissioningWindow { window }) = response else {
+        return Ok(response.is_some());
+    };
+
+    if out.json {
+        return Ok(true);
+    }
+
+    let opened_by = window
+        .opened_by_vendor
+        .map(|vid| format!(", opened by {}", display::vendor_label(vid, None)))
+        .unwrap_or_default();
+    match window.status {
+        api::WindowStatus::Closed => println!("The commissioning window is closed."),
+        api::WindowStatus::Basic => println!(
+            "A basic commissioning window is open{opened_by}: the device's own setup code commissions it."
+        ),
+        api::WindowStatus::Enhanced if window.manual_code.is_none() => {
+            println!("A commissioning window is open{opened_by}, with a code we do not know.")
+        }
+        api::WindowStatus::Enhanced => {}
+    }
+
+    if let (Some(code), Some(qr)) = (&window.manual_code, &window.qr_code) {
+        println!(
+            "Commission it in the other app (e.g. Google Home or Home Assistant: add a Matter device) with:"
+        );
+        println!();
+        println!("  Code  {}", display::pairing_code_label(code));
+        println!("  QR    {qr}");
+        println!();
+        for line in qr_lines(&window.qr_rows) {
+            println!("  {line}");
+        }
+        if let Some(secs) = window.remaining_secs {
+            println!("Open for another {}.", display::duration(secs));
+        }
+    }
+    if let (Some(fabrics), Some(supported)) = (window.fabrics, window.supported_fabrics) {
+        println!("It is on {fabrics} of {supported} fabrics.");
+    }
+
+    Ok(true)
+}
+
+/// A QR code in the terminal: two rows of modules per line, in half blocks,
+/// dark on light, with a quiet zone.
+fn qr_lines(rows: &[String]) -> Vec<String> {
+    const QUIET: usize = 2;
+
+    let size = rows.len();
+    let dark = |x: usize, y: usize| {
+        x >= QUIET
+            && y >= QUIET
+            && rows
+                .get(y - QUIET)
+                .and_then(|row| row.as_bytes().get(x - QUIET))
+                == Some(&b'1')
+    };
+    let width = size + 2 * QUIET;
+
+    (0..width)
+        .step_by(2)
+        .map(|y| {
+            (0..width)
+                .map(|x| match (dark(x, y), dark(x, y + 1)) {
+                    (false, false) => '█',
+                    (true, false) => '▄',
+                    (false, true) => '▀',
+                    (true, true) => ' ',
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn ok(out: &Out, response: Option<wire::Response>, text: &str) -> io::Result<bool> {

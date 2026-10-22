@@ -281,6 +281,40 @@ impl MatterPeek {
         self.call(Op::OtaImages).await
     }
 
+    /// Open a commissioning window on the device for `timeout_secs` (3 to 15
+    /// minutes; 15 if `None`), so that another controller can commission it
+    /// too with the code it answers. A window we opened that is still open is
+    /// answered again.
+    pub async fn open_commissioning_window(
+        &self,
+        node_id: u64,
+        timeout_secs: Option<u16>,
+    ) -> Result<CommissioningWindow, PeekError> {
+        self.call(|reply| Op::OpenWindow {
+            node_id,
+            timeout_secs,
+            reply,
+        })
+        .await
+    }
+
+    /// Close the device's commissioning window, whoever opened it.
+    pub async fn close_commissioning_window(
+        &self,
+        node_id: u64,
+    ) -> Result<CommissioningWindow, PeekError> {
+        self.call(|reply| Op::CloseWindow { node_id, reply }).await
+    }
+
+    /// The device's commissioning window: whether it is open, and the code of
+    /// one we opened.
+    pub async fn commissioning_window(
+        &self,
+        node_id: u64,
+    ) -> Result<CommissioningWindow, PeekError> {
+        self.call(|reply| Op::Window { node_id, reply }).await
+    }
+
     /// The latest OTA update of each device that asked us for one since the
     /// controller started (see [`OtaUpdateInfo`]).
     pub async fn ota_updates(&self) -> Result<Vec<OtaUpdateInfo>, PeekError> {
@@ -524,6 +558,19 @@ pub(crate) enum Op {
     },
     OtaImages(Reply<Vec<OtaImageInfo>>),
     OtaUpdates(Reply<Vec<OtaUpdateInfo>>),
+    OpenWindow {
+        node_id: u64,
+        timeout_secs: Option<u16>,
+        reply: Reply<CommissioningWindow>,
+    },
+    CloseWindow {
+        node_id: u64,
+        reply: Reply<CommissioningWindow>,
+    },
+    Window {
+        node_id: u64,
+        reply: Reply<CommissioningWindow>,
+    },
     /// Start an upload; answers with its ID.
     OtaUploadBegin {
         size: u64,

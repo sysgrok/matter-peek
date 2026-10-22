@@ -51,12 +51,15 @@ const MUTATING_TOOLS: &[&str] = &[
     "remove_network",
     "connect_network",
     "reorder_network",
+    "open_commissioning_window",
+    "close_commissioning_window",
 ];
 
 /// What an agent should know about the tools, for its instructions.
 pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-only tools \
      (discover, list_devices, peek_device, read_network, retrieve_logs, identify, \
-     read_qr_image, ota_images, ota_updates) are always available. The tools that change devices \
+     read_qr_image, ota_images, ota_updates, commissioning_window) are always \
+     available. The tools that change devices \
      or the stored state (commission, decommission, remember, set_tags, \
      sync, ota_upload, ota_delete, ota_update, add_network, remove_network, \
      connect_network, reorder_network) are available only if the \
@@ -315,6 +318,19 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
              ota_update shows once the device asks for it.",
             json!({ "type": "object", "properties": {} }),
         ),
+        tool(
+            "commissioning_window",
+            "Read a device's commissioning window: closed, or open (enhanced, \
+             or basic with its own setup code) and by the controller of which \
+             vendor; the pairing code while it is a window we opened, with the \
+             time left; and the fabrics the device is on, of how many it \
+             supports.",
+            json!({
+                "type": "object",
+                "properties": { "node_id": node_id_schema() },
+                "required": ["node_id"]
+            }),
+        ),
     ];
 
     if caps.allow_mutate {
@@ -469,8 +485,8 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
             "ota_update",
             "Update a stored device to a stored OTA image: the device is told to \
              fetch it from us. Returns once the device is told; it then \
-             downloads and applies the image on its own, which peek_device shows \
-             as the new software version. MUTATING — flashes the device.",
+             downloads and applies the image on its own: ota_updates follows \
+             it, and peek_device shows the new software version. MUTATING — flashes the device.",
             json!({
                 "type": "object",
                 "properties": {
@@ -478,6 +494,36 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
                     "name": { "type": "string", "description": "The image name, as ota_images lists it." }
                 },
                 "required": ["node_id", "name"]
+            }),
+        ));
+        tools.push(tool(
+            "open_commissioning_window",
+            "Open a commissioning window on a device on our fabric, so that \
+             another controller (Google Home, Home Assistant, Apple Home, \
+             SmartThings...) can commission it too: returns the 11-digit \
+             manual pairing code and the QR code text to give the user, and how \
+             long the window stays open. The code is new for each window and \
+             works only while it is open. A window we opened that is still open \
+             is returned again. Refused while another controller's window is \
+             open, or when the device is on as many fabrics as it supports. \
+             MUTATING — lets another controller onto the device.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node_id": node_id_schema(),
+                    "minutes": { "type": "integer", "description": "How long the window stays open, 3 to 15 minutes (default 15)." }
+                },
+                "required": ["node_id"]
+            }),
+        ));
+        tools.push(tool(
+            "close_commissioning_window",
+            "Close the commissioning window on a device, whoever opened it. \
+             MUTATING.",
+            json!({
+                "type": "object",
+                "properties": { "node_id": node_id_schema() },
+                "required": ["node_id"]
             }),
         ));
     }
@@ -647,6 +693,19 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
         },
         "ota_images" => wire::Request::OtaImages,
         "ota_updates" => wire::Request::OtaUpdates,
+        "open_commissioning_window" => wire::Request::OpenCommissioningWindow {
+            node_id: arg_node(args)?,
+            timeout_secs: args
+                .get("minutes")
+                .and_then(Value::as_u64)
+                .map(|minutes| (minutes * 60).min(u16::MAX.into()) as u16),
+        },
+        "close_commissioning_window" => wire::Request::CloseCommissioningWindow {
+            node_id: arg_node(args)?,
+        },
+        "commissioning_window" => wire::Request::CommissioningWindow {
+            node_id: arg_node(args)?,
+        },
         "ota_delete" => wire::Request::OtaDelete {
             name: arg_str(args, "name")?,
         },
@@ -881,6 +940,23 @@ fn labelled(response: &wire::Response) -> Value {
             for (d, v) in ble_devices.iter().zip(entries(&mut value, "ble_devices")) {
                 v["vendor"] = json!(display::vendor_label(d.vendor_id, None));
                 v["product"] = json!(display::product_label(d.vendor_id, d.product_id, None));
+            }
+        }
+        wire::Response::CommissioningWindow { window } => {
+            let v = &mut value["window"];
+            v["node"] = json!(display::hex_u64(window.node_id));
+            if let Some(code) = &window.manual_code {
+                v["manual_code"] = json!(display::pairing_code_label(code));
+            }
+            if let Some(secs) = window.remaining_secs {
+                v["remaining"] = json!(display::duration(secs));
+            }
+            if let Some(vid) = window.opened_by_vendor {
+                v["opened_by"] = json!(display::vendor_label(vid, None));
+            }
+            // For drawing; the QR code text says the same.
+            if let Some(window) = v.as_object_mut() {
+                window.remove("qr_rows");
             }
         }
         wire::Response::OtaUpdates { updates } => {

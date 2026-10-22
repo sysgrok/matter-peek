@@ -606,3 +606,26 @@ pre.log-text { max-height: 70vh; margin: 0; padding: .75rem 0; overflow: auto; b
 .signal-chip.q1 { background: hsla(var(--warning-hsl), .16); }
 .signal-chip.q0 { background: hsla(var(--danger-hsl), .12); }
 
+
+/* Share popup: a commissioning window, and its code */
+.modal .modal-card.share-card { width: min(680px, calc(100vw - 32px)); }
+.share-open { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+.share-qr { padding: .5rem; border-radius: 12px; background: #fff; box-shadow: 0 0 0 1px var(--bulma-border); }
+.share-qr-svg { display: block; width: 100%; height: auto; }
+.share-label { font-size: .68rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--bulma-text-weak); }
+.share-code-row { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .9rem; margin: .2rem 0 .4rem; }
+.share-code { font-size: 1.7rem; font-weight: 600; letter-spacing: .04em; color: var(--bulma-text-strong); user-select: all; }
+.share-qr-text { margin-bottom: .9rem; font-size: .75rem; color: var(--bulma-text-weak); overflow-wrap: anywhere; user-select: all; }
+.share-hint { margin-bottom: .9rem; font-size: .85rem; }
+.share-timer { display: flex; align-items: center; gap: .45rem; margin-bottom: .4rem; font-weight: 600; color: var(--bulma-link); }
+.share-fabrics { margin-bottom: .75rem; font-size: .8rem; color: var(--bulma-text-weak); }
+.share-closed > p:not([class]) { margin-bottom: .9rem; }
+.share-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin-top: .5rem; }
+.share-warning, .share-error { display: flex; align-items: flex-start; gap: .55rem; margin-bottom: .75rem; padding: .7rem .85rem; border-radius: 10px; font-size: .85rem; background: hsla(var(--info-hsl), .1); }
+.share-error { background: hsla(var(--danger-hsl), .1); }
+@media (max-width: 600px) {
+  .share-open { grid-template-columns: minmax(0, 1fr); }
+  .share-qr { width: min(240px, 100%); margin: 0 auto; }
+}
+.share-warning > svg, .share-error > svg { flex: none; margin-top: .1rem; color: var(--bulma-info); }
+.share-error > svg { color: var(--bulma-danger); }
