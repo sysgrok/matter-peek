@@ -166,6 +166,14 @@ impl WireSession {
             Request::CommissioningWindow { node_id } => {
                 peek.commissioning_window(node_id).await.map(window)
             }
+            Request::DeviceTime { node_id } => peek
+                .device_time(node_id)
+                .await
+                .map(|time| Response::DeviceTime { time }),
+            Request::SetDeviceTime { node_id } => peek
+                .set_device_time(node_id)
+                .await
+                .map(|setup| Response::TimeSetup { setup }),
             Request::Subscribe { node_id } => self.subscribe(node_id).await,
             Request::Unsubscribe { node_id } => {
                 // Dropping it stops it.

@@ -46,6 +46,7 @@ std = [
     "dep:rand",
     "dep:directories",
     "dep:image",
+    "dep:libc",
 ]
 
 # mDNS backend selection. Pick exactly one. OS-native daemons (preferred);
@@ -87,6 +88,8 @@ async-io = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 # The platform-standard data dir for the store.
 directories = { version = "6", optional = true }
+# The clock's sync state and the time zone, which we serve and set on devices.
+libc = { version = "0.2", optional = true }
 # Picture -> pixels, for reading QR codes; rs-matter does the recognition.
 image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg"] }
 # mDNS builtin backend: raw multicast socket + interface enum.

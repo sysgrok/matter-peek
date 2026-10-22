@@ -386,6 +386,21 @@ impl MatterPeek {
         self.call(|reply| Op::Window { node_id, reply }).await
     }
 
+    /// The device's clock and time setup, as its Time Synchronization cluster
+    /// tells.
+    pub async fn device_time(&self, node_id: u64) -> Result<DeviceTime, PeekError> {
+        self.call(|reply| Op::DeviceTime { node_id, reply }).await
+    }
+
+    /// Set the device's clock from ours: its UTC time; its time zone and
+    /// daylight saving time, if it keeps them; and us as its trusted time
+    /// source, if it takes its time from one. Answers each step, and the clock
+    /// after.
+    pub async fn set_device_time(&self, node_id: u64) -> Result<TimeSetup, PeekError> {
+        self.call(|reply| Op::SetDeviceTime { node_id, reply })
+            .await
+    }
+
     /// The latest OTA update of each device that asked us for one since the
     /// controller started (see [`OtaUpdateInfo`]).
     pub async fn ota_updates(&self) -> Result<Vec<OtaUpdateInfo>, PeekError> {
@@ -672,6 +687,14 @@ pub(crate) enum Op {
     Window {
         node_id: u64,
         reply: Reply<CommissioningWindow>,
+    },
+    DeviceTime {
+        node_id: u64,
+        reply: Reply<DeviceTime>,
+    },
+    SetDeviceTime {
+        node_id: u64,
+        reply: Reply<TimeSetup>,
     },
     /// Start an upload; answers with its ID.
     OtaUploadBegin {

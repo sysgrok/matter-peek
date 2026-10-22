@@ -7,7 +7,7 @@ use alloc::format;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use log::{error, warn};
+use log::{error, info, warn};
 
 use rs_matter::crypto::Crypto;
 use rs_matter::error::Error;
@@ -347,6 +347,11 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         };
 
         self.set_online(outcome.handle.node_id, true);
+
+        // Its clock, as the spec suggests once commissioned: from ours.
+        if let Err(e) = self.setup_time(outcome.handle, false).await {
+            info!("service: the commissioned device's clock is not set: {e}");
+        }
 
         Ok(CommissionResult {
             handle: convert::handle(outcome.handle),

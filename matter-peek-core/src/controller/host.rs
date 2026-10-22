@@ -30,6 +30,7 @@ use crate::service::{self, Platform};
 
 use dir_ota::DirOtaStore;
 
+pub(crate) mod clock;
 mod dir_ota;
 
 /// The stack size of the controller's thread.
@@ -108,13 +109,17 @@ async fn run(service: Service, store: Store, config: PeekConfig) {
         }
     };
 
+    // What our operational records advertise: devices reach us on it (a time
+    // sync client does).
+    let port = socket.get_ref().local_addr().map_or(0, |addr| addr.port());
+
     // Heap-allocated in place (the stack is big), and left for the process: a
     // `Matter` borrows itself.
     let matter = Box::leak(Box::<Matter>::new_uninit()).init_with(Matter::init(
         &TEST_DEV_DET,
         TEST_DEV_COMM,
         &TEST_DEV_ATT,
-        0,
+        port,
     ));
     let kv_buf = Box::leak(Box::new(kv_buf()));
 

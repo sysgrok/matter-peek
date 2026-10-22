@@ -1938,6 +1938,7 @@ dependencies = [
  "embassy-time-queue-utils",
  "futures-util",
  "image",
+ "libc",
  "log",
  "nix 0.30.1",
  "rand 0.10.3",

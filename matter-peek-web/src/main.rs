@@ -21,6 +21,7 @@ use network::{Confirm, NetworkView};
 
 mod assistant;
 mod camera;
+mod clock;
 mod commission;
 mod devices;
 mod fabrics;
@@ -154,6 +155,8 @@ enum Msg {
     Memory(memory::MemoryMsg),
     /// In a device's share popup.
     Share(share::ShareMsg),
+    /// In a device's clock popup.
+    Clock(clock::ClockMsg),
     /// In a device's fabrics popup.
     Fabrics(fabrics::FabricsMsg),
     /// Our fabrics: the one shown, and managing them.
@@ -384,6 +387,8 @@ struct App {
     memory: Option<memory::MemoryView>,
     /// The share popup, while open.
     share: Option<share::ShareView>,
+    /// The clock popup, while open.
+    clock: Option<clock::ClockView>,
     /// The device whose fabrics popup is open.
     fabrics_of: Option<u64>,
     /// Our fabrics, as last read.
@@ -472,6 +477,7 @@ impl Component for App {
             logs: None,
             memory: None,
             share: None,
+            clock: None,
             fabrics_of: None,
             fabrics: Vec::new(),
             fabric: our_fabrics::remembered_visible(),
@@ -526,6 +532,7 @@ impl Component for App {
             Msg::Assistant(msg) => self.update_assistant(ctx, msg),
             Msg::Memory(msg) => self.update_memory(ctx, msg),
             Msg::Share(msg) => self.update_share(ctx, msg),
+            Msg::Clock(msg) => self.update_clock(ctx, msg),
             Msg::Fabrics(msg) => self.update_fabrics(msg),
             Msg::OurFabrics(msg) => self.update_fabrics_list(ctx, msg),
             Msg::Thread(msg) => self.update_thread(ctx, msg),
@@ -1278,8 +1285,10 @@ impl Component for App {
                     // the reads of the running updates (`read_ota_updates`).
                     wire::Response::OtaUploadStarted { .. } | wire::Response::OtaUpdates { .. } => {
                     }
-                    // The share popup's own.
-                    wire::Response::CommissioningWindow { .. } => {}
+                    // The share and clock popups' own.
+                    wire::Response::CommissioningWindow { .. }
+                    | wire::Response::DeviceTime { .. }
+                    | wire::Response::TimeSetup { .. } => {}
                     // The fabric module's own.
                     wire::Response::Fabrics { .. } => {}
                     // The Assistant page's requests answer to it.
@@ -1414,6 +1423,7 @@ impl Component for App {
                 { self.view_fabrics_modal(link) }
                 { self.view_manage_modal(link) }
                 { self.view_share_modal(link) }
+                { self.view_clock_modal(link) }
                 { self.view_settings_modal(link) }
                 { self.view_network_modal(link) }
                 { self.view_ask(link) }

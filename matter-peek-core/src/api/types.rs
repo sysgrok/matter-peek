@@ -528,6 +528,124 @@ pub struct CommissioningWindow {
     pub supported_fabrics: Option<u8>,
 }
 
+/// A device's clock, and how it keeps it, as its Time Synchronization cluster
+/// tells.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DeviceTime {
+    pub node_id: u64,
+    /// Whether it has the cluster: without it, it keeps no time we can see or
+    /// set.
+    pub supported: bool,
+    pub features: TimeFeatures,
+    /// Its UTC time, in milliseconds since the Unix epoch; `None` while it has
+    /// none.
+    pub utc_unix_ms: Option<u64>,
+    /// How far its clock is ahead of ours (behind, if negative), in
+    /// milliseconds, as read.
+    pub offset_ms: Option<i64>,
+    pub granularity: TimeGranularity,
+    /// Where its time comes from: a `TimeSourceEnum` value of the spec (see
+    /// [`time_source_label`](crate::api::display::time_source_label)).
+    pub time_source: Option<u8>,
+    /// The node it takes its time from.
+    pub trusted_source: Option<TrustedTimeSource>,
+    pub default_ntp: Option<String>,
+    /// Its time zone; a second one is a scheduled change.
+    pub time_zones: Vec<TimeZoneEntry>,
+    /// Its daylight saving times, and how many it keeps.
+    pub dst_offsets: Vec<DstOffsetEntry>,
+    pub max_dst_offsets: Option<u8>,
+    /// Its local time, in milliseconds since the Unix epoch.
+    pub local_unix_ms: Option<u64>,
+}
+
+/// What a device's Time Synchronization cluster can do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct TimeFeatures {
+    /// It keeps a time zone and daylight saving times.
+    pub time_zone: bool,
+    /// It gets its time over NTP.
+    pub ntp_client: bool,
+    /// It serves NTP.
+    pub ntp_server: bool,
+    /// It gets its time from a trusted time source, a Matter node.
+    pub time_sync_client: bool,
+}
+
+/// How accurate a clock is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum TimeGranularity {
+    /// It has no time.
+    #[default]
+    NoTime,
+    /// It had the time, but may have drifted more than 5 s since.
+    Minutes,
+    /// Within 5 s.
+    Seconds,
+    /// Within 50 ms.
+    Milliseconds,
+    /// Within 10 µs.
+    Microseconds,
+}
+
+/// The node a device takes its time from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct TrustedTimeSource {
+    /// The device's index of the fabric of the controller that set it.
+    pub fabric_index: u8,
+    pub node_id: u64,
+    pub endpoint: u16,
+    /// Whether it is us.
+    pub ours: bool,
+}
+
+/// A time zone of a device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct TimeZoneEntry {
+    /// Its offset from UTC, in seconds.
+    pub offset_secs: i32,
+    /// When it applies from, in milliseconds since the Unix epoch; `None` for
+    /// the one in force.
+    pub valid_at_unix_ms: Option<u64>,
+    pub name: Option<String>,
+}
+
+/// A daylight saving time of a device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DstOffsetEntry {
+    /// What it adds to the time zone's offset, in seconds.
+    pub offset_secs: i32,
+    /// When it applies, in milliseconds since the Unix epoch: from (`None`:
+    /// from ever) until (`None`: for good).
+    pub from_unix_ms: Option<u64>,
+    pub until_unix_ms: Option<u64>,
+}
+
+/// What setting a device's time did: each step, and the device's clock after.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct TimeSetup {
+    pub steps: Vec<TimeSetupStep>,
+    pub time: DeviceTime,
+}
+
+/// A step of setting a device's time: what was set, or why not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct TimeSetupStep {
+    /// What was set, in words: "UTC time", "time zone Europe/Sofia, +02:00"...
+    pub what: String,
+    /// Why it was not; `None` if it was.
+    pub error: Option<String>,
+}
+
 /// The latest OTA update of a device that asked us for one since the
 /// controller started: the image, and how far it got.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

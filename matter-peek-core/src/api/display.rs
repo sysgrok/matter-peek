@@ -7,13 +7,15 @@
 //!   named by the device, else by the CSA's registry (the DCL);
 //! - versions by the device's string, with the number in hex in brackets
 //!   (`1.3.0-s1 (0x01030041)`);
-//! - durations in units, from the largest one present (`2mo 4d 0h 6m 1s`).
+//! - durations in units, from the largest one present (`2mo 4d 0h 6m 1s`);
+//! - moments as `2026-10-23 14:05:09 UTC`, UTC offsets as `+02:00`.
 
 use alloc::format;
 use alloc::string::{String, ToString};
 
 use super::types::{
-    DeviceFabric, DeviceInfo, NetworkKind, NetworkStatus, ThreadRole, WifiSecurity, WifiVersion,
+    DeviceFabric, DeviceInfo, DeviceTime, NetworkKind, NetworkStatus, ThreadRole, TimeGranularity,
+    WifiSecurity, WifiVersion,
 };
 
 mod dcl;
@@ -108,6 +110,36 @@ impl DeviceFabric {
             static_vendor_name(self.vendor_id)
                 .map(ToString::to_string)
                 .unwrap_or_else(|| hex_u16(self.vendor_id))
+        }
+    }
+}
+
+impl DeviceTime {
+    /// Where the device takes its time from, in words; `None` if from no node.
+    pub fn trusted_source_label(&self) -> Option<String> {
+        let source = self.trusted_source.as_ref()?;
+
+        Some(if source.ours {
+            "matter-peek (us)".to_string()
+        } else {
+            format!(
+                "node {} on fabric {}, endpoint {}",
+                hex_u64(source.node_id),
+                source.fabric_index,
+                source.endpoint
+            )
+        })
+    }
+}
+
+impl TimeGranularity {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::NoTime => "no time",
+            Self::Minutes => "drifted (over 5 s off)",
+            Self::Seconds => "within 5 s",
+            Self::Milliseconds => "within 50 ms",
+            Self::Microseconds => "within 10 µs",
         }
     }
 }
@@ -301,6 +333,71 @@ pub fn duration(secs: u64) -> String {
     out
 }
 
+/// A moment, `2026-10-23 14:05:09 UTC`, from milliseconds since the Unix
+/// epoch.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn utc_label(unix_ms: u64) -> String {
+    format!("{} UTC", date_time(unix_ms))
+}
+
+/// A local time, `2026-10-23 17:05:09`, from what a device reports for it:
+/// milliseconds since the Unix epoch, as if it were UTC.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn local_time_label(unix_ms: u64) -> String {
+    date_time(unix_ms)
+}
+
+/// An offset from UTC, e.g. `+02:00`, `-03:30`, `+00:00`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn utc_offset_label(secs: i32) -> String {
+    let sign = if secs < 0 { '-' } else { '+' };
+    let secs = secs.unsigned_abs();
+
+    format!("{sign}{:02}:{:02}", secs / 3600, secs / 60 % 60)
+}
+
+/// How far a clock is from ours, e.g. `in step (12 ms ahead)`, `3.2 s behind`,
+/// `2h 5m 0s ahead`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn clock_offset_label(offset_ms: i64) -> String {
+    let side = if offset_ms < 0 { "behind" } else { "ahead" };
+    let ms = offset_ms.unsigned_abs();
+
+    if ms < 1000 {
+        format!("in step ({ms} ms {side})")
+    } else if ms < 120_000 {
+        format!("{}.{} s {side}", ms / 1000, ms / 100 % 10)
+    } else {
+        format!("{} {side}", duration(ms / 1000))
+    }
+}
+
+/// Where a clock takes its time from: a `TimeSourceEnum` value of the spec.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn time_source_label(source: u8) -> String {
+    match source {
+        0 => "none",
+        1 => "unknown",
+        2 => "set by a controller",
+        3 => "another Matter node",
+        4 => "SNTP, outside Matter",
+        5 => "NTP, outside Matter",
+        6 => "SNTP, in Matter",
+        7 => "NTP, in Matter",
+        8 => "NTP, in and outside Matter",
+        9 => "SNTP with NTS, outside Matter",
+        10 => "NTP with NTS, outside Matter",
+        11 => "SNTP with NTS, in Matter",
+        12 => "NTP with NTS, in Matter",
+        13 => "NTP with NTS, in and outside Matter",
+        14 => "a vendor cloud",
+        15 => "PTP",
+        16 => "GNSS",
+        _ => return format!("source {source}"),
+    }
+    .to_string()
+}
+
 /// A bit rate, e.g. `72.2 Mbit/s`.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn bit_rate(bits_per_sec: u64) -> String {
@@ -322,6 +419,36 @@ pub fn bit_rate(bits_per_sec: u64) -> String {
     }
 
     format!("{bits_per_sec} bit/s")
+}
+
+/// `2026-10-23 14:05:09`, from milliseconds since the Unix epoch.
+fn date_time(unix_ms: u64) -> String {
+    let secs = unix_ms / 1000;
+    let (year, month, day) = civil_date((secs / 86_400) as i64);
+    let secs = secs % 86_400;
+
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        secs / 3600,
+        secs / 60 % 60,
+        secs % 60
+    )
+}
+
+/// The date `days` after 1970-01-01 (proleptic Gregorian).
+fn civil_date(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    // Months from March.
+    let mp = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+
+    (year_of_era + era * 400 + i64::from(month <= 2), month, day)
 }
 
 /// `name (hex)`, leaving out a name that is just the number.
@@ -366,6 +493,22 @@ fn static_product_name(vid: u16, pid: u16) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moments_and_offsets() {
+        assert_eq!(utc_label(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(utc_label(946_684_800_000), "2000-01-01 00:00:00 UTC");
+        assert_eq!(utc_label(1_709_210_096_999), "2024-02-29 12:34:56 UTC");
+        assert_eq!(local_time_label(1_793_000_000_000), "2026-10-26 07:33:20");
+        assert_eq!(utc_offset_label(7200), "+02:00");
+        assert_eq!(utc_offset_label(-12_600), "-03:30");
+        assert_eq!(utc_offset_label(0), "+00:00");
+        assert_eq!(clock_offset_label(-12), "in step (12 ms behind)");
+        assert_eq!(clock_offset_label(3_250), "3.2 s ahead");
+        assert_eq!(clock_offset_label(-7_500_000), "2h 5m 0s behind");
+        assert_eq!(time_source_label(2), "set by a controller");
+        assert_eq!(time_source_label(99), "source 99");
+    }
 
     #[test]
     fn durations_start_at_the_largest_unit() {

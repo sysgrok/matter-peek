@@ -122,6 +122,11 @@ pub enum Request {
     /// See `MatterPeek::commissioning_window`. Answered with
     /// [`Response::CommissioningWindow`].
     CommissioningWindow { node_id: u64 },
+    /// See `MatterPeek::device_time`. Answered with [`Response::DeviceTime`].
+    DeviceTime { node_id: u64 },
+    /// See `MatterPeek::set_device_time`. Answered with
+    /// [`Response::TimeSetup`].
+    SetDeviceTime { node_id: u64 },
     /// Follow the health of a device on this connection (see
     /// `MatterPeek::subscribe`), as [`Event::HealthReport`]s and
     /// [`Event::SubscriptionState`]s, until [`Request::Unsubscribe`] or the
@@ -307,6 +312,12 @@ pub enum Response {
     },
     CommissioningWindow {
         window: CommissioningWindow,
+    },
+    DeviceTime {
+        time: DeviceTime,
+    },
+    TimeSetup {
+        setup: TimeSetup,
     },
     OtaUploadStarted {
         upload_id: u32,

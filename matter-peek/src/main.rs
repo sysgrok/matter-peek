@@ -165,6 +165,14 @@ enum Command {
         #[arg(long)]
         status: bool,
     },
+    /// Show a device's clock; with `--set`, set it from ours: its UTC time,
+    /// its time zone and daylight saving time, and us as its time source.
+    Time {
+        node: Node,
+        /// Set it from ours.
+        #[arg(long)]
+        set: bool,
+    },
     /// Make a device identify itself (e.g. blink).
     Identify {
         node: Node,
@@ -760,6 +768,16 @@ async fn run(cli: Cli) -> io::Result<bool> {
 
             window(&out, call(&conn, &out, request).await?)
         }
+        Command::Time { node, set } => {
+            let node_id = node.0;
+            let request = if set {
+                wire::Request::SetDeviceTime { node_id }
+            } else {
+                wire::Request::DeviceTime { node_id }
+            };
+
+            device_time(&out, call(&conn, &out, request).await?)
+        }
         Command::RemoveFabric { node, index } => {
             let request = wire::Request::RemoveDeviceFabric {
                 node_id: node.0,
@@ -932,6 +950,124 @@ fn window(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
     }
 
     Ok(true)
+}
+
+fn device_time(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
+    let (steps, time) = match response {
+        Some(wire::Response::DeviceTime { time }) => (Vec::new(), time),
+        Some(wire::Response::TimeSetup { setup }) => (setup.steps, setup.time),
+        other => return Ok(other.is_some()),
+    };
+
+    if out.json {
+        return Ok(true);
+    }
+
+    for step in &steps {
+        match &step.error {
+            None => println!("Set {}.", step.what),
+            Some(e) => println!("Not set {}: {e}.", step.what),
+        }
+    }
+    if !steps.is_empty() {
+        println!();
+    }
+    println!("{}", time_text(&time));
+
+    Ok(true)
+}
+
+/// A device's clock: its time and how far from ours, its source, its zone.
+fn time_text(time: &api::DeviceTime) -> String {
+    if !time.supported {
+        return "It keeps no clock we can see (it has no Time Synchronization cluster).".into();
+    }
+
+    let mut lines = vec![match time.utc_unix_ms {
+        Some(ms) => format!(
+            "UTC       {}{}",
+            display::utc_label(ms),
+            time.offset_ms
+                .map(|offset| format!(", {} of ours", display::clock_offset_label(offset)))
+                .unwrap_or_default()
+        ),
+        None => "UTC       none: it has no time".into(),
+    }];
+    lines.push(format!(
+        "Accuracy  {}{}",
+        time.granularity.label(),
+        time.time_source
+            .map(|source| format!(", from {}", display::time_source_label(source)))
+            .unwrap_or_default()
+    ));
+
+    let f = &time.features;
+    if f.time_sync_client {
+        lines.push(format!(
+            "Source    {}",
+            time.trusted_source_label()
+                .unwrap_or_else(|| "none: no node to take its time from".into())
+        ));
+    }
+    if f.ntp_client {
+        lines.push(format!(
+            "NTP       {}",
+            time.default_ntp.as_deref().unwrap_or("no default server")
+        ));
+    }
+    if f.time_zone {
+        for zone in &time.time_zones {
+            lines.push(format!(
+                "Zone      {}{}{}",
+                display::utc_offset_label(zone.offset_secs),
+                zone.name
+                    .as_deref()
+                    .map(|name| format!(" {name}"))
+                    .unwrap_or_default(),
+                zone.valid_at_unix_ms
+                    .map(|ms| format!(" from {}", display::utc_label(ms)))
+                    .unwrap_or_default()
+            ));
+        }
+        if time.dst_offsets.is_empty() {
+            lines.push("DST       none set".into());
+        }
+        for dst in &time.dst_offsets {
+            lines.push(format!(
+                "DST       {}{}{}",
+                display::utc_offset_label(dst.offset_secs),
+                dst.from_unix_ms
+                    .map(|ms| format!(" from {}", display::utc_label(ms)))
+                    .unwrap_or_default(),
+                dst.until_unix_ms
+                    .map(|ms| format!(" until {}", display::utc_label(ms)))
+                    .unwrap_or_default()
+            ));
+        }
+        if let Some(ms) = time.local_unix_ms {
+            lines.push(format!("Local     {}", display::local_time_label(ms)));
+        }
+    }
+
+    let can: Vec<&str> = [
+        (f.time_zone, "time zone"),
+        (f.ntp_client, "NTP client"),
+        (f.ntp_server, "NTP server"),
+        (f.time_sync_client, "takes time from a node"),
+    ]
+    .into_iter()
+    .filter_map(|(has, what)| has.then_some(what))
+    .collect();
+    lines.push(format!(
+        "Features  {}",
+        if can.is_empty() {
+            "none (UTC time only)".into()
+        } else {
+            can.join(", ")
+        }
+    ));
+
+    lines.join("\n")
 }
 
 /// A QR code in the terminal: two rows of modules per line, in half blocks,

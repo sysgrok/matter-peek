@@ -499,6 +499,82 @@ impl<'a, C: Crypto> Controller<'a, C> {
         crate::window::read(self.matter, self.crypto, dev.fabric_index, dev.node_id).await
     }
 
+    /// Read the device's clock and time setup; `our_node_id` is ours on its
+    /// fabric.
+    pub async fn read_time(
+        &self,
+        dev: DeviceHandle,
+        our_node_id: u64,
+    ) -> Result<crate::api::DeviceTime, Error> {
+        crate::time::read(
+            self.matter,
+            self.crypto,
+            dev.fabric_index,
+            dev.node_id,
+            our_node_id,
+        )
+        .await
+    }
+
+    /// Set the device's UTC time to `now`.
+    pub async fn set_utc_time(
+        &self,
+        dev: DeviceHandle,
+        now: &crate::time::HostTime,
+    ) -> Result<(), Error> {
+        crate::time::set_utc(self.matter, self.crypto, dev.fabric_index, dev.node_id, now).await
+    }
+
+    /// Set the device's time zone; answers whether it needs its DST offsets set.
+    pub async fn set_time_zone(
+        &self,
+        dev: DeviceHandle,
+        zone: &crate::time::HostZone,
+    ) -> Result<bool, Error> {
+        crate::time::set_zone(
+            self.matter,
+            self.crypto,
+            dev.fabric_index,
+            dev.node_id,
+            zone,
+        )
+        .await
+    }
+
+    /// Set the device's daylight saving times: the first `max` of `dst`.
+    pub async fn set_dst_offsets(
+        &self,
+        dev: DeviceHandle,
+        dst: &[crate::time::DstPeriod],
+        max: usize,
+    ) -> Result<(), Error> {
+        crate::time::set_dst(
+            self.matter,
+            self.crypto,
+            dev.fabric_index,
+            dev.node_id,
+            dst,
+            max,
+        )
+        .await
+    }
+
+    /// Make node `source`, on the device's fabric, its trusted time source.
+    pub async fn set_trusted_time_source(
+        &self,
+        dev: DeviceHandle,
+        source: u64,
+    ) -> Result<(), Error> {
+        crate::time::set_trusted_source(
+            self.matter,
+            self.crypto,
+            dev.fabric_index,
+            dev.node_id,
+            source,
+        )
+        .await
+    }
+
     /// Read a device's stable identity (`UniqueID` / `SerialNumber` /
     /// `NodeLabel`) from BasicInformation over a fresh CASE session. Used to list
     /// a device once commissioned or found on our fabric.

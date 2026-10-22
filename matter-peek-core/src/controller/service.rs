@@ -54,6 +54,7 @@ mod fabrics;
 mod mesh;
 mod netconfig;
 mod ota;
+mod time;
 mod watch;
 mod window;
 
@@ -328,6 +329,12 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             Op::Window { node_id, reply } => {
                 let _ = reply.send(self.window(node_id).await).await;
             }
+            Op::DeviceTime { node_id, reply } => {
+                let _ = reply.send(self.device_time(node_id).await).await;
+            }
+            Op::SetDeviceTime { node_id, reply } => {
+                let _ = reply.send(self.set_device_time(node_id).await).await;
+            }
             Op::OtaUploadBegin { size, reply } => {
                 let _ = reply.send(self.ota_upload_begin(size)).await;
             }
@@ -450,11 +457,12 @@ async fn run<'a, C, S, O, N, M>(
     #[cfg(feature = "ble")]
     let btp = rs_matter::transport::network::btp::Btp::new();
 
-    // Our OTA Provider: the devices on our fabrics may ask it for updates.
+    // Our node: the devices on our fabrics may ask its OTA Provider for
+    // updates, and read its clock.
     for fabric in fabrics.iter() {
-        if let Err(e) = node::allow_ota_requestors(matter, &store, fabric.fab_idx) {
+        if let Err(e) = node::allow_devices(matter, &store, fabric.fab_idx) {
             warn!(
-                "service: cannot open our OTA Provider to the devices on {}: {e:?}",
+                "service: cannot open our node to the devices on {}: {e:?}",
                 fabric.name
             );
         }
@@ -578,6 +586,8 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             | Op::CloseWindow { reply, .. }
             | Op::Window { reply, .. } => refuse(reply, error).await,
             Op::RemoveDeviceFabric { reply, .. } => refuse(reply, error).await,
+            Op::DeviceTime { reply, .. } => refuse(reply, error).await,
+            Op::SetDeviceTime { reply, .. } => refuse(reply, error).await,
             Op::OtaUploadChunk { reply, .. } => refuse(reply, error).await,
             Op::Assistant(reply) => refuse(reply, error).await,
             Op::ReadThreadMesh { reply, .. } => refuse(reply, error).await,

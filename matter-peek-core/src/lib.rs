@@ -54,6 +54,7 @@ mod controller {
     pub mod service;
     pub mod setup_code;
     pub mod subscribe;
+    pub mod time;
     pub mod window;
 }
 

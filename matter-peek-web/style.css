@@ -630,6 +630,19 @@ pre.log-text { max-height: 70vh; margin: 0; padding: .75rem 0; overflow: auto; b
 .share-warning > svg, .share-error > svg { flex: none; margin-top: .1rem; color: var(--bulma-info); }
 .share-error > svg { color: var(--bulma-danger); }
 
+/* Clock: a device's time */
+.modal .modal-card.clock-card { width: min(640px, calc(100vw - 32px)); }
+.clock-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 1rem; }
+.clock-line { display: block; }
+.clock-steps { display: flex; flex-direction: column; gap: .35rem; margin-bottom: 1rem; font-size: .85rem; }
+.clock-steps li { display: flex; align-items: flex-start; gap: .5rem; }
+.clock-steps li > svg { flex: none; margin-top: .15rem; }
+.clock-steps li.is-done > svg { color: var(--bulma-success); }
+.clock-steps li.is-failed > svg { color: var(--bulma-warning); }
+@media (max-width: 600px) {
+  .clock-facts { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* Fabrics: the controllers a device belongs to */
 .device-fabrics { display: flex; align-items: center; gap: .55rem; width: 100%; margin-top: .75rem; padding: .45rem .6rem; border: 1px solid var(--bulma-border-weak); border-radius: 10px; background: transparent; color: var(--bulma-text); font: inherit; font-size: .82rem; text-align: left; cursor: pointer; }
 .device-fabrics:hover { background: var(--bulma-scheme-main-bis); }

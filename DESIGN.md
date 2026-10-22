@@ -135,7 +135,8 @@ unused MCP layer is left out by the linker.
 **service**, which owns the Matter stack (not `Send`) and runs, side by side:
 - the transport pump (UDP and, with `ble`, BTP chained on one stack),
 - the mDNS backend (permanently, for operational resolves),
-- our own node (OTA Provider, BDX, inbound subscription reports),
+- our own node (OTA Provider, time source, BDX, inbound subscription
+  reports, CASE for devices that reach us),
 - the operations (one at a time, plus a periodic sync),
 - the subscriptions (detached, so they never block operations).
 
@@ -320,6 +321,30 @@ shown: the window is ours when its `AdminFabricIndex` is the device's index of
 our fabric. The basic window is not offered: it needs the device's own setup
 code, which we do not keep.
 
+### Time
+- Our node serves the Time Synchronization cluster on endpoint 0, without
+  features: `UTCTime`, `Granularity`, `TimeSource`, from the stack's clock,
+  which a task keeps on the host's (set again when they drift 50 ms apart, or
+  the host's sync state changes). Synchronized (on Linux, the kernel's NTP
+  state), it reports milliseconds and SNTP from outside Matter, as CHIP's
+  hosts do; else minutes and unknown.
+- Each fabric of ours grants any CASE peer View on it (and Operate on the OTA
+  Provider). A time sync client opens CASE to us when it has no session, so
+  our node answers CASE (Secure Channel), and our operational records carry
+  the UDP port we bound.
+- Setting a device's clock follows the spec's steps after
+  CommissioningComplete: `SetUTCTime`; `SetTimeZone` (the standard offset and
+  the IANA name) with the TimeZone feature, then `SetDSTOffset` if the device
+  asks for it, with as many of the next DST periods as it keeps; with the
+  TimeSyncClient feature, `SetTrustedTimeSource` to our node, endpoint 0. CHIP
+  sends these over PASE, under the fail-safe; we send them over CASE once
+  commissioned, which never fails a commission, and the same code serves
+  devices commissioned before. After a commission it leaves another
+  controller's time source in place; on demand it replaces it.
+- The host's zone comes from the C library (`localtime_r`): the DST periods
+  are found by stepping a day at a time over the next two years; the name from
+  `TZ` or the `/etc/localtime` link.
+
 ---
 
 ## 5. What rs-matter provides
@@ -333,6 +358,7 @@ code, which we do not keep.
 | Reports to a controller | `ReportDataHandler` |
 | Diagnostic logs | `diag_logs` client + `bdx` |
 | OTA Provider | `ota_prov` cluster + BDX handler, `ota` image header |
+| Time source | `time_sync` cluster handler over the stack's clock (`rtc`), `SecureChannel` for CASE |
 | QR / manual codes | `pairing` (incl. `qr-scan` from pixels) |
 | Persistence | `KvBlobStore`, `DirKvBlobStore` |
 
@@ -392,8 +418,10 @@ its own platform pieces (e.g. `Builtin` mDNS over its multicast socket), plus an
 **Done**: commissioning over IP and BLE (Wi-Fi), discovery, QR from a picture;
 inventory with remember, tags and sync; one-shot and live health; diagnostic
 logs; identify; OTA Provider and updates; decommission; a device's networking
-and changes to its networks; web UI, CLI and MCP on one API; the API in `core`
-(`MatterPeek`), exported over UniFFI.
+and changes to its networks; the Thread mesh; several fabrics of our own; a
+device's fabrics, and removing another controller's; sharing a device through
+an enhanced commissioning window; a time source for our devices, and their
+clocks read and set; web UI, CLI and MCP on one API, in one executable; the API in `core` (`MatterPeek`), exported over UniFFI.
 
 **Next**
 - Migrating devices to a new Wi-Fi, and other changes to the networks of many
@@ -405,12 +433,14 @@ and changes to its networks; web UI, CLI and MCP on one API; the API in `core`
 - Filtering devices by what we know of them (Wi-Fi / Thread / Ethernet, device
   types, clusters, fabrics), next to the user's tags; the same filters select
   devices for bulk changes.
-- A device's fabrics (where else it is commissioned), and devices on other
-  fabrics only (to have their commissioning windows opened for us).
-- Several fabrics of our own ("homes"), and joining another controller's
-  fabric with Matter 1.6 Joint Fabric (e.g. Home Assistant's).
-- Sharing a device: opening a basic or enhanced commissioning window and showing
-  its pairing code and QR code.
+- Devices on other fabrics only (to have their commissioning windows opened
+  for us).
+- Adding a device to, or moving it to, another fabric of ours (through our
+  own commissioning window); exporting and importing a fabric.
+- Joint Fabric, as anchor and as administrator: see below.
+- Keeping devices' clocks: renewing DST periods before they run out, and
+  setting the time again on devices that lost it (no time source of their
+  own), without blocking the operations.
 - Commissioning progress (percent and stage) from rs-matter's `Commissioner`,
   with questions back to the user (attestation failed or test device: continue?
   a retryable step failed: retry?).
@@ -436,6 +466,78 @@ or ePSKc, `DIAG_GET` traversal), which sees every node.
 
 **Later**: consent-gated upload of logs and crash dumps; per-vendor crash
 parsers.
+
+### Joint Fabric (researched 2026-10, not started)
+
+Joint Fabric (Matter Core, provisional in 1.5.1, final in 1.6) lets several
+ecosystems administer one fabric:
+
+- The joint fabric is the anchor's fabric: its root and its fabric ID. Every
+  other ecosystem's administrator gets an ICAC cross-signed by the anchor's
+  root, with the public key of the ICAC it already has, so it goes on
+  issuing NOCs with its own key. Every participant issues NOCs through an
+  ICAC.
+- Two CATs carry the rights: the Administrator CAT (`0xFFFF`, version 1),
+  in every administrator's NOC, to which every device's ACL grants
+  Administer; and the Anchor CAT (`0xFFFE`), only in the anchor's NOC (issued
+  by an ICAC with `OU=jf-anchor-icac`), to which the administrators' ACLs
+  grant Administer.
+- Only the anchor hosts the Joint Fabric Datastore (cluster 0x0752): the
+  nodes, groups, key sets (the IPK among them), ACLs and bindings of the
+  fabric, and its administrators. The others register what they commission
+  there, and learn of the others' devices by subscribing to its node list;
+  the anchor pushes keys, groups and ACLs to the nodes.
+- Joining (the Joint Commissioning Method): the joining administrator opens
+  a joint commissioning window (Joint Fabric Administrator cluster, 0x0753;
+  advertised with `CM=3`), and the anchor commissions it like a device, with
+  extra checks (its Administrator CAT, Vendor ID verification both ways, the
+  user's consent) and, over CASE, `ICACCSRRequest` / `AddICAC` for the
+  cross-signed ICAC. Commissionable nodes advertise their role in the `JF`
+  TXT key (1 available, 2 administrator, 4 anchor, 8 datastore).
+
+What others have (October 2026):
+- Home Assistant's Matter Server (matterjs-server, Matter 1.6.1 through
+  matter.js 0.18): no Joint Fabric in any role; matter.js has the clusters as
+  empty generated stubs. A node manager modeled on the Datastore is a draft
+  (matter.js PR #3948, Open Home Foundation roadmap #182). Apple, Google,
+  Amazon and SmartThings have announced nothing.
+- connectedhomeip: the Administrator cluster is provisional up to tag
+  v1.6.1.0 (no longer on `master`), and the work is in two example apps
+  (`jf-admin-app`, `jf-control-app`). An anchor sets itself up and keeps a
+  Datastore (in memory only) that it pushes to nodes; a joining
+  administrator is commissioned through the joint window with the checks
+  above, gets an Administrator-CAT NOC on the anchor's fabric, and answers
+  `ICACCSRRequest`. There it stops: the anchor never signs that CSR and never
+  sends `AddICAC`, so the joined ecosystem cannot commission devices into the
+  joint fabric. PR #73591 adds the cross-signing, but has had changes
+  requested since August 2026 (its anchor signs a CSR of its own key rather
+  than the joiner's). Anchor transfer is not implemented.
+
+What matter-peek would need:
+- Fabrics issuing NOCs through an ICAC, keeping their root key (the anchor
+  signs ICACs), with the Administrator CAT in our NOC, and the Anchor CAT on
+  the anchor's; device NOCs with the Administrator CAT as the admin subject.
+  Ours issue NOCs from the root today; "Home" can move, as we hold its root
+  key: its devices' NOCs stay valid, each gets an ACL entry for the
+  Administrator CAT.
+- To join, a commissionable node: a PASE responder (we answer CASE already),
+  the root endpoint's clusters, and an endpoint of device type 0x0130 with
+  both Joint Fabric clusters. Our node serves the OTA Provider, the time and
+  subscription reports today.
+- The Datastore (anchor) or its client (administrator); random node IDs,
+  unique in its node list; an orphan sweep that leaves other administrators'
+  devices alone.
+- Vendor ID verification, which anchors trust in the DCL (a root registered
+  under the vendor ID): out of reach for test vendors and self-made roots,
+  which connectedhomeip stubs too.
+- In rs-matter (which already generates both clusters): ICACs signed from
+  another's CSR and with an `OU`; the two CATs; the Commissioner taking CATs,
+  an admin subject and the ICAC that issued the NOC (it sends the fabric
+  table's), with hooks for the extra steps; joint windows (`CM=3`, `JF`); the
+  verifier side of Vendor ID verification; the clusters' handlers.
+
+Interoperable peers so far: only connectedhomeip's example apps, and only as
+far as `ICACCSRRequest`.
 
 ---
 

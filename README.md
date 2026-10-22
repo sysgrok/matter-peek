@@ -108,9 +108,9 @@ periodically, like the server), so to share the store with the web UI, run
 
 | Tools | Access |
 |-------|--------|
-| `discover`, `list_devices`, `list_fabrics`, `peek_device`, `read_network`, `thread_mesh`, `thread_findings`, `retrieve_logs`, `read_qr_image`, `ota_images`, `ota_updates`, `commissioning_window` | read-only |
+| `discover`, `list_devices`, `list_fabrics`, `peek_device`, `read_network`, `thread_mesh`, `thread_findings`, `retrieve_logs`, `read_qr_image`, `ota_images`, `ota_updates`, `commissioning_window`, `device_time` | read-only |
 | `identify` | acts on the device (it blinks); not read-only, so agents ask first |
-| `commission`, `decommission`, `remember`, `set_tags`, `sync`, `add_network`, `remove_network`, `connect_network`, `reorder_network`, `ota_upload`, `ota_delete`, `ota_update`, `open_commissioning_window`, `close_commissioning_window`, `remove_device_fabric`, `create_fabric`, `rename_fabric`, `set_default_fabric`, `delete_fabric` | **mutating** |
+| `commission`, `decommission`, `remember`, `set_tags`, `sync`, `add_network`, `remove_network`, `connect_network`, `reorder_network`, `ota_upload`, `ota_delete`, `ota_update`, `open_commissioning_window`, `close_commissioning_window`, `set_device_time`, `remove_device_fabric`, `create_fabric`, `rename_fabric`, `set_default_fabric`, `delete_fabric` | **mutating** |
 
 The mutating tools touch real devices, so only `--allow-mutate` offers them:
 without it they are hidden from `tools/list` and rejected at `tools/call`. The
@@ -170,6 +170,19 @@ vendor, fabric ID and the device's node ID there), in `matter-peek peek
 <node>` and in the MCP tool `peek_device`. Another controller's fabric can be
 removed from a device (the popup, `matter-peek remove-fabric <node> <index>`,
 MCP `remove_device_fabric`); ours is removed by decommissioning.
+
+### Time: a time source for our devices
+
+matter-peek serves this host's clock to the devices on its fabrics (the Time
+Synchronization cluster on its node), and sets their clocks from it: their UTC
+time; their time zone and daylight saving times, from this host's zone, if
+they keep them; and itself as their trusted time source, if they take their
+time from a Matter node, which they then read it from. It does so once a
+device is commissioned (leaving another controller's time source in place),
+and on demand: the card's Clock button, `matter-peek time <node> [--set]`, and
+the MCP tools `device_time` / `set_device_time`. Reading a device's clock
+shows its time and how far it is from ours, its accuracy and source, its zone,
+DST and local time.
 
 ### Thread mesh
 

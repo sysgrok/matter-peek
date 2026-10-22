@@ -85,11 +85,11 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             .create(self.crypto, self.matter, &self.store, name)
             .map_err(PeekError::failed)?;
 
-        // Devices on it may ask us for updates, as on the others.
-        if let Err(e) = crate::node::allow_ota_requestors(self.matter, &self.store, fabric.fab_idx)
-        {
+        // Devices on it may ask us for updates and read our clock, as on the
+        // others.
+        if let Err(e) = crate::node::allow_devices(self.matter, &self.store, fabric.fab_idx) {
             warn!(
-                "fabrics: cannot open our OTA Provider to the devices on {}: {e:?}",
+                "fabrics: cannot open our node to the devices on {}: {e:?}",
                 fabric.name
             );
         }

@@ -53,6 +53,7 @@ const MUTATING_TOOLS: &[&str] = &[
     "reorder_network",
     "open_commissioning_window",
     "close_commissioning_window",
+    "set_device_time",
     "remove_device_fabric",
     "create_fabric",
     "rename_fabric",
@@ -64,11 +65,12 @@ const MUTATING_TOOLS: &[&str] = &[
 pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-only tools \
      (discover, list_devices, peek_device, read_network, retrieve_logs, identify, \
      read_qr_image, ota_images, ota_updates, commissioning_window, \
-     list_fabrics) are always available. The tools that change devices \
-     or the stored state (commission, decommission, remember, set_tags, \
-     sync, ota_upload, ota_delete, ota_update, add_network, remove_network, \
-     connect_network, reorder_network, open/close_commissioning_window, \
-     remove_device_fabric, create/rename/set_default/delete_fabric) are \
+     device_time, list_fabrics) are always available. The tools that change \
+     devices or the stored state (commission, decommission, remember, \
+     set_tags, sync, ota_upload, ota_delete, ota_update, add_network, \
+     remove_network, connect_network, reorder_network, \
+     open/close_commissioning_window, set_device_time, remove_device_fabric, \
+     create/rename/set_default/delete_fabric) are \
      available only if the operator allowed them (e.g. `matter-peek mcp \
      --allow-mutate`). Our devices are on fabrics of ours (\"homes\", see \
      list_fabrics); the tools that list or commission take an optional \
@@ -356,6 +358,21 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
                 "required": ["node_id"]
             }),
         ),
+        tool(
+            "device_time",
+            "Read a device's clock (its Time Synchronization cluster): its UTC \
+             time and how far it is from ours, how accurate it claims to be and \
+             where its time comes from, the node it takes its time from (we \
+             are a time source for our devices), its time zone, daylight \
+             saving times and local time, and what it can do (keep a time \
+             zone, NTP client or server, take time from a node). A device \
+             without the cluster keeps no clock we can see.",
+            json!({
+                "type": "object",
+                "properties": { "node_id": node_id_schema() },
+                "required": ["node_id"]
+            }),
+        ),
     ];
 
     if caps.allow_mutate {
@@ -610,6 +627,20 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
             }),
         ));
         tools.push(tool(
+            "set_device_time",
+            "Set a device's clock from ours (this host's): its UTC time; its \
+             time zone and daylight saving time, if it keeps them; and us as \
+             its trusted time source, if it takes its time from a node \
+             (replacing another controller's). Returns each step, set or why \
+             not (a device may keep its own time), and the clock after. Done \
+             on its own after commissioning. MUTATING.",
+            json!({
+                "type": "object",
+                "properties": { "node_id": node_id_schema() },
+                "required": ["node_id"]
+            }),
+        ));
+        tools.push(tool(
             "close_commissioning_window",
             "Close the commissioning window on a device, whoever opened it. \
              MUTATING.",
@@ -841,6 +872,12 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
             node_id: arg_node(args)?,
         },
         "commissioning_window" => wire::Request::CommissioningWindow {
+            node_id: arg_node(args)?,
+        },
+        "device_time" => wire::Request::DeviceTime {
+            node_id: arg_node(args)?,
+        },
+        "set_device_time" => wire::Request::SetDeviceTime {
             node_id: arg_node(args)?,
         },
         "ota_delete" => wire::Request::OtaDelete {
@@ -1226,10 +1263,48 @@ fn labelled(response: &wire::Response) -> Value {
                 }
             }
         }
+        wire::Response::DeviceTime { time } => label_time(time, &mut value["time"]),
+        wire::Response::TimeSetup { setup } => label_time(&setup.time, &mut value["setup"]["time"]),
         _ => {}
     }
 
     value
+}
+
+/// A device's clock, with its times, offsets and sources also in words.
+fn label_time(time: &api::DeviceTime, v: &mut Value) {
+    v["node"] = json!(display::hex_u64(time.node_id));
+    if let Some(ms) = time.utc_unix_ms {
+        v["utc"] = json!(display::utc_label(ms));
+    }
+    if let Some(ms) = time.offset_ms {
+        v["from_ours"] = json!(display::clock_offset_label(ms));
+    }
+    v["accuracy"] = json!(time.granularity.label());
+    if let Some(source) = time.time_source {
+        v["source"] = json!(display::time_source_label(source));
+    }
+    if let Some(source) = time.trusted_source_label() {
+        v["takes_time_from"] = json!(source);
+    }
+    if let Some(ms) = time.local_unix_ms {
+        v["local"] = json!(display::local_time_label(ms));
+    }
+    for (z, v) in time.time_zones.iter().zip(entries(v, "time_zones")) {
+        v["offset"] = json!(display::utc_offset_label(z.offset_secs));
+        if let Some(ms) = z.valid_at_unix_ms {
+            v["from"] = json!(display::utc_label(ms));
+        }
+    }
+    for (d, v) in time.dst_offsets.iter().zip(entries(v, "dst_offsets")) {
+        v["offset"] = json!(display::utc_offset_label(d.offset_secs));
+        if let Some(ms) = d.from_unix_ms {
+            v["from"] = json!(display::utc_label(ms));
+        }
+        if let Some(ms) = d.until_unix_ms {
+            v["until"] = json!(display::utc_label(ms));
+        }
+    }
 }
 
 /// The entries of array `key` of `value`.
