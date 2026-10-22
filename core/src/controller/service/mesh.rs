@@ -70,7 +70,15 @@ impl<C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'_, C, S, O> {
 
         let fresh = crate::mdns::border_routers(&[]).await;
         input.border_routers = self.recent_border_routers(fresh);
-        input.hosts = crate::mdns::matter_thread_hosts().await;
+        input.hosts = crate::mdns::matter_hosts().await;
+        input.our_fabric = self
+            .matter
+            .with_state(|state| {
+                Ok::<_, rs_matter::error::Error>(
+                    state.fabrics.fabric(self.fab_idx)?.compressed_fabric_id(),
+                )
+            })
+            .ok();
 
         let mut names = self.thread_names.borrow_mut();
         for router in &input.border_routers {

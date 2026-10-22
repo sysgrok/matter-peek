@@ -835,26 +835,68 @@ fn thread_text(mesh: &api::ThreadMesh, findings_only: bool) -> String {
 
     if !findings_only {
         lines.push(String::new());
-        lines.push(format!("Nodes ({}):", mesh.nodes.len()));
+        let counts = &mesh.counts;
         lines.push(format!(
-            "  {:<8} {:<6} {:<16}  {:<30} {}",
-            "ROLE", "RLOC16", "EXT ADDRESS", "NAME", "PARENT"
+            "Nodes ({}): {} on our fabric, {} border routers; {} routers, {} end devices, \
+             {} sleepy, {} of unknown role",
+            counts.nodes,
+            counts.on_our_fabric,
+            counts.border_routers,
+            counts.routers,
+            counts.end_devices,
+            counts.sleepy_end_devices,
+            counts.unknown_role
+        ));
+        lines.push(format!(
+            "  {:<8} {:<6} {:<16}  {:<30} {:<16} {}",
+            "ROLE", "RLOC16", "EXT ADDRESS", "NAME", "SLEEP", "PARENT"
         ));
         for node in &mesh.nodes {
-            let role = node.role.map(thread_role_text).unwrap_or("-");
+            let role = match node.role {
+                Some(role) => thread_role_text(role),
+                None if node.sleepy() => "sleepy?",
+                None => "-",
+            };
             let kind = match node.kind {
                 api::MeshNodeKind::BorderRouter => " (border router)",
                 _ => "",
             };
             lines.push(format!(
-                "  {role:<8} {:<6} {:016X}  {:<30} {}",
+                "  {role:<8} {:<6} {:016X}  {:<30} {:<16} {}",
                 node.rloc16
                     .map(|r| format!("{r:04X}"))
                     .unwrap_or_else(|| "-".into()),
                 node.ext_address,
                 format!("{}{kind}", node.label),
+                node.sleep.as_ref().map(sleep_text).unwrap_or_default(),
                 node.parent.map(label).unwrap_or_default()
             ));
+        }
+
+        if !mesh.lan_nodes.is_empty() {
+            lines.push(String::new());
+            lines.push(format!(
+                "Matter nodes on Thread of other fabrics, seen on the LAN ({}, {} sleepy; \
+                 where they sit is unknown):",
+                counts.lan_nodes, counts.lan_sleepy
+            ));
+            for node in &mesh.lan_nodes {
+                let fabrics: Vec<String> = node
+                    .fabrics
+                    .iter()
+                    .map(|f| format!("node {:X} on {:016X}", f.node_id, f.compressed_fabric_id))
+                    .collect();
+                lines.push(format!(
+                    "  {}  {}  {}{}",
+                    node.host,
+                    node.address,
+                    fabrics.join(", "),
+                    node.sleep
+                        .as_ref()
+                        .map(|sleep| format!("  {}", sleep_text(sleep)))
+                        .unwrap_or_default()
+                ));
+            }
         }
 
         lines.push(String::new());
@@ -926,6 +968,32 @@ fn thread_text(mesh: &api::ThreadMesh, findings_only: bool) -> String {
     }
 
     lines.join("\n")
+}
+
+/// How a node sleeps, short: its ICD idle time, how often it polls while
+/// idle.
+fn sleep_text(sleep: &api::MeshSleep) -> String {
+    let mut parts = Vec::new();
+    match sleep.icd_mode {
+        Some(api::IcdMode::Lit) => parts.push("LIT".to_string()),
+        Some(api::IcdMode::Sit) => parts.push("SIT".to_string()),
+        None => {}
+    }
+    if let Some(ms) = sleep.idle_interval_ms {
+        parts.push(format!("polls {}", duration_ms(ms)));
+    }
+
+    parts.join(" ")
+}
+
+/// A span of milliseconds, in the largest unit that fits.
+fn duration_ms(ms: u32) -> String {
+    match ms {
+        0..1_000 => format!("{ms} ms"),
+        1_000..60_000 if ms.is_multiple_of(1_000) => format!("{} s", ms / 1_000),
+        1_000..60_000 => format!("{:.1} s", ms as f32 / 1_000.0),
+        _ => format!("{} min", ms / 60_000),
+    }
 }
 
 fn thread_role_text(role: api::ThreadRole) -> &'static str {

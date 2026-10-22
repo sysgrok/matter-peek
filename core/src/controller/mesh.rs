@@ -12,9 +12,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::api::{
-    BorderRouter, FindingKind, FindingSeverity, LinkSignal, MeshFinding, MeshLink, MeshNetwork,
-    MeshNode, MeshNodeKind, MeshRoute, NetworkInfo, NetworkKind, ThreadDiag, ThreadMesh,
-    ThreadRole, UnreadDevice,
+    BorderRouter, FindingKind, FindingSeverity, IcdInfo, IcdMode, LanFabric, LanNode, LinkSignal,
+    MeshCounts, MeshFinding, MeshLink, MeshNetwork, MeshNode, MeshNodeKind, MeshRoute, MeshSleep,
+    NetworkInfo, NetworkKind, ThreadDiag, ThreadMesh, ThreadRole, UnreadDevice,
 };
 use crate::mdns::MatterHost;
 
@@ -50,6 +50,8 @@ pub(crate) struct MeshInput {
     pub unread: Vec<UnreadDevice>,
     pub border_routers: Vec<BorderRouter>,
     pub hosts: Vec<MatterHost>,
+    /// Our compressed fabric ID: the hosts on it are our devices.
+    pub our_fabric: Option<u64>,
     /// The Wi-Fi channels our Wi-Fi devices are on, by device title.
     pub wifi_channels: Vec<(String, u16)>,
     /// The border routers' OMR prefixes, and whether this machine routes to
@@ -82,12 +84,11 @@ pub(crate) fn build(input: MeshInput) -> ThreadMesh {
     for router in &input.border_routers {
         mesh.border_router(router);
     }
-    for host in &input.hosts {
-        mesh.host(host);
-    }
+    let lan_nodes = mesh.hosts(&input);
 
     let networks = mesh.networks(&input);
     let nodes = mesh.ordered_nodes();
+    let counts = counts(&nodes, &lan_nodes);
     let links: Vec<MeshLink> = mesh.links.values().cloned().collect();
     let routes = mesh.unlinked_routes(&links);
 
@@ -105,8 +106,10 @@ pub(crate) fn build(input: MeshInput) -> ThreadMesh {
     ThreadMesh {
         networks,
         nodes,
+        counts,
         links,
         routes,
+        lan_nodes,
         border_routers: input.border_routers,
         findings,
         unread: input.unread,
@@ -142,6 +145,7 @@ impl Builder {
         };
         node.role = diag.role.or(node.role);
         node.rloc16 = diag.rloc16.or(node.rloc16);
+        merge_sleep(&mut node.sleep, device.network.icd.as_ref().map(icd_sleep));
         node.extended_pan_id = xpan.or(node.extended_pan_id);
         node.partition_id = diag.partition_id.or(node.partition_id);
 
@@ -270,17 +274,54 @@ impl Builder {
         node.partition_id = router.partition_id.or(node.partition_id);
     }
 
-    fn host(&mut self, host: &MatterHost) {
-        let Some(node) = self.nodes.get_mut(&host.ext_address) else {
-            return;
-        };
-        if node.kind == MeshNodeKind::Unknown {
-            node.kind = MeshNodeKind::OtherFabric {
-                node_id: host.node_id,
+    /// The Matter nodes the LAN advertises: ours add to how they sleep; the
+    /// others on Thread (at an address in a border router's prefix) are listed
+    /// by host, as their host names are not their extended addresses.
+    fn hosts(&mut self, input: &MeshInput) -> Vec<LanNode> {
+        let prefixes: Vec<(u128, u32)> = input
+            .border_routers
+            .iter()
+            .filter_map(|router| prefix(router.omr_prefix.as_deref()?))
+            .collect();
+        let mut lan: Vec<LanNode> = Vec::new();
+
+        for host in &input.hosts {
+            let sleep = host_sleep(host);
+
+            if input.our_fabric == Some(host.compressed_fabric_id) {
+                let ours = MeshNodeKind::Device {
+                    node_id: host.node_id,
+                };
+                if let Some(node) = self.nodes.values_mut().find(|node| node.kind == ours) {
+                    merge_sleep(&mut node.sleep, sleep);
+                }
+                continue;
+            }
+            if !on_thread(&host.address, &prefixes) {
+                continue;
+            }
+
+            let fabric = LanFabric {
                 compressed_fabric_id: host.compressed_fabric_id,
+                node_id: host.node_id,
             };
-            node.label = format!("Matter node {:X} (another fabric)", host.node_id);
+            match lan.iter_mut().find(|node| node.host == host.host) {
+                Some(node) => {
+                    if !node.fabrics.contains(&fabric) {
+                        node.fabrics.push(fabric);
+                    }
+                    merge_sleep(&mut node.sleep, sleep);
+                }
+                None => lan.push(LanNode {
+                    host: host.host.clone(),
+                    address: host.address.clone(),
+                    fabrics: alloc::vec![fabric],
+                    sleep,
+                }),
+            }
         }
+
+        lan
     }
 
     fn node(&mut self, ext: u64) -> &mut MeshNode {
@@ -293,6 +334,7 @@ impl Builder {
             extended_pan_id: None,
             partition_id: None,
             parent: None,
+            sleep: None,
         })
     }
 
@@ -907,6 +949,94 @@ impl Findings<'_> {
     }
 }
 
+/// The nodes of the mesh, counted.
+fn counts(nodes: &[MeshNode], lan: &[LanNode]) -> MeshCounts {
+    let mut counts = MeshCounts {
+        nodes: nodes.len() as u32,
+        lan_nodes: lan.len() as u32,
+        lan_sleepy: lan.iter().filter(|node| node.sleepy()).count() as u32,
+        ..Default::default()
+    };
+
+    for node in nodes {
+        let ours = matches!(node.kind, MeshNodeKind::Device { .. });
+        let border_router = node.kind == MeshNodeKind::BorderRouter;
+        counts.on_our_fabric += ours as u32;
+        counts.border_routers += border_router as u32;
+
+        match node.role {
+            Some(ThreadRole::Router | ThreadRole::Leader) => counts.routers += 1,
+            Some(ThreadRole::EndDevice | ThreadRole::Reed) => counts.end_devices += 1,
+            _ if node.sleepy() => counts.sleepy_end_devices += 1,
+            // A border router routes.
+            _ if border_router => counts.routers += 1,
+            _ => counts.unknown_role += 1,
+        }
+    }
+
+    counts
+}
+
+/// How an ICD sleeps, by its ICD Management: one that does not say its idle
+/// time can only do short.
+fn icd_sleep(icd: &IcdInfo) -> MeshSleep {
+    MeshSleep {
+        icd_mode: Some(icd.mode.unwrap_or(IcdMode::Sit)),
+        idle_mode_secs: icd.idle_mode_secs,
+        active_threshold_ms: icd.active_threshold_ms.map(u32::from),
+        ..Default::default()
+    }
+}
+
+/// How a Matter node sleeps, by its advert; `None` if it says nothing of it.
+fn host_sleep(host: &MatterHost) -> Option<MeshSleep> {
+    let sleep = MeshSleep {
+        icd_mode: host
+            .long_idle
+            .map(|long| if long { IcdMode::Lit } else { IcdMode::Sit }),
+        idle_interval_ms: host.idle_interval_ms,
+        active_interval_ms: host.active_interval_ms,
+        active_threshold_ms: host.active_threshold_ms,
+        idle_mode_secs: None,
+    };
+
+    (sleep != MeshSleep::default()).then_some(sleep)
+}
+
+/// `into`, with what it lacks of `from`.
+fn merge_sleep(into: &mut Option<MeshSleep>, from: Option<MeshSleep>) {
+    let Some(from) = from else { return };
+    let into = into.get_or_insert_with(MeshSleep::default);
+
+    into.icd_mode = into.icd_mode.or(from.icd_mode);
+    into.idle_interval_ms = into.idle_interval_ms.or(from.idle_interval_ms);
+    into.active_interval_ms = into.active_interval_ms.or(from.active_interval_ms);
+    into.active_threshold_ms = into.active_threshold_ms.or(from.active_threshold_ms);
+    into.idle_mode_secs = into.idle_mode_secs.or(from.idle_mode_secs);
+}
+
+/// An IPv6 prefix like `fdac:bcdf:a3c9:1::/64`.
+fn prefix(text: &str) -> Option<(u128, u32)> {
+    let (address, len) = text.split_once('/')?;
+    let address: core::net::Ipv6Addr = address.parse().ok()?;
+    let len: u32 = len.parse().ok()?;
+
+    (1..=128).contains(&len).then(|| (u128::from(address), len))
+}
+
+/// Whether `address` is in one of `prefixes`: on a Thread network.
+fn on_thread(address: &str, prefixes: &[(u128, u32)]) -> bool {
+    let Ok(address) = address.parse::<core::net::Ipv6Addr>() else {
+        return false;
+    };
+    let address = u128::from(address);
+
+    prefixes.iter().any(|&(prefix, len)| {
+        let mask = u128::MAX << (128 - len);
+        address & mask == prefix & mask
+    })
+}
+
 /// A device's own extended address: from its Thread diagnostics, else its
 /// Thread interface's hardware address.
 fn own_address(network: &NetworkInfo, diag: &ThreadDiag) -> Option<u64> {
@@ -1181,6 +1311,92 @@ mod tests {
         let far = mesh.nodes.iter().find(|n| n.ext_address == FAR).unwrap();
         assert_eq!(far.role, Some(ThreadRole::Router));
         assert!(!mesh.links.iter().any(|l| l.a == FAR || l.b == FAR));
+    }
+
+    #[test]
+    fn sleepy_devices_from_their_role_their_icd_and_their_advert() {
+        const OURS: u64 = 0xEADD;
+
+        let mut input = healthy();
+        input.our_fabric = Some(OURS);
+        input.border_routers[0].omr_prefix = Some("fdac:bcdf:a3c9:1::/64".into());
+        input.devices[1].network.icd = Some(IcdInfo {
+            mode: Some(IcdMode::Lit),
+            idle_mode_secs: Some(3600),
+            active_mode_ms: Some(300),
+            active_threshold_ms: Some(5000),
+        });
+        let host =
+            |fabric: u64, node_id: u64, name: &str, address: &str, sii: Option<u32>| MatterHost {
+                compressed_fabric_id: fabric,
+                node_id,
+                host: name.into(),
+                address: address.into(),
+                idle_interval_ms: sii,
+                active_interval_ms: sii.map(|_| 300),
+                active_threshold_ms: None,
+                long_idle: None,
+            };
+        input.hosts = vec![
+            // Ours: its advert adds to how it sleeps.
+            host(
+                OURS,
+                2,
+                "430500CDAE446BE3.local",
+                "fdac:bcdf:a3c9:1::2",
+                Some(30_000),
+            ),
+            // On Thread, on two other fabrics, polling every 5 s.
+            host(
+                0xAB,
+                0x77,
+                "36C29F8DB1F0D7F3.local",
+                "fdac:bcdf:a3c9:1::77",
+                Some(5000),
+            ),
+            host(
+                0xCD,
+                0x5,
+                "36C29F8DB1F0D7F3.local",
+                "fdac:bcdf:a3c9:1::77",
+                None,
+            ),
+            // On the LAN, not on Thread: same node ID as ours, other fabric.
+            host(0xEF, 2, "DCA6322885670000.local", "192.168.10.50", None),
+        ];
+
+        let mesh = build(input);
+
+        let sleepy = mesh
+            .nodes
+            .iter()
+            .find(|n| n.ext_address == SLEEPY)
+            .and_then(|n| n.sleep.clone())
+            .unwrap();
+        assert_eq!(sleepy.icd_mode, Some(IcdMode::Lit));
+        assert_eq!(sleepy.idle_mode_secs, Some(3600));
+        assert_eq!(sleepy.idle_interval_ms, Some(30_000));
+
+        assert_eq!(mesh.lan_nodes.len(), 1);
+        let lan = &mesh.lan_nodes[0];
+        assert_eq!(lan.host, "36C29F8DB1F0D7F3.local");
+        assert_eq!(lan.fabrics.len(), 2);
+        assert!(lan.sleepy());
+
+        assert_eq!(
+            mesh.counts,
+            MeshCounts {
+                nodes: 3,
+                on_our_fabric: 2,
+                border_routers: 1,
+                routers: 2,
+                end_devices: 0,
+                sleepy_end_devices: 1,
+                unknown_role: 0,
+                lan_nodes: 1,
+                lan_sleepy: 1,
+            }
+        );
     }
 
     #[test]

@@ -19,6 +19,9 @@ use rs_matter::dm::clusters::decl::ethernet_network_diagnostics::{
 use rs_matter::dm::clusters::decl::general_diagnostics::{
     self as gen_diag, GeneralDiagnosticsAttrResponses as _, InterfaceTypeEnum,
 };
+use rs_matter::dm::clusters::decl::icd_management::{
+    self as icd_mgmt, IcdManagementAttrResponses as _, OperatingModeEnum,
+};
 use rs_matter::dm::clusters::decl::network_commissioning::{
     self as net_comm, Feature, NetworkCommissioningAttrResponses as _,
     NetworkCommissioningStatusEnum,
@@ -40,8 +43,8 @@ use rs_matter::transport::exchange::Exchange;
 use rs_matter::Matter;
 
 use crate::api::{
-    KnownNetwork, NetworkConfig, NetworkInfo, NetworkInterfaceInfo, NetworkKind, NetworkStatus,
-    ThreadDiag, ThreadNeighbor, ThreadRole, ThreadRoute, WifiSecurity, WifiVersion,
+    IcdMode, KnownNetwork, NetworkConfig, NetworkInfo, NetworkInterfaceInfo, NetworkKind,
+    NetworkStatus, ThreadDiag, ThreadNeighbor, ThreadRole, ThreadRoute, WifiSecurity, WifiVersion,
 };
 
 use crate::diagnostics::list_items;
@@ -68,6 +71,7 @@ pub async fn read_network<C: Crypto>(
         whole(wifi_diag::FULL_CLUSTER.id),
         whole(thread_diag::FULL_CLUSTER.id),
         whole(eth_diag::FULL_CLUSTER.id),
+        whole(icd_mgmt::FULL_CLUSTER.id),
     ];
 
     let exchange = Exchange::initiate(matter, crypto, fab_idx, node_id).await?;
@@ -84,6 +88,7 @@ pub async fn read_network<C: Crypto>(
             wifi(&resp, &mut info);
             thread(&resp, &mut info);
             ethernet(&resp, &mut info);
+            icd(&resp, &mut info);
         }
 
         match chunk.complete().await? {
@@ -438,6 +443,38 @@ fn route(r: &RouteTableStruct<'_>) -> Option<ThreadRoute> {
         allocated: r.allocated().ok()?,
         link_established: r.link_established().ok()?,
     })
+}
+
+fn icd(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {
+    let reads = resp.icd_management_read_resp();
+
+    let mut seen = info.icd.is_some();
+    let mut icd = info.icd.take().unwrap_or_default();
+
+    plain(
+        &mut seen,
+        &mut icd.idle_mode_secs,
+        reads.idle_mode_duration(),
+    );
+    plain(
+        &mut seen,
+        &mut icd.active_mode_ms,
+        reads.active_mode_duration(),
+    );
+    plain(
+        &mut seen,
+        &mut icd.active_threshold_ms,
+        reads.active_mode_threshold(),
+    );
+    if let Some((_, Ok(mode))) = reads.operating_mode().next() {
+        seen = true;
+        icd.mode = Some(match mode {
+            OperatingModeEnum::SIT => IcdMode::Sit,
+            OperatingModeEnum::LIT => IcdMode::Lit,
+        });
+    }
+
+    info.icd = seen.then_some(icd);
 }
 
 fn ethernet(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {

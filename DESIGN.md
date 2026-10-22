@@ -238,6 +238,12 @@ of it is private to `core`.
   knows, with no link seen, is placed by its route: through which router our
   router reaches it, and at what path cost (not drawn as a link). Link quality is 0–3, as
   OpenThread devices report it (the spec scales it to 255).
+- A `_matter._tcp` host name is not a Thread extended address, and node IDs
+  repeat across fabrics. Our devices' adverts are matched by compressed fabric
+  ID and node ID, and add their `SII`/`SAI`/`ICD` to the node's sleep, with
+  its ICD Management attributes. Other fabrics' hosts are on Thread when
+  their address is in a border router's OMR prefix; they are kept apart as
+  LAN nodes, one per host with all its fabrics, not placed in the graph.
 - Neighbour and route tables, like ThreadMetrics, are read item by item where
   a device splits a list over chunks.
 - The findings are drawn from that partial view: a router is critical only

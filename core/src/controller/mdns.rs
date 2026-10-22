@@ -285,18 +285,27 @@ pub(crate) async fn thread_networks(wanted: &[u64]) -> Vec<(u64, String)> {
         .collect()
 }
 
-/// A Matter node on the local network, of any fabric, on Thread: its host
-/// name is its Thread extended address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A Matter node the local network advertises (`_matter._tcp`), of any
+/// fabric.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MatterHost {
     pub compressed_fabric_id: u64,
     pub node_id: u64,
-    pub ext_address: u64,
+    /// Its host name: not its Thread extended address.
+    pub host: String,
+    pub address: String,
+    /// How often it polls while idle and while active, and how long it stays
+    /// active, ms (`SII`, `SAI`, `SAT`).
+    pub idle_interval_ms: Option<u32>,
+    pub active_interval_ms: Option<u32>,
+    pub active_threshold_ms: Option<u32>,
+    /// Whether it is an ICD of long idle time (`ICD=1`) or short (`ICD=0`).
+    pub long_idle: Option<bool>,
 }
 
-/// The Matter nodes on Thread the local network advertises
-/// (`_matter._tcp`), looking for [`BROWSE_WINDOW`] at most. Avahi only.
-pub(crate) async fn matter_thread_hosts() -> Vec<MatterHost> {
+/// The Matter nodes the local network advertises (`_matter._tcp`), looking
+/// for [`BROWSE_WINDOW`] at most. Avahi only.
+pub(crate) async fn matter_hosts() -> Vec<MatterHost> {
     #[cfg(feature = "mdns-avahi")]
     match avahi_browse("_matter._tcp", |_| false).await {
         Ok(found) => found.iter().filter_map(matter_host).collect(),
@@ -458,19 +467,30 @@ fn omr_prefix(value: &[u8]) -> Option<String> {
     ))
 }
 
-/// A Matter node on Thread, as `_matter._tcp` names it: instance
-/// `<compressed fabric ID>-<node ID>` on host `<extended address>.local`.
+/// A Matter node, as `_matter._tcp` names it: instance
+/// `<compressed fabric ID>-<node ID>`.
 #[cfg(any(feature = "mdns-avahi", test))]
 fn matter_host(resolved: &Resolved) -> Option<MatterHost> {
     let hex = |text: &str| (text.len() == 16).then(|| u64::from_str_radix(text, 16).ok())?;
 
+    let number = |key: &[u8]| {
+        resolved.txt.iter().find_map(|entry| {
+            let value = entry.strip_prefix(key)?.strip_prefix(b"=")?;
+            core::str::from_utf8(value).ok()?.trim().parse::<u32>().ok()
+        })
+    };
+
     let (fabric, node) = resolved.name.split_once('-')?;
-    let host = resolved.host.split('.').next()?;
 
     Some(MatterHost {
         compressed_fabric_id: hex(fabric)?,
         node_id: hex(node)?,
-        ext_address: hex(host)?,
+        host: resolved.host.clone(),
+        address: resolved.address.clone(),
+        idle_interval_ms: number(b"SII"),
+        active_interval_ms: number(b"SAI"),
+        active_threshold_ms: number(b"SAT"),
+        long_idle: number(b"ICD").map(|icd| icd == 1),
     })
 }
 
@@ -580,32 +600,36 @@ mod tests {
     }
 
     #[test]
-    fn matter_hosts_on_thread_by_their_host_name() {
-        let resolved = |name: &str, host: &str| Resolved {
+    fn matter_hosts_by_their_instance_names() {
+        let resolved = |name: &str, txt: Vec<Vec<u8>>| Resolved {
             name: name.into(),
-            host: host.into(),
-            address: String::new(),
-            txt: Vec::new(),
+            host: "430500CDAE446BE3.local".into(),
+            address: "fdac:bcdf:a3c9:1:62cb:eb4c:4e4a:8c73".into(),
+            txt,
         };
 
+        let host = matter_host(&resolved("EADDBAEB88C41C26-000000000001B686", Vec::new())).unwrap();
         assert_eq!(
-            matter_host(&resolved(
-                "EADDBAEB88C41C26-000000000001B685",
-                "EA8702656CD63E20.local"
-            )),
-            Some(MatterHost {
-                compressed_fabric_id: 0xEADD_BAEB_88C4_1C26,
-                node_id: 0x1B685,
-                ext_address: 0xEA87_0265_6CD6_3E20,
-            })
+            (host.compressed_fabric_id, host.node_id, host.host.as_str()),
+            (0xEADD_BAEB_88C4_1C26, 0x1B686, "430500CDAE446BE3.local")
         );
-        // On Wi-Fi: a 6-byte MAC.
+
+        // A sleepy one says how it polls.
+        let sleepy = resolved(
+            "EADDBAEB88C41C26-0000000000000042",
+            vec![b"SII=5000".to_vec(), b"SAI=300".to_vec(), b"ICD=1".to_vec()],
+        );
+        let host = matter_host(&sleepy).unwrap();
         assert_eq!(
-            matter_host(&resolved(
-                "EADDBAEB88C41C26-000000000001B67B",
-                "A0B1C2D3E4F5.local"
-            )),
-            None
+            (
+                host.idle_interval_ms,
+                host.active_interval_ms,
+                host.long_idle
+            ),
+            (Some(5000), Some(300), Some(true))
         );
+
+        // Not an operational instance.
+        assert_eq!(matter_host(&resolved("ivan-laptop", Vec::new())), None);
     }
 }

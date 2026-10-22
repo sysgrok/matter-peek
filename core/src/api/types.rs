@@ -395,6 +395,34 @@ pub struct NetworkInfo {
     pub wifi: Option<WifiDiag>,
     pub thread: Option<ThreadDiag>,
     pub ethernet: Option<EthernetDiag>,
+    /// How it sleeps, if it is an Intermittently Connected Device.
+    #[serde(default)]
+    pub icd: Option<IcdInfo>,
+}
+
+/// How an Intermittently Connected Device sleeps (ICD Management).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct IcdInfo {
+    /// Short or long idle time; `None` where it can only do short.
+    pub mode: Option<IcdMode>,
+    /// How long it stays idle between active periods, s.
+    pub idle_mode_secs: Option<u32>,
+    /// How long an active period lasts, ms.
+    pub active_mode_ms: Option<u32>,
+    /// How long it stays active after its last activity, ms.
+    pub active_threshold_ms: Option<u16>,
+}
+
+/// An ICD's idle time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum IcdMode {
+    /// Short idle time: it polls often, and can be reached within seconds.
+    Sit,
+    /// Long idle time: it sleeps long, and checks in with its subscribers.
+    Lit,
 }
 
 /// A change to the networks a device knows (see
@@ -718,10 +746,15 @@ pub struct ThreadMesh {
     pub networks: Vec<MeshNetwork>,
     /// Our devices first, then the border routers, then the rest.
     pub nodes: Vec<MeshNode>,
+    #[serde(default)]
+    pub counts: MeshCounts,
     pub links: Vec<MeshLink>,
     /// Where routers no link is known to sit: how our routers reach them.
     #[serde(default)]
     pub routes: Vec<MeshRoute>,
+    /// Matter nodes on Thread the LAN advertises, not on our fabric.
+    #[serde(default)]
+    pub lan_nodes: Vec<LanNode>,
     pub border_routers: Vec<BorderRouter>,
     /// The warnings first.
     pub findings: Vec<MeshFinding>,
@@ -759,6 +792,99 @@ pub struct MeshNode {
     pub partition_id: Option<u32>,
     /// A child's parent, by extended address.
     pub parent: Option<u64>,
+    /// How it sleeps, where it says: its ICD Management, its mDNS advert.
+    #[serde(default)]
+    pub sleep: Option<MeshSleep>,
+}
+
+impl MeshNode {
+    /// Whether it sleeps between polls of its parent: by its role, else by
+    /// how it says it sleeps.
+    pub fn sleepy(&self) -> bool {
+        match self.role {
+            Some(ThreadRole::SleepyEndDevice) => true,
+            Some(
+                ThreadRole::Router | ThreadRole::Leader | ThreadRole::EndDevice | ThreadRole::Reed,
+            ) => false,
+            _ => self.sleep.as_ref().is_some_and(MeshSleep::sleepy),
+        }
+    }
+}
+
+impl MeshSleep {
+    /// Whether it says it sleeps: as an ICD, or polling seldom.
+    pub fn sleepy(&self) -> bool {
+        /// An idle polling interval from which a node sleeps, ms.
+        const SLEEPY_IDLE_MS: u32 = 1_000;
+
+        self.icd_mode.is_some() || self.idle_interval_ms.is_some_and(|ms| ms >= SLEEPY_IDLE_MS)
+    }
+}
+
+/// A Matter node on Thread the LAN advertises (`_matter._tcp`) that is not
+/// on our fabric: its host name is not its extended address, so where it sits
+/// in the mesh is unknown (it may be one of the nodes our devices' tables
+/// show, under that address).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct LanNode {
+    /// Its host name, e.g. `36C29F8DB1F0D7F3.local`.
+    pub host: String,
+    /// Its address, in a border router's prefix.
+    pub address: String,
+    /// The fabrics it is on, and its node ID on each.
+    pub fabrics: Vec<LanFabric>,
+    pub sleep: Option<MeshSleep>,
+}
+
+impl LanNode {
+    pub fn sleepy(&self) -> bool {
+        self.sleep.as_ref().is_some_and(MeshSleep::sleepy)
+    }
+}
+
+/// A fabric a [`LanNode`] is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct LanFabric {
+    pub compressed_fabric_id: u64,
+    pub node_id: u64,
+}
+
+/// How a node sleeps, as far as it says.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MeshSleep {
+    /// Its ICD idle time, if it is an Intermittently Connected Device.
+    pub icd_mode: Option<IcdMode>,
+    /// How often it polls its parent while idle, ms (as it advertises).
+    pub idle_interval_ms: Option<u32>,
+    /// How often it polls while active, ms.
+    pub active_interval_ms: Option<u32>,
+    /// How long it stays active after its last activity, ms.
+    pub active_threshold_ms: Option<u32>,
+    /// How long it stays idle between active periods, s (ICD).
+    pub idle_mode_secs: Option<u32>,
+}
+
+/// The nodes of a mesh, counted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MeshCounts {
+    pub nodes: u32,
+    pub on_our_fabric: u32,
+    pub border_routers: u32,
+    /// Routers, the leaders among them.
+    pub routers: u32,
+    /// End devices that listen all the time.
+    pub end_devices: u32,
+    pub sleepy_end_devices: u32,
+    /// Nodes whose role is unknown.
+    pub unknown_role: u32,
+    /// Matter nodes on Thread seen on the LAN only, and how many of them
+    /// sleep: some may also be among the nodes.
+    pub lan_nodes: u32,
+    pub lan_sleepy: u32,
 }
 
 /// What a node of the mesh is.

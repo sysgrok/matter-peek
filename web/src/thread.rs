@@ -9,8 +9,8 @@ use yew::html::Scope;
 use yew::prelude::*;
 
 use matter_peek_core::api::{
-    wire, FindingSeverity, LinkSignal, MeshLink, MeshNetwork, MeshNode, MeshNodeKind, MeshRoute,
-    ThreadMesh, ThreadRole,
+    wire, FindingSeverity, IcdMode, LanNode, LinkSignal, MeshLink, MeshNetwork, MeshNode,
+    MeshNodeKind, MeshRoute, MeshSleep, ThreadMesh, ThreadRole,
 };
 
 use crate::icons::{icon, Icon};
@@ -85,7 +85,14 @@ impl App {
                 let mut parts = vec![
                     format!("{networks} network{}", if networks == 1 { "" } else { "s" }),
                     format!("{} nodes", mesh.nodes.len()),
+                    format!(
+                        "{} routers, {} sleepy",
+                        mesh.counts.routers, mesh.counts.sleepy_end_devices
+                    ),
                 ];
+                if !mesh.lan_nodes.is_empty() {
+                    parts.push(format!("{} on the LAN", mesh.lan_nodes.len()));
+                }
                 if let Some(at) = page.read_at {
                     parts.push(format!("read {}", ago(at)));
                 }
@@ -128,6 +135,7 @@ impl App {
                             { view_networks(mesh) }
                             { view_map(mesh) }
                             { view_nodes(mesh) }
+                            { view_lan_nodes(mesh) }
                             { view_links(mesh) }
                         </>
                     },
@@ -334,6 +342,9 @@ fn view_nodes(mesh: &ThreadMesh) -> Html {
                                 if let Some(route) = mesh.routes.iter().find(|route| route.to == node.ext_address) {
                                     { format!(" · {}", route_text(mesh, route)) }
                                 }
+                                if let Some(sleep) = node.sleep.as_ref().map(sleep_text).filter(|text| !text.is_empty()) {
+                                    { format!(" · {sleep}") }
+                                }
                             </span>
                         </div>
                         <div class="thread-row-ids mono">
@@ -346,6 +357,65 @@ fn view_nodes(mesh: &ThreadMesh) -> Html {
                 }) }
             </div>
         </section>
+    }
+}
+
+/// Matter nodes on Thread of other fabrics: the LAN advertises them, but no
+/// table we read places them.
+fn view_lan_nodes(mesh: &ThreadMesh) -> Html {
+    if mesh.lan_nodes.is_empty() {
+        return html! {};
+    }
+
+    html! {
+        <section class="thread-section">
+            <p class="thread-section-title">
+                { "Seen on the LAN" }<span class="nav-count">{ mesh.lan_nodes.len() }</span>
+            </p>
+            <p class="thread-section-note">
+                { "Matter nodes on Thread of other fabrics. Where they sit in the mesh is unknown, and some may be among the nodes above." }
+            </p>
+            <div class="thread-list">
+                { for mesh.lan_nodes.iter().map(view_lan_node) }
+            </div>
+        </section>
+    }
+}
+
+fn view_lan_node(node: &LanNode) -> Html {
+    let fabrics = node
+        .fabrics
+        .iter()
+        .map(|f| {
+            format!(
+                "node {:X} on fabric {:016X}",
+                f.node_id, f.compressed_fabric_id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sleep = node
+        .sleep
+        .as_ref()
+        .map(sleep_text)
+        .filter(|text| !text.is_empty());
+
+    html! {
+        <div class="thread-row">
+            <span class="mesh-dot is-other">{ if node.sleepy() { "S" } else { "?" } }</span>
+            <div class="thread-row-main">
+                <span class="thread-row-title mono">{ node.host.clone() }</span>
+                <span class="thread-row-sub">
+                    { fabrics }
+                    if let Some(sleep) = sleep {
+                        { format!(" · {sleep}") }
+                    }
+                </span>
+            </div>
+            <div class="thread-row-ids mono">
+                <span>{ node.address.clone() }</span>
+            </div>
+        </div>
     }
 }
 
@@ -713,7 +783,46 @@ fn role_mark(node: &MeshNode) -> &'static str {
         Some(ThreadRole::Reed) => "E",
         Some(ThreadRole::EndDevice) => "E",
         Some(ThreadRole::SleepyEndDevice) => "S",
+        _ if node.sleepy() => "S",
         _ => "?",
+    }
+}
+
+/// How a node sleeps: its ICD idle time, and how often it polls its parent.
+fn sleep_text(sleep: &MeshSleep) -> String {
+    let mut parts = Vec::new();
+    match sleep.icd_mode {
+        Some(IcdMode::Lit) => parts.push("long idle time".to_string()),
+        Some(IcdMode::Sit) => parts.push("short idle time".to_string()),
+        None => {}
+    }
+    match (sleep.idle_interval_ms, sleep.active_interval_ms) {
+        (Some(idle), Some(active)) => parts.push(format!(
+            "polls every {} idle, {} active",
+            duration_ms(idle),
+            duration_ms(active)
+        )),
+        (Some(idle), None) => parts.push(format!("polls every {} idle", duration_ms(idle))),
+        _ => {}
+    }
+    if let Some(secs) = sleep.idle_mode_secs {
+        parts.push(format!(
+            "idle for {} at a time",
+            duration_ms(secs.saturating_mul(1000))
+        ));
+    }
+
+    parts.join(", ")
+}
+
+/// A span of milliseconds, in the largest unit that fits.
+fn duration_ms(ms: u32) -> String {
+    match ms {
+        0..1_000 => format!("{ms} ms"),
+        1_000..60_000 if ms.is_multiple_of(1_000) => format!("{} s", ms / 1_000),
+        1_000..60_000 => format!("{:.1} s", ms as f32 / 1_000.0),
+        60_000..3_600_000 => format!("{} min", ms / 60_000),
+        _ => format!("{} h", ms / 3_600_000),
     }
 }
 

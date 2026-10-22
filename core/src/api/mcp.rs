@@ -223,13 +223,21 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
         ),
         tool(
             "thread_mesh",
-            "The Thread mesh as our Thread devices see it: the Thread networks \
-             (our devices on each, their border routers), every node their \
-             neighbour and route tables show (ours by name, border routers by \
-             model, Matter nodes of other fabrics), the links between them with \
-             the link quality (0-3) and signal each way, each child's parent, how \
-             our routers reach the routers no link is known to (next hop, path \
-             cost), and the findings. Reads each Thread device in turn: takes a few seconds.",
+            "What the Thread mesh holds, as our Thread devices see it: for \
+             questions like how many sleepy devices there are, which nodes \
+             route, whose parent a device is. `counts` sums the nodes up by \
+             role. Each node has its role (leader, router, reed, end_device: \
+             listens all the time, sleepy_end_device: sleeps and polls its \
+             parent), `sleepy`, how it sleeps (`sleep`: ICD long or short idle \
+             time, its idle and active poll intervals) and its parent. \
+             `lan_nodes` are Matter nodes on Thread of other fabrics the LAN \
+             advertises, with how they sleep: where they sit is unknown, and \
+             some may also be among the nodes. Also the networks, the links \
+             (quality 0-3 and \
+             signal each way), the routes to routers with no known link, the \
+             border routers and the findings. Only nodes our Thread devices \
+             report or the LAN advertises are known; whether a sleepy device \
+             uses CSL is not. Reads each Thread device in turn: a few seconds.",
             json!({ "type": "object", "properties": {} }),
         ),
         tool(
@@ -239,7 +247,9 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
              on, a single border router, devices that keep changing parent or \
              losing the network, a Thread channel on top of busy Wi-Fi, default \
              credentials, no route from this machine to the Thread network. \
-             Same reading as thread_mesh, without the graph.",
+             With the networks and the nodes counted by role; for the nodes \
+             themselves (which are sleepy, whose parent is whose), use \
+             thread_mesh.",
             json!({ "type": "object", "properties": {} }),
         ),
         tool(
@@ -537,6 +547,7 @@ pub(crate) async fn tools_call<D: Dispatch>(
 fn findings_only(mesh: &api::ThreadMesh) -> Value {
     let mut value = json!({
         "networks": mesh.networks,
+        "counts": mesh.counts,
         "findings": mesh.findings,
         "unread": mesh.unread,
     });
@@ -888,6 +899,7 @@ fn labelled(response: &wire::Response) -> Value {
             };
             for (node, v) in mesh.nodes.iter().zip(entries(&mut value["mesh"], "nodes")) {
                 v["ext"] = json!(hex64(node.ext_address));
+                v["sleepy"] = json!(node.sleepy());
                 if let Some(parent) = node.parent {
                     v["parent_label"] = json!(label(parent));
                 }
@@ -905,6 +917,16 @@ fn labelled(response: &wire::Response) -> Value {
                 v["to_label"] = json!(label(route.to));
                 if let Some(via) = route.via {
                     v["via_label"] = json!(label(via));
+                }
+            }
+            for (node, v) in mesh
+                .lan_nodes
+                .iter()
+                .zip(entries(&mut value["mesh"], "lan_nodes"))
+            {
+                v["sleepy"] = json!(node.sleepy());
+                for (fabric, f) in node.fabrics.iter().zip(entries(v, "fabrics")) {
+                    f["fabric"] = json!(hex64(fabric.compressed_fabric_id));
                 }
             }
             for (net, v) in mesh

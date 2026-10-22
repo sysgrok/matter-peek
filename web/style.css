@@ -533,6 +533,7 @@ pre.log-text { max-height: 70vh; margin: 0; padding: .75rem 0; overflow: auto; b
 .thread-page { --mesh-router: #0d9488; }
 .thread-section { margin-bottom: 1.75rem; }
 .thread-section-title { display: flex; align-items: center; gap: .5rem; margin-bottom: .75rem; font-weight: 600; color: var(--bulma-text-strong); }
+.thread-section-note { margin: -.25rem 0 .6rem; font-size: .8rem; color: var(--bulma-text-weak); }
 .thread-error { display: flex; align-items: flex-start; gap: .55rem; margin-bottom: 1rem; padding: .7rem .85rem; border-radius: 10px; font-size: .9rem; background: hsla(var(--danger-hsl), .1); }
 .thread-error > svg { flex: none; margin-top: .1rem; color: var(--bulma-danger); }
 .finding { display: flex; align-items: flex-start; gap: .65rem; margin-bottom: .5rem; padding: .75rem .9rem; border: 1px solid transparent; border-radius: 12px; font-size: .92rem; color: var(--bulma-text-strong); }

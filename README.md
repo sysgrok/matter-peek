@@ -107,9 +107,13 @@ findings alone) and the MCP tools `thread_mesh` / `thread_findings` show the
 Thread mesh as our Thread devices see it, from Matter data only (no Thread
 credentials): each device's Thread Network Diagnostics (its neighbour and
 route tables), merged into one graph, labelled with the border routers' MeshCoP
-adverts (`_meshcop._udp`) and other fabrics' Matter nodes (`_matter._tcp`,
-whose host name on Thread is the extended address). The links show the link
-quality (0–3) and signal each way. The findings, in plain words: several
+adverts (`_meshcop._udp`). The nodes are counted by role, and the links show
+the link quality (0–3) and signal each way. How a node sleeps comes from its
+role, our devices' ICD Management cluster and the `_matter._tcp` adverts
+(`SII`/`SAI`/`ICD`); whether a sleepy node uses CSL is not visible. Other
+fabrics' Matter nodes whose address is in a border router's prefix are listed
+as seen on the LAN, with their fabrics and how they sleep: no table we read
+places them in the mesh. The findings, in plain words: several
 networks on the LAN, a split network, weak or one-way links, routers some of
 our devices depend on, a single border router, devices that keep changing
 their parent or losing the network, a Thread channel within a Wi-Fi channel
