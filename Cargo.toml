@@ -50,6 +50,12 @@ nix = { version = "0.30", features = ["net"] }
 #rs-matter = { path = "../rs-matter/rs-matter" }
 rs-matter = { git = "https://github.com/project-chip/rs-matter" }
 
-# A release `matter-peek` is a file to hand out: no symbols in it.
-[profile.release]
+# `--profile dist`: the executable to hand out, as small as it gets without
+# slowing the crypto down much (static x86_64: 16.7 MB as `release`, 10.9 MB;
+# `opt-level = "z"` would save 0.6 MB more).
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+opt-level = "s"
 strip = true

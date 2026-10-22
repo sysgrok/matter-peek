@@ -1,0 +1,9 @@
+# Static (musl) builds of `matter-peek`. ring's bit of C wants a C compiler for
+# the target: clang targets x86_64 musl as it is; a Raspberry Pi takes a cross
+# gcc (Debian/Ubuntu: gcc-aarch64-linux-gnu), which links it too.
+[env]
+CC_x86_64_unknown_linux_musl = "clang"
+CC_aarch64_unknown_linux_musl = "aarch64-linux-gnu-gcc"
+
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-gnu-gcc"

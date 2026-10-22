@@ -178,15 +178,18 @@ of it is private to `core`.
 - `build.rs` takes the web UI's files (`MATTER_PEEK_WEB_DIST`, else
   `../matter-peek-web/dist`) into the executable, each gzipped; they go out
   as they are, with `Content-Encoding: gzip` (unpacked only for a client that
-  takes no gzip). Without them, `/` says how to add them. A release build
-  should take `trunk build --release`'s: the web crate's release profile
-  builds for size and goes through `wasm-opt -Oz` (2.9 MB of wasm down to
-  1.3 MB, 0.5 MB gzipped).
+  takes no gzip). Without them, `/` says how to add them. An executable to
+  hand out should take `trunk build --release`'s: the web crate's release
+  profile builds for size and goes through `wasm-opt -Oz` (2.9 MB of wasm
+  down to 1.3 MB, 0.5 MB gzipped).
 - The web UI reaches the API on its own origin, at `/ws`; `trunk serve`
   passes that on to the server (`Trunk.toml`).
 - It links no C library but ring's bit of C (rustls, for the assistant's
   model over HTTPS, with its own root certificates), so it builds static
-  with musl.
+  with musl, for x86_64 and aarch64 (`.cargo/config.toml` names the C
+  compilers). The `dist` profile (LTO, one codegen unit, `opt-level = "s"`,
+  stripped) makes it about 11 MB instead of 17 MB; `"z"` would save 0.6 MB
+  more, at the crypto's expense (every CASE handshake).
 ### Devices and the fabric
 - One persistent controller fabric. Node IDs come from a persisted counter that
   every successful commissioning bumps; they are never reused.

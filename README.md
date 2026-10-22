@@ -38,25 +38,28 @@ controller in its own process. Only one process at a time can hold the store.
 
 ## One executable
 
-`matter-peek` is all of it: the server with the web UI (`matter-peek serve`),
+`matter-peek` is all of it: the server with its web UI (`matter-peek serve`),
 the command line, the MCP server and the terminal chat. Built with the web UI
 inside it, it is the only file to install:
 
 ```sh
-# The web UI, small (size-optimized, through wasm-opt), for it to take in
+# The web UI, small (built for size, through wasm-opt), for it to take in
 ( cd matter-peek-web && trunk build --release )
 
-# The executable, with the web UI (gzipped) inside
-cargo build --release -p matter-peek
+# The executable, with the web UI inside (each file gzipped)
+cargo build --profile dist -p matter-peek            # target/dist/matter-peek
 
 # Static (musl): no shared libraries at all. ring's bit of C wants a C
-# compiler for the target: clang on x86_64, a cross gcc for a Raspberry Pi
-CC_x86_64_unknown_linux_musl=clang \
-  cargo build --release --target x86_64-unknown-linux-musl -p matter-peek
-CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc \
-CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc \
-  cargo build --release --target aarch64-unknown-linux-musl -p matter-peek
+# compiler for the target (see .cargo/config.toml): clang for x86_64, the
+# aarch64 cross gcc (gcc-aarch64-linux-gnu) for a Raspberry Pi
+cargo build --profile dist --target x86_64-unknown-linux-musl -p matter-peek
+cargo build --profile dist --target aarch64-unknown-linux-musl -p matter-peek
 ```
+
+The `dist` profile is `release` with LTO, one codegen unit, `opt-level =
+"s"` and no symbols: a static x86_64 executable of about 11 MB, against 17 MB
+as `release`. `MATTER_PEEK_WEB_DIST` takes the web UI from elsewhere than
+`matter-peek-web/dist`.
 
 `cargo install --git https://github.com/sysgrok/matter-peek matter-peek` builds
 it too, without the web UI unless `MATTER_PEEK_WEB_DIST` points at a built
