@@ -22,9 +22,10 @@ a web UI, a command line, or an AI agent over MCP, all through one API.
 core/    matter-peek-core — the API (`MatterPeek`, its types, wire messages and
          MCP tools) and the controller behind it (wraps rs-matter); also the
          UniFFI bindings
-server/  matter-peek-server — the API over WebSocket/JSON, and its clients'
-         connection (binary: matter-peek-server)
-cli/     the command line, and the MCP server for AI agents (binary: matter-peek)
+server/  matter-peek-server — the API over WebSocket/JSON, its clients'
+         connection, and the web UI's assistant chats (binary: matter-peek-server)
+cli/     the command line, the MCP server for AI agents and the terminal chat
+         (binary: matter-peek)
 web/     matter-peek-web — Yew/Wasm web UI (WebSocket client; separate wasm crate)
 ```
 
@@ -39,8 +40,11 @@ hold the store.
 # An accessory to try it on (here, rs-matter's system_tests with a crash log)
 ( cd ../rs-matter && cargo run -p rs-matter-tests --bin system_tests -- --crash_log /tmp/crash.log )
 
-# The server (default ws://127.0.0.1:8087)
+# The server (default ws://127.0.0.1:8087); with a model, the web UI has an
+# assistant (see below)
 cargo run --bin matter-peek-server
+MATTER_PEEK_LLM_URL=http://localhost:11434/v1 MATTER_PEEK_LLM_MODEL=qwen3.5:9b \
+    cargo run --bin matter-peek-server
 
 # The web UI (needs `trunk` + the wasm32 target on nightly)
 ( cd web && trunk serve )   # then open the printed http://… URL
@@ -125,6 +129,17 @@ and syncs the device list before the first question.
 
 The loop is `core`'s `api::agent`, so the web UI and the mobile apps can have
 the same chat.
+
+### Assistant (an AI agent in the web UI)
+
+With `MATTER_PEEK_LLM_URL` and `MATTER_PEEK_LLM_MODEL` (and `MATTER_PEEK_LLM_KEY`
+if needed) set, `matter-peek-server` runs the same loop for the web UI's
+Assistant page. Its chats are kept as JSON files in the data directory's
+`chats/`, listed by their first question; a chat can be reopened, continued
+and deleted, and goes on while the page is closed. "Allow changes" offers the
+model the tools that change things; each tool not marked read-only shows an
+approval card first (Allow, Always allow for the chat, Deny). Each tool call
+opens onto its arguments and result, and the stop button ends the answer.
 
 ### Mobile bindings
 

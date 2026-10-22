@@ -11,6 +11,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::future::Future;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::mcp::{self, Caps, Dispatch};
@@ -41,20 +42,27 @@ error says), and what they can do about it.
 **bold** for the key facts, a table when you show several devices or values. \
 Name devices by their product name. Never paste raw JSON.";
 
+/// Why a question ended early.
+pub const STOPPED: &str = "stopped by the user";
+
+/// What a tool the user stopped the agent before gets for a result.
+const NOT_RUN: &str = "not run: the user stopped the assistant";
+
 /// What the agent asks a model that ended with an empty reply (some put their
 /// answer into their thinking).
 const ANSWER_NOW: &str = "Write your answer to me now, in Markdown, without calling more tools.";
 
 /// A tool call of the model: the tool, and its arguments as JSON text.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
 }
 
-/// A message of the conversation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A message of the conversation. A failed tool's result starts with `ERROR: `.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "role", content = "content", rename_all = "snake_case")]
 pub enum Message {
     System(String),
     User(String),
@@ -147,6 +155,12 @@ pub trait AgentListener {
 
     /// Whether to run `call`, a tool that may change something.
     fn approve(&self, call: &ToolCall) -> impl Future<Output = bool>;
+
+    /// Whether the user stopped the agent: it then ends the question before
+    /// its next step.
+    fn stopped(&self) -> bool {
+        false
+    }
 }
 
 /// A conversation of the user with a model that uses the tools.
@@ -202,6 +216,21 @@ impl<P: Provider, D: Dispatch> Agent<P, D> {
         &self.messages
     }
 
+    /// The conversation so far, without the system prompt: what to keep.
+    pub fn history(&self) -> &[Message] {
+        &self.messages[1..]
+    }
+
+    /// Go on with a conversation kept from [`Agent::history`].
+    pub fn restore(&mut self, history: Vec<Message>) {
+        self.reset();
+        self.messages.extend(
+            history
+                .into_iter()
+                .filter(|message| !matches!(message, Message::System(_))),
+        );
+    }
+
     /// Ask `question`, telling `listener` how the agent goes until the model
     /// answers.
     pub async fn ask<L: AgentListener>(
@@ -212,6 +241,10 @@ impl<P: Provider, D: Dispatch> Agent<P, D> {
         self.messages.push(Message::User(question.to_string()));
 
         for _ in 0..MAX_STEPS {
+            if listener.stopped() {
+                return Err(STOPPED.into());
+            }
+
             listener.on_model_call();
             let reply = self
                 .provider
@@ -240,7 +273,12 @@ impl<P: Provider, D: Dispatch> Agent<P, D> {
             }
 
             for call in reply.calls {
-                let result = self.run(&call, listener).await;
+                // Every call is answered, run or not, as the APIs require.
+                let result = if listener.stopped() {
+                    format!("ERROR: {NOT_RUN}")
+                } else {
+                    self.run(&call, listener).await
+                };
                 self.messages.push(Message::Tool {
                     call_id: call.id,
                     result,
@@ -254,6 +292,10 @@ impl<P: Provider, D: Dispatch> Agent<P, D> {
     /// After an empty reply, ask once more, without thinking, for the answer
     /// itself.
     async fn ask_for_answer<L: AgentListener>(&mut self, listener: &L) -> Result<(), String> {
+        if listener.stopped() {
+            return Err(STOPPED.into());
+        }
+
         // The empty reply goes; so does the request, once answered.
         self.messages.pop();
         self.messages.push(Message::User(ANSWER_NOW.to_string()));

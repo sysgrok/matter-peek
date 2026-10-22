@@ -2,7 +2,8 @@
 //!
 //! Each connection is a [`WireSession`]: its [`ClientMsg`] frames run as
 //! requests (concurrently, so a `Cancel` reaches a running `Commission`), and
-//! their responses and events go back as [`ServerMsg`] frames.
+//! their responses and events go back as [`ServerMsg`] frames. The chat
+//! requests go to the assistant's [`Chats`], which all connections share.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -16,8 +17,14 @@ use log::{debug, error, info, warn};
 use matter_peek_core::api::wire::{ClientMsg, ServerMsg, WireSession};
 use matter_peek_core::api::MatterPeek;
 
-/// Serve WebSocket connections on `addr` with `peek`, forever.
-pub(crate) async fn serve(addr: &str, peek: Arc<MatterPeek>) -> std::io::Result<()> {
+use crate::chat::Chats;
+
+/// Serve WebSocket connections on `addr` with `peek` and `chats`, forever.
+pub(crate) async fn serve(
+    addr: &str,
+    peek: Arc<MatterPeek>,
+    chats: Rc<Chats>,
+) -> std::io::Result<()> {
     let listener = async_net::TcpListener::bind(addr).await?;
     info!("server: listening on ws://{addr}");
 
@@ -26,15 +33,16 @@ pub(crate) async fn serve(addr: &str, peek: Arc<MatterPeek>) -> std::io::Result<
         debug!("server: connection from {peer}");
 
         let peek = peek.clone();
+        let chats = chats.clone();
         crate::spawn(async move {
-            if let Err(e) = handle_conn(stream, peek).await {
+            if let Err(e) = handle_conn(stream, peek, chats).await {
                 debug!("server: connection {peer} ended: {e}");
             }
         });
     }
 }
 
-async fn handle_conn<S>(stream: S, peek: Arc<MatterPeek>) -> Result<(), String>
+async fn handle_conn<S>(stream: S, peek: Arc<MatterPeek>, chats: Rc<Chats>) -> Result<(), String>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -44,7 +52,7 @@ where
     let (mut write, mut read) = ws.split();
 
     let (out, out_rx) = async_channel::unbounded::<ServerMsg>();
-    let session = Rc::new(WireSession::new(peek, out));
+    let session = Rc::new(WireSession::new(peek, out.clone()));
 
     let writer = async {
         while let Ok(msg) = out_rx.recv().await {
@@ -82,8 +90,14 @@ where
                 }
             };
 
-            let session = session.clone();
-            crate::spawn(async move { session.handle(msg).await });
+            if msg.request.is_chat() {
+                let chats = chats.clone();
+                let out = out.clone();
+                crate::spawn(async move { chats.handle(msg, out).await });
+            } else {
+                let session = session.clone();
+                crate::spawn(async move { session.handle(msg).await });
+            }
         }
     };
 

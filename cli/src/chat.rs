@@ -9,21 +9,19 @@ use core::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::io::{self, BufRead as _, IsTerminal as _, Write as _};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use termimad::MadSkin;
 
 use matter_peek_core::api::agent::openai::OpenAi;
-use matter_peek_core::api::agent::{Agent, AgentListener, Http, Provider, Think, ToolCall, Usage};
+use matter_peek_core::api::agent::{Agent, AgentListener, Provider, Think, ToolCall, Usage};
 use matter_peek_core::api::mcp::{Caps, Dispatch};
 use matter_peek_core::api::platform::data_dir;
+use matter_peek_server::llm::Ureq;
 
 use crate::mcp;
-
-/// How long a model may take to answer.
-const MODEL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The chat's history file, in the data directory.
 const HISTORY_FILE: &str = "chat-history";
@@ -203,63 +201,6 @@ async fn read_line() -> io::Result<Option<String>> {
         Ok((read > 0).then_some(line))
     })
     .await
-}
-
-/// The model's API over HTTP(S): blocking calls, on the thread pool.
-struct Ureq(ureq::Agent);
-
-impl Ureq {
-    fn new() -> Self {
-        let config = ureq::Agent::config_builder()
-            // The body of an error status says why.
-            .http_status_as_error(false)
-            .timeout_global(Some(MODEL_TIMEOUT))
-            .build();
-
-        Self(config.into())
-    }
-}
-
-impl Http for Ureq {
-    async fn post(
-        &self,
-        url: &str,
-        headers: &[(&str, &str)],
-        body: String,
-    ) -> Result<String, String> {
-        let agent = self.0.clone();
-        let url = url.to_string();
-        let headers: Vec<(String, String)> = headers
-            .iter()
-            .map(|(name, value)| (name.to_string(), value.to_string()))
-            .collect();
-
-        blocking::unblock(move || {
-            let mut request = agent.post(&url);
-            for (name, value) in &headers {
-                request = request.header(name, value);
-            }
-
-            let mut response = request
-                .send(body)
-                .map_err(|e| format!("cannot reach the model at {url}: {e}"))?;
-            let status = response.status();
-            let text = response
-                .body_mut()
-                .read_to_string()
-                .map_err(|e| format!("cannot read the model's answer: {e}"))?;
-
-            if status.is_success() {
-                Ok(text)
-            } else {
-                Err(format!(
-                    "the model's API answered {status}: {}",
-                    clip(&text, 300)
-                ))
-            }
-        })
-        .await
-    }
 }
 
 /// The chat in a terminal: tool calls as one line each, answers as rendered

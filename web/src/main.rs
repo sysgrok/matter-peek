@@ -14,10 +14,12 @@ use yew::prelude::*;
 
 use matter_peek_core::api::{self, display, wire};
 
+use assistant::{Assistant, AssistantMsg};
 use camera::Camera;
 use icons::{icon, Icon};
 use network::{Confirm, NetworkView};
 
+mod assistant;
 mod camera;
 mod commission;
 mod devices;
@@ -84,6 +86,7 @@ enum Loading {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Devices,
+    Assistant,
     Commission,
     Updates,
 }
@@ -115,10 +118,12 @@ enum Network {
 enum Ask {
     Decommission(u64),
     DeleteImage(String),
+    DeleteChat(String),
 }
 
 enum Msg {
     SelectTab(Tab),
+    Assistant(AssistantMsg),
     /// Open or close the navigation drawer (on phones).
     ToggleDrawer,
     Ask(Ask),
@@ -335,6 +340,12 @@ struct App {
     logs: Option<LogsView>,
     /// The network popup, when open.
     network_view: Option<NetworkView>,
+    /// The Assistant page.
+    assistant: Assistant,
+    /// Its conversation, which scrolls.
+    chat_scroll: NodeRef,
+    /// Scroll the conversation to its end once shown.
+    scroll_chat: bool,
     error: Option<String>,
 }
 
@@ -399,6 +410,9 @@ impl Component for App {
             ota_status: HashMap::new(),
             logs: None,
             network_view: None,
+            assistant: Assistant::default(),
+            chat_scroll: NodeRef::default(),
+            scroll_chat: false,
             error: None,
         }
     }
@@ -408,6 +422,10 @@ impl Component for App {
             Msg::SelectTab(tab) => {
                 self.tab = tab;
                 self.drawer_open = false;
+                if tab == Tab::Assistant {
+                    ctx.link().send_message(Msg::Assistant(AssistantMsg::Load));
+                    self.scroll_chat = true;
+                }
                 // Lazily refresh the device list the first time the user opens
                 // the Devices tab with an empty list.
                 if tab == Tab::Devices && self.stored.is_empty() && !self.busy_stored {
@@ -422,6 +440,7 @@ impl Component for App {
                 }
                 true
             }
+            Msg::Assistant(msg) => self.update_assistant(ctx, msg),
             Msg::ToggleDrawer => {
                 self.drawer_open = !self.drawer_open;
                 true
@@ -436,6 +455,20 @@ impl Component for App {
                         ctx.link().send_message(Msg::Decommission(node_id))
                     }
                     Some(Ask::DeleteImage(name)) => ctx.link().send_message(Msg::OtaDelete(name)),
+                    Some(Ask::DeleteChat(chat_id)) => {
+                        if self
+                            .assistant
+                            .chat
+                            .as_ref()
+                            .is_some_and(|chat| chat.id == chat_id)
+                        {
+                            self.assistant.chat = None;
+                        }
+                        send_chat_request(
+                            ctx.link().clone(),
+                            wire::Request::ChatDelete { chat_id },
+                        );
+                    }
                     None => {}
                 }
                 true
@@ -1089,6 +1122,8 @@ impl Component for App {
                     }
                     // Uploads run on their own connection (`send_ota_upload`).
                     wire::Response::OtaUploadStarted { .. } => {}
+                    // The Assistant page's requests answer to it.
+                    wire::Response::Chats { .. } | wire::Response::Chat { .. } => {}
                     wire::Response::Cancelled { decommissioned } => {
                         self.notice = Some(if decommissioned {
                             "Commission cancelled — the device had been added to our fabric and was cleaned up (decommissioned).".into()
@@ -1177,7 +1212,11 @@ impl Component for App {
         html! {
             <>
                 { self.view_app_bar(link) }
-                <main class={classes!("page", (self.tab != Tab::Devices).then_some("is-narrow"))}>
+                <main class={classes!("page", match self.tab {
+                    Tab::Devices => None,
+                    Tab::Assistant => Some("is-chat"),
+                    Tab::Commission | Tab::Updates => Some("is-narrow"),
+                })}>
                     if let Some(notice) = &self.notice {
                         { ui::notification(Icon::Info, classes!("is-warning", "is-light"), html! { notice.clone() },
                             link.callback(|_| Msg::DismissNotice)) }
@@ -1189,6 +1228,7 @@ impl Component for App {
                     {
                         match self.tab {
                             Tab::Devices => self.view_devices_tab(link),
+                            Tab::Assistant => self.view_assistant_tab(link),
                             Tab::Commission => self.view_commission_tab(link),
                             Tab::Updates => self.view_updates_tab(link),
                         }
@@ -1208,6 +1248,12 @@ impl Component for App {
         // The app opens on the Devices tab; load it as if the user picked it.
         if first_render {
             ctx.link().send_message(Msg::SelectTab(Tab::Devices));
+        }
+
+        if std::mem::take(&mut self.scroll_chat) {
+            if let Some(scroll) = self.chat_scroll.cast::<web_sys::Element>() {
+                scroll.set_scroll_top(scroll.scroll_height());
+            }
         }
     }
 }
@@ -1314,7 +1360,7 @@ impl App {
                             wire::Event::OtaProgress { node_id, progress } => {
                                 link.send_message(Msg::OtaProgress(node_id, progress))
                             }
-                            wire::Event::Step { .. } => {}
+                            wire::Event::Step { .. } | wire::Event::Chat { .. } => {}
                         },
                         // A Subscribe refused (its req_id is its device).
                         wire::ServerMsg::Response {
@@ -1489,6 +1535,7 @@ impl App {
                 Icon::Devices,
                 Some(self.stored.len()),
             ),
+            (Tab::Assistant, "Assistant", Icon::Sparkles, None),
             (Tab::Commission, "Commission", Icon::Commission, None),
             (
                 Tab::Updates,
@@ -1592,6 +1639,11 @@ impl App {
                     "Decommission",
                 )
             }
+            Ask::DeleteChat(_) => (
+                "Delete this chat?".to_string(),
+                "Its conversation is gone for good.".to_string(),
+                "Delete",
+            ),
             Ask::DeleteImage(name) => (
                 format!("Delete {name}?"),
                 "Devices can no longer update to this image.".to_string(),
@@ -1638,11 +1690,32 @@ fn log_intent_file(intent: api::LogIntent) -> &'static str {
 /// Open a WS, send the request, and pump server frames back as component
 /// messages (step events, then the final response) until it completes.
 fn send_request(link: html::Scope<App>, request: wire::Request) {
+    request_loop(link, request, Msg::Done, Msg::Error);
+}
+
+/// Send a request of the Assistant page: its answer goes to the page.
+fn send_chat_request(link: html::Scope<App>, request: wire::Request) {
+    request_loop(
+        link,
+        request,
+        |response| Msg::Assistant(AssistantMsg::Response(response)),
+        |e| Msg::Assistant(AssistantMsg::Failed(e)),
+    );
+}
+
+/// Open a WS, send `request`, and pump the server's frames back as messages:
+/// the events, then the response as `done`, or `failed` on the way.
+fn request_loop(
+    link: html::Scope<App>,
+    request: wire::Request,
+    done: fn(wire::Response) -> Msg,
+    failed: fn(String) -> Msg,
+) {
     spawn_local(async move {
         let ws = match WebSocket::open(WS_URL) {
             Ok(ws) => ws,
             Err(e) => {
-                link.send_message(Msg::Error(format!("connect failed: {e}")));
+                link.send_message(failed(format!("connect failed: {e}")));
                 return;
             }
         };
@@ -1652,7 +1725,7 @@ fn send_request(link: html::Scope<App>, request: wire::Request) {
         let client_msg = wire::ClientMsg { req_id, request };
         let json = serde_json::to_string(&client_msg).unwrap();
         if let Err(e) = write.send(Message::Text(json)).await {
-            link.send_message(Msg::Error(format!("send failed: {e}")));
+            link.send_message(failed(format!("send failed: {e}")));
             return;
         }
 
@@ -1666,14 +1739,14 @@ fn send_request(link: html::Scope<App>, request: wire::Request) {
                 Ok(Message::Text(t)) => t,
                 Ok(Message::Bytes(_)) => continue,
                 Err(e) => {
-                    link.send_message(Msg::Error(format!("ws error: {e}")));
+                    link.send_message(failed(format!("ws error: {e}")));
                     return;
                 }
             };
             let server_msg: wire::ServerMsg = match serde_json::from_str(&text) {
                 Ok(m) => m,
                 Err(e) => {
-                    link.send_message(Msg::Error(format!("bad server msg: {e}")));
+                    link.send_message(failed(format!("bad server msg: {e}")));
                     return;
                 }
             };
@@ -1687,9 +1760,12 @@ fn send_request(link: html::Scope<App>, request: wire::Request) {
                     wire::Event::HealthReport { .. }
                     | wire::Event::SubscriptionState { .. }
                     | wire::Event::OtaProgress { .. } => {}
+                    wire::Event::Chat { chat_id, update } => {
+                        link.send_message(Msg::Assistant(AssistantMsg::Update(chat_id, update)));
+                    }
                 },
                 wire::ServerMsg::Response { response, .. } => {
-                    link.send_message(Msg::Done(response));
+                    link.send_message(done(response));
                     return;
                 }
             }

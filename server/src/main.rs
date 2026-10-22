@@ -4,6 +4,10 @@
 //! ```text
 //! matter-peek-server [BIND_ADDR]   # default 127.0.0.1:8087
 //! ```
+//!
+//! The assistant's model: `MATTER_PEEK_LLM_URL` (an OpenAI-compatible API,
+//! e.g. `http://localhost:11434/v1`), `MATTER_PEEK_LLM_MODEL`, and
+//! `MATTER_PEEK_LLM_KEY` if the API needs a key.
 
 use std::process::ExitCode;
 
@@ -19,7 +23,9 @@ fn main() -> ExitCode {
         .unwrap_or_else(|| DEFAULT_ADDR.into());
     info!("matter-peek-server: starting on {addr}");
 
-    match matter_peek_server::run(&addr) {
+    let llm = matter_peek_server::llm::LlmConfig::from_env();
+
+    match matter_peek_server::run(&addr, llm) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             error!("matter-peek-server: {e}");

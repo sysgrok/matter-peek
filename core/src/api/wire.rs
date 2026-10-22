@@ -4,8 +4,10 @@
 //! The client sends [`ClientMsg`]s, each a [`Request`] tagged with a `req_id`;
 //! the server answers each with one [`ServerMsg::Response`] carrying the same
 //! `req_id`, and sends [`ServerMsg::Event`]s in between: a commission's steps,
-//! the reports of the connection's subscriptions, OTA progress.
-//! [`WireSession`] runs them against a [`MatterPeek`](super::MatterPeek).
+//! the reports of the connection's subscriptions, OTA progress, what the
+//! assistant does. [`WireSession`] runs them against a
+//! [`MatterPeek`](super::MatterPeek); `matter-peek-server` also runs the
+//! assistant's chats (the `Chat…` requests).
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -13,6 +15,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+use super::agent::{Message, ToolCall};
 use super::types::*;
 
 #[cfg(feature = "controller")]
@@ -41,7 +44,8 @@ pub enum ServerMsg {
     Event { event: Event },
 }
 
-/// A request; each mirrors a [`MatterPeek`](super::MatterPeek) method.
+/// A request; each mirrors a [`MatterPeek`](super::MatterPeek) method, but the
+/// `Chat…` ones: the server's assistant (see [`super::agent`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
@@ -118,6 +122,46 @@ pub enum Request {
     /// See `MatterPeek::ota_update`. Answered with [`Response::Ok`] once
     /// announced; progress follows on this connection as [`Event::OtaProgress`].
     OtaUpdate { node_id: u64, name: String },
+    /// The assistant's chats, the latest first. Answered with
+    /// [`Response::Chats`].
+    ChatList,
+    /// A chat. Answered with [`Response::Chat`].
+    ChatOpen { chat_id: String },
+    /// Ask the assistant `text`, in chat `chat_id` or in a new one; with
+    /// `allow_changes`, it is also offered the tools that change things. What
+    /// it does arrives as [`Event::Chat`]s; the answer is [`Response::Chat`].
+    ChatAsk {
+        chat_id: Option<String>,
+        text: String,
+        allow_changes: bool,
+    },
+    /// Answer the assistant's request to run a tool ([`ChatEvent::Approve`]).
+    /// Answered with [`Response::Ok`].
+    ChatApprove {
+        chat_id: String,
+        call_id: String,
+        answer: Approval,
+    },
+    /// Stop the assistant in chat `chat_id` before its next step. Answered
+    /// with [`Response::Ok`].
+    ChatStop { chat_id: String },
+    /// Delete chat `chat_id`. Answered with [`Response::Chats`].
+    ChatDelete { chat_id: String },
+}
+
+impl Request {
+    /// Whether it is about the assistant's chats, which the server runs.
+    pub fn is_chat(&self) -> bool {
+        matches!(
+            self,
+            Self::ChatList
+                | Self::ChatOpen { .. }
+                | Self::ChatAsk { .. }
+                | Self::ChatApprove { .. }
+                | Self::ChatStop { .. }
+                | Self::ChatDelete { .. }
+        )
+    }
 }
 
 /// A reply to a [`Request`].
@@ -169,6 +213,15 @@ pub enum Response {
     OtaUploadStarted {
         upload_id: u32,
     },
+    /// The assistant's chats; without a model (`None`), there is no
+    /// assistant.
+    Chats {
+        model: Option<String>,
+        chats: Vec<ChatSummary>,
+    },
+    Chat {
+        chat: Box<ChatView>,
+    },
     Error {
         message: String,
     },
@@ -197,4 +250,63 @@ pub enum Event {
     },
     /// How an update started on this connection goes.
     OtaProgress { node_id: u64, progress: OtaProgress },
+    /// What the assistant does in chat `chat_id`, asked on this connection.
+    Chat { chat_id: String, update: ChatEvent },
+}
+
+/// A chat with the assistant, as listed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatSummary {
+    pub id: String,
+    pub title: String,
+    /// When it last changed, in seconds since the Unix epoch.
+    pub updated: u64,
+}
+
+/// A chat with the assistant, as shown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatView {
+    pub id: String,
+    pub title: String,
+    pub updated: u64,
+    /// Whether the assistant is offered the tools that change things.
+    pub allow_changes: bool,
+    /// Whether the assistant is at work on a question.
+    pub running: bool,
+    /// The conversation, without the system prompt.
+    pub messages: Vec<Message>,
+    /// The tool the assistant asks to run, awaiting [`Request::ChatApprove`].
+    pub pending: Option<ToolCall>,
+}
+
+/// What the assistant does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatEvent {
+    /// The model is asked.
+    Thinking,
+    /// The model's text, Markdown.
+    Text { text: String },
+    /// A tool is to run (or be asked for).
+    ToolCall { call: ToolCall },
+    /// A tool ran: its result (the error, if it failed).
+    ToolResult {
+        call_id: String,
+        result: String,
+        is_error: bool,
+    },
+    /// The assistant asks to run `call`; answer with [`Request::ChatApprove`].
+    Approve { call: ToolCall },
+    /// The question ended without an answer (or was stopped).
+    Error { message: String },
+}
+
+/// The answer to [`ChatEvent::Approve`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Approval {
+    Yes,
+    No,
+    /// Yes, and to this tool for the rest of the chat.
+    Always,
 }

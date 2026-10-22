@@ -37,3 +37,4 @@ gloo-file = { version = "0.3", features = ["futures"] }
 base64 = "0.22"
 # Manual pairing code check digit (as rs-matter does).
 verhoeff = { version = "1", default-features = false }
+pulldown-cmark = { version = "0.13.5", default-features = false, features = ["html"] }

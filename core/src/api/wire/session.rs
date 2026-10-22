@@ -55,6 +55,12 @@ impl WireSession {
             .await;
     }
 
+    /// Run `request`, and answer, without its `req_id`: for a caller in this
+    /// process, such as an agent's tools. Its events still go out.
+    pub async fn answer(&self, request: Request) -> Response {
+        self.run(0, request).await
+    }
+
     async fn run(&self, req_id: ReqId, request: Request) -> Response {
         let peek = &self.peek;
         let out = &self.out;
@@ -170,6 +176,14 @@ impl WireSession {
                     .await
                     .map(|()| Response::Ok)
             }
+            Request::ChatList
+            | Request::ChatOpen { .. }
+            | Request::ChatAsk { .. }
+            | Request::ChatApprove { .. }
+            | Request::ChatStop { .. }
+            | Request::ChatDelete { .. } => Err(PeekError::failed(
+                "the assistant runs in matter-peek-server, not in this process",
+            )),
         };
 
         response.unwrap_or_else(|e| match e {

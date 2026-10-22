@@ -1914,7 +1914,6 @@ dependencies = [
  "rustyline",
  "serde_json",
  "termimad",
- "ureq",
 ]
 
 [[package]]
@@ -1946,14 +1945,18 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "async-executor",
+ "async-io",
  "async-net",
  "async-tungstenite",
+ "blocking",
  "env_logger",
  "futures-lite",
  "futures-util",
  "log",
  "matter-peek-core",
+ "serde",
  "serde_json",
+ "ureq",
 ]
 
 [[package]]

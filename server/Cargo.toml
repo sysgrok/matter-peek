@@ -22,3 +22,9 @@ futures-lite = { workspace = true }
 futures-util = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+# The assistant: the model's API over HTTP(S) (blocking calls, on the thread
+# pool), its chats kept as JSON, and the wait for an approval.
+ureq = "3.5"
+blocking = "1"
+serde = { workspace = true, features = ["derive", "std"] }
+async-io = { workspace = true }

@@ -59,6 +59,9 @@ pub enum Icon {
     UpdateArrow,
     ChevronRight,
     Camera,
+    Sparkles,
+    Stop,
+    ArrowLeft,
 }
 
 pub fn icon(glyph: Icon, size: u32) -> Html {
@@ -323,6 +326,16 @@ pub fn icon(glyph: Icon, size: u32) -> Html {
                 <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
             </>
         },
+        Icon::Sparkles => html! {
+            <>
+                <path d="M9.94 15.5A2 2 0 0 0 8.5 14.06l-6.13-1.58a.5.5 0 0 1 0-.96L8.5 9.94A2 2 0 0 0 9.94 8.5l1.58-6.13a.5.5 0 0 1 .96 0L14.06 8.5A2 2 0 0 0 15.5 9.94l6.13 1.58a.5.5 0 0 1 0 .96L15.5 14.06a2 2 0 0 0-1.44 1.44l-1.58 6.13a.5.5 0 0 1-.96 0z" />
+                <path d="M20 3v4M22 5h-4M4 17v2M5 18H3" />
+            </>
+        },
+        Icon::Stop => {
+            html! { <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" /> }
+        }
+        Icon::ArrowLeft => html! { <path d="M19 12H5M12 19l-7-7 7-7" /> },
         Icon::Camera => html! {
             <>
                 <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z" />

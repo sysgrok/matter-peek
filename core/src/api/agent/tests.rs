@@ -61,6 +61,9 @@ struct User {
     approves: bool,
     seen: RefCell<Vec<String>>,
     asked: Cell<usize>,
+    /// Stop the agent at the first tool result.
+    stops: bool,
+    stopped: Cell<bool>,
 }
 
 impl User {
@@ -69,6 +72,8 @@ impl User {
             approves,
             seen: RefCell::new(Vec::new()),
             asked: Cell::new(0),
+            stops: false,
+            stopped: Cell::new(false),
         }
     }
 
@@ -91,6 +96,13 @@ impl AgentListener for User {
         self.seen
             .borrow_mut()
             .push(format!("result: {} {outcome}", call.name));
+        if self.stops {
+            self.stopped.set(true);
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.stopped.get()
     }
 
     async fn approve(&self, _call: &ToolCall) -> bool {
@@ -287,4 +299,81 @@ fn long_results_are_cut_at_a_character() {
 
     assert_eq!(clip(&text, 5), "éé");
     assert_eq!(clip(&text, 100), text);
+}
+
+#[test]
+fn a_stop_ends_the_question_with_every_call_answered() {
+    let script = Script::new(vec![
+        calls(&[
+            ("peek_device", r#"{"node_id":1}"#),
+            ("read_network", r#"{"node_id":1}"#),
+        ]),
+        text("Never asked."),
+    ]);
+    let controller = Controller::default();
+    let mut user = User::new(true);
+    user.stops = true;
+    let mut agent = Agent::new(&script, &controller, READ_ONLY, Think::Default);
+
+    assert_eq!(block_on(agent.ask("Look", &user)), Err(STOPPED.into()));
+
+    assert_eq!(controller.requests.borrow().len(), 1);
+    assert_eq!(script.asked.borrow().len(), 1);
+    let Some(Message::Tool { call_id, result }) = agent.messages().last() else {
+        panic!("the second call is not answered");
+    };
+    assert_eq!(call_id, "c1");
+    assert!(result.contains(NOT_RUN), "{result}");
+}
+
+#[test]
+fn a_kept_conversation_goes_on() {
+    let script = Script::new(vec![text("Still here.")]);
+    let controller = Controller::default();
+    let user = User::new(true);
+    let mut agent = Agent::new(&script, &controller, READ_ONLY, Think::Default);
+
+    agent.restore(vec![
+        Message::System("an old prompt".into()),
+        Message::User("Hi".into()),
+        Message::Assistant {
+            text: "Hello.".into(),
+            calls: Vec::new(),
+        },
+    ]);
+    assert!(
+        matches!(&agent.messages()[0], Message::System(prompt) if prompt.starts_with(SYSTEM_PROMPT))
+    );
+    assert_eq!(agent.history().len(), 2);
+
+    block_on(agent.ask("And now?", &user)).unwrap();
+    assert_eq!(agent.history().len(), 4);
+    // The model got the whole conversation.
+    assert_eq!(script.asked.borrow()[0].0, 4);
+}
+
+#[test]
+fn messages_kept_as_json() {
+    let messages = vec![
+        Message::User("Hi".into()),
+        Message::Assistant {
+            text: String::new(),
+            calls: vec![ToolCall {
+                id: "c0".into(),
+                name: "list_devices".into(),
+                arguments: "{}".into(),
+            }],
+        },
+    ];
+
+    let json = serde_json::to_value(&messages).unwrap();
+    assert_eq!(
+        json[0],
+        serde_json::json!({ "role": "user", "content": "Hi" })
+    );
+    assert_eq!(json[1]["role"], "assistant");
+    assert_eq!(json[1]["content"]["calls"][0]["name"], "list_devices");
+
+    let back: Vec<Message> = serde_json::from_value(json).unwrap();
+    assert_eq!(back, messages);
 }

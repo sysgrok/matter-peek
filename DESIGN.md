@@ -105,7 +105,12 @@ The same methods serve every binding:
   MCP tools in process. A tool not annotated read-only runs only once the
   user approves it (`AgentListener::approve`); a model that ends with an empty
   reply is asked once more for its answer. `matter-peek chat` is the terminal
-  shell.
+  shell; `matter-peek-server` runs it for the web UI. The wire's `Chat*`
+  requests list, open, ask, approve, stop and delete the server's chats, kept
+  as JSON in the data directory, with what the model does as `Event::Chat`.
+  A chat outlives the page that asks: another page sees it at work, and its
+  approvals wait for up to 10 minutes. `WireSession` answers them with an
+  error: the chats live in the server, not in a session.
 
 How values are shown to people is shared too (`api::display`, also exported over
 UniFFI): IDs as `0x` + uppercase hex, vendors and products by name with the ID
@@ -150,6 +155,7 @@ of it is private to `core`.
 | CLI | `matter-peek` | `--server <url>`, or a `WireSession` in process |
 | MCP server | `matter-peek mcp` | as the CLI (read-only unless `--allow-mutate`) |
 | Chat (AI agent) | `matter-peek chat` | as the CLI; the model over an OpenAI-compatible API |
+| Assistant (web UI) | `matter-peek-server` | the server runs the chats; the model as above, set by `MATTER_PEEK_LLM_*` |
 | Mobile apps | — | UniFFI, in process |
 
 
@@ -316,8 +322,9 @@ through the platform's own commissioner (Google Play services, Apple) rather
 than over BLE, with the chat of `api::agent` built in.
 
 **AI agent**: the chat (`api::agent`, `matter-peek chat`) works with any
-OpenAI-compatible API; next are the Anthropic API, the GitHub Copilot SDK (a
-Copilot subscription, on the desktop), and the chat in the web UI. Users of
+OpenAI-compatible API, in the terminal and in the web UI; next are the
+Anthropic API and the GitHub Copilot SDK (a Copilot subscription, on the
+desktop). Users of
 Claude or ChatGPT apps get the tools through a remote MCP connector: a relay
 to a controller that is always on.
 
