@@ -106,6 +106,8 @@ pub enum Request {
     Cancel,
     /// See `MatterPeek::ota_images`. Answered with [`Response::OtaImages`].
     OtaImages,
+    /// See `MatterPeek::ota_updates`. Answered with [`Response::OtaUpdates`].
+    OtaUpdates,
     /// Start uploading an OTA image file of `size` bytes, in chunks on this
     /// connection (see `MatterPeek::ota_upload`). Answered with
     /// [`Response::OtaUploadStarted`].
@@ -233,6 +235,9 @@ pub enum Response {
     },
     OtaImages {
         images: Vec<OtaImageInfo>,
+    },
+    OtaUpdates {
+        updates: Vec<OtaUpdateInfo>,
     },
     OtaUploadStarted {
         upload_id: u32,

@@ -151,6 +151,10 @@ impl WireSession {
                 Ok(Response::Ok)
             }
             Request::OtaImages => peek.ota_images().await.map(images),
+            Request::OtaUpdates => peek
+                .ota_updates()
+                .await
+                .map(|updates| Response::OtaUpdates { updates }),
             Request::OtaUploadBegin { size } => peek.ota_upload(size).await.map(|upload| {
                 let upload_id = upload.id();
                 self.uploads.borrow_mut().insert(upload_id, upload);

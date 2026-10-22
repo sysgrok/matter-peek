@@ -100,6 +100,8 @@ const CAMERA_FRAME_MS: u32 = 500;
 const SUB_WS_RETRY_MS: u32 = 2_000;
 /// How long to wait before subscribing again to a device the server refused.
 const SUBSCRIBE_RETRY_MS: u32 = 5_000;
+/// How often the running OTA updates are read again, while there are any.
+const OTA_UPDATES_POLL_MS: u32 = 5_000;
 
 /// How long a commission may run before the UI auto-cancels it.
 const COMMISSION_TIMEOUT_SECS: u32 = 90;
@@ -254,6 +256,8 @@ enum Msg {
     OtaUpdate(u64),
     /// How a device's (node_id) update goes.
     OtaProgress(u64, api::OtaProgress),
+    /// The OTA updates the devices asked for; `None` if they could not be read.
+    OtaUpdates(Option<wire::Response>),
     Step(StepLine),
     Done(wire::Response),
     Error(String),
@@ -317,6 +321,10 @@ struct App {
     uploading: Option<u8>,
     /// The last progress of each device's update (node_id → progress).
     ota_progress: HashMap<u64, api::OtaProgress>,
+    /// The download time left of each device's update, as last estimated.
+    ota_remaining: HashMap<u64, u64>,
+    /// Whether the running OTA updates are being read.
+    ota_polling: bool,
     /// Live health subscriptions, keyed by device `node_id`. Multiple devices can
     /// be watched at once, each with its own running panel. An entry exists for as
     /// long as the device is being watched (removed on stop).
@@ -410,6 +418,8 @@ impl Component for App {
             editing_tags: None,
             uploading: None,
             ota_progress: HashMap::new(),
+            ota_remaining: HashMap::new(),
+            ota_polling: false,
             subs: HashMap::new(),
             sub_ws: None,
             sub_ws_gen: 0,
@@ -452,9 +462,13 @@ impl Component for App {
                     self.set_status(None);
                     send_request(ctx.link().clone(), wire::Request::ListDevices);
                 }
-                // Devices offer updates to the images.
+                // Devices offer updates to the images, and show those running.
                 if matches!(tab, Tab::Devices | Tab::Updates) {
                     send_request(ctx.link().clone(), wire::Request::OtaImages);
+                    if !self.ota_polling {
+                        self.ota_polling = true;
+                        read_ota_updates(ctx.link().clone(), 0);
+                    }
                 }
                 true
             }
@@ -565,6 +579,39 @@ impl Component for App {
                 self.ota_status
                     .insert(node_id, ota_progress_text(&progress));
                 self.ota_progress.insert(node_id, progress);
+                true
+            }
+            Msg::OtaUpdates(resp) => {
+                self.ota_polling = false;
+                let Some(wire::Response::OtaUpdates { updates }) = resp else {
+                    return false;
+                };
+
+                // The running ones, and those this page shows already.
+                for update in &updates {
+                    let node_id = update.node_id;
+                    if !update.in_progress() && !self.ota_progress.contains_key(&node_id) {
+                        continue;
+                    }
+                    if self
+                        .ota_progress
+                        .get(&node_id)
+                        .is_none_or(|shown| ota_stage(&update.progress) >= ota_stage(shown))
+                    {
+                        self.ota_status
+                            .insert(node_id, ota_progress_text(&update.progress));
+                        self.ota_progress.insert(node_id, update.progress.clone());
+                    }
+                    match update.remaining_secs() {
+                        Some(secs) => self.ota_remaining.insert(node_id, secs),
+                        None => self.ota_remaining.remove(&node_id),
+                    };
+                }
+
+                if updates.iter().any(api::OtaUpdateInfo::in_progress) {
+                    self.ota_polling = true;
+                    read_ota_updates(ctx.link().clone(), OTA_UPDATES_POLL_MS);
+                }
                 true
             }
             Msg::PeerAddr(v) => {
@@ -1146,8 +1193,10 @@ impl Component for App {
                         self.uploading = None;
                         self.ota_images = images;
                     }
-                    // Uploads run on their own connection (`send_ota_upload`).
-                    wire::Response::OtaUploadStarted { .. } => {}
+                    // Uploads run on their own connection (`send_ota_upload`), as
+                    // the reads of the running updates (`read_ota_updates`).
+                    wire::Response::OtaUploadStarted { .. } | wire::Response::OtaUpdates { .. } => {
+                    }
                     // The Assistant page's requests answer to it.
                     // The Assistant page's own.
                     wire::Response::Chats { .. }
@@ -2052,9 +2101,39 @@ fn ota_progress_text(progress: &api::OtaProgress) -> String {
             "The device asked, but the image is not an update for it".into()
         }
         api::OtaProgress::Downloading { percent } => format!("Downloading: {percent}%"),
-        api::OtaProgress::Applying { version } => format!("Applying version {version}…"),
-        api::OtaProgress::Applied { version } => format!("Updated: runs version {version}"),
+        api::OtaProgress::Applying { version } => {
+            format!("Applying version {}…", display::hex_u32(*version))
+        }
+        api::OtaProgress::Applied { version } => {
+            format!("Updated: runs version {}", display::hex_u32(*version))
+        }
     }
+}
+
+/// How far an update got, to keep a newer progress than a read shows.
+fn ota_stage(progress: &api::OtaProgress) -> u16 {
+    match progress {
+        api::OtaProgress::Offered { .. } => 0,
+        api::OtaProgress::Downloading { percent } => 1 + *percent as u16,
+        api::OtaProgress::Applying { .. } => 200,
+        api::OtaProgress::Applied { .. } | api::OtaProgress::NotOffered => 300,
+    }
+}
+
+/// Read the OTA updates the devices asked for, after `delay_ms`, on a
+/// connection of its own.
+fn read_ota_updates(link: html::Scope<App>, delay_ms: u32) {
+    spawn_local(async move {
+        if delay_ms > 0 {
+            gloo_timers::future::TimeoutFuture::new(delay_ms).await;
+        }
+        request_loop(
+            link,
+            wire::Request::OtaUpdates,
+            |resp| Msg::OtaUpdates(Some(resp)),
+            |_| Msg::OtaUpdates(None),
+        );
+    });
 }
 
 /// Fire-and-forget a `Cancel` on its own short-lived WS connection. The running

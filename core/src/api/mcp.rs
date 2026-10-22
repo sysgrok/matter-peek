@@ -56,7 +56,7 @@ const MUTATING_TOOLS: &[&str] = &[
 /// What an agent should know about the tools, for its instructions.
 pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-only tools \
      (discover, list_devices, peek_device, read_network, retrieve_logs, identify, \
-     read_qr_image, ota_images) are always available. The tools that change devices \
+     read_qr_image, ota_images, ota_updates) are always available. The tools that change devices \
      or the stored state (commission, decommission, remember, set_tags, \
      sync, ota_upload, ota_delete, ota_update, add_network, remove_network, \
      connect_network, reorder_network) are available only if the \
@@ -302,6 +302,17 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
             "ota_images",
             "List the stored OTA images (name, vendor/product id, software \
              version) that devices can be updated to.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "ota_updates",
+            "List the OTA updates devices asked us for in the last hour, the \
+             latest per device: the image offered, the stage (offered, \
+             downloading with its percent and bytes, applying, applied, or not \
+             offered), how long it has run, how long since its last progress, \
+             and the time left estimated from the pace so far. A download with \
+             no progress for minutes has likely stalled. An update started with \
+             ota_update shows once the device asks for it.",
             json!({ "type": "object", "properties": {} }),
         ),
     ];
@@ -635,6 +646,7 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
             force: args.get("force").and_then(Value::as_bool).unwrap_or(false),
         },
         "ota_images" => wire::Request::OtaImages,
+        "ota_updates" => wire::Request::OtaUpdates,
         "ota_delete" => wire::Request::OtaDelete {
             name: arg_str(args, "name")?,
         },
@@ -871,10 +883,25 @@ fn labelled(response: &wire::Response) -> Value {
                 v["product"] = json!(display::product_label(d.vendor_id, d.product_id, None));
             }
         }
+        wire::Response::OtaUpdates { updates } => {
+            for (u, v) in updates.iter().zip(entries(&mut value, "updates")) {
+                v["node"] = json!(display::hex_u64(u.node_id));
+                v["in_progress"] = json!(u.in_progress());
+                v["elapsed"] = json!(display::duration(u.elapsed_secs));
+                v["since_last_progress"] = json!(display::duration(u.idle_secs));
+                if let Some(secs) = u.remaining_secs() {
+                    v["remaining_estimate"] = json!(display::duration(secs));
+                }
+            }
+        }
         wire::Response::OtaImages { images } => {
             for (i, v) in images.iter().zip(entries(&mut value, "images")) {
                 v["vendor"] = json!(display::vendor_label(i.vendor_id, None));
                 v["product"] = json!(display::product_label(i.vendor_id, i.product_id, None));
+                v["software_version"] = json!(display::software_version_label(
+                    i.version,
+                    Some(i.version_str.clone())
+                ));
             }
         }
         wire::Response::Network { network, .. } => {

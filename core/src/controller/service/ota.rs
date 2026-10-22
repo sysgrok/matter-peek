@@ -3,11 +3,14 @@
 use core::cell::RefCell;
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+
+use embassy_time::{Duration, Instant};
 
 use log::{info, warn};
 
@@ -15,7 +18,7 @@ use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::ota_prov::OtaRequestorId;
 use rs_matter::persist::KvBlobStore;
 
-use crate::api::{OtaImageInfo, OtaListener, OtaProgress, PeekError};
+use crate::api::{OtaImageInfo, OtaListener, OtaProgress, OtaUpdateInfo, PeekError};
 use crate::ota::{OtaEvent, OtaImageStore, OtaVerifier};
 
 use super::{convert, failed, Ctx};
@@ -32,11 +35,24 @@ pub(super) struct Upload<'a, C: Crypto + 'a, O: OtaImageStore> {
     received: u64,
 }
 
+/// How long an update stays listed after its last progress.
+const UPDATES_KEPT: Duration = Duration::from_secs(60 * 60);
+
 /// Follows the OTA update of a device.
 pub(super) struct OtaFollower {
     node_id: u64,
     name: String,
     listener: Arc<dyn OtaListener>,
+}
+
+/// The latest OTA update of a device.
+pub(super) struct TrackedUpdate {
+    name: Option<String>,
+    progress: OtaProgress,
+    downloaded: Option<u64>,
+    size: Option<u64>,
+    started: Instant,
+    last: Instant,
 }
 
 impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
@@ -167,6 +183,27 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         Ok(self.ota_images())
     }
 
+    /// The latest OTA update of each device, of the last hour.
+    pub(super) fn ota_updates(&self) -> Vec<OtaUpdateInfo> {
+        let now = Instant::now();
+        let mut updates = self.ota_updates.borrow_mut();
+
+        updates.retain(|_, update| now - update.last < UPDATES_KEPT);
+
+        updates
+            .iter()
+            .map(|(node_id, update)| OtaUpdateInfo {
+                node_id: *node_id,
+                name: update.name.clone(),
+                progress: update.progress.clone(),
+                downloaded: update.downloaded,
+                size: update.size,
+                elapsed_secs: (now - update.started).as_secs(),
+                idle_secs: (now - update.last).as_secs(),
+            })
+            .collect()
+    }
+
     /// Allow the device image `name`, have `progress` follow its update, and
     /// announce us to it as its OTA Provider.
     pub(super) async fn ota_update(
@@ -215,10 +252,15 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     }
 }
 
-/// Hand each OTA event to the followers of that update; an update that ended
-/// loses its followers.
-pub(super) fn events(followers: Rc<RefCell<Vec<OtaFollower>>>) -> Box<dyn Fn(OtaEvent)> {
+/// Hand each OTA event to the followers of that update, and track it; an
+/// update that ended loses its followers.
+pub(super) fn events(
+    followers: Rc<RefCell<Vec<OtaFollower>>>,
+    updates: Rc<RefCell<BTreeMap<u64, TrackedUpdate>>>,
+) -> Box<dyn Fn(OtaEvent)> {
     Box::new(move |event| {
+        track(&mut updates.borrow_mut(), &event);
+
         let mut followers = followers.borrow_mut();
 
         let (node_id, image, progress) = match event {
@@ -270,4 +312,152 @@ pub(super) fn events(followers: Rc<RefCell<Vec<OtaFollower>>>) -> Box<dyn Fn(Ota
 
 fn no_upload(id: u32) -> PeekError {
     PeekError::failed(format!("no upload {id}"))
+}
+
+/// Record `event` in the latest update of its device: a download, of the
+/// devices offered its image.
+fn track(updates: &mut BTreeMap<u64, TrackedUpdate>, event: &OtaEvent) {
+    let now = Instant::now();
+
+    match event {
+        OtaEvent::Offered { node, image } => {
+            updates.insert(
+                node.node_id,
+                TrackedUpdate {
+                    name: Some(image.clone()),
+                    progress: OtaProgress::Offered {
+                        name: image.clone(),
+                    },
+                    downloaded: None,
+                    size: None,
+                    started: now,
+                    last: now,
+                },
+            );
+        }
+        OtaEvent::NotOffered { node } => {
+            updates.insert(
+                node.node_id,
+                TrackedUpdate {
+                    name: None,
+                    progress: OtaProgress::NotOffered,
+                    downloaded: None,
+                    size: None,
+                    started: now,
+                    last: now,
+                },
+            );
+        }
+        OtaEvent::Downloaded {
+            image,
+            offset,
+            size,
+        } => {
+            let downloading = updates.values_mut().filter(|update| {
+                update.name.as_ref() == Some(image)
+                    && matches!(
+                        update.progress,
+                        OtaProgress::Offered { .. } | OtaProgress::Downloading { .. }
+                    )
+            });
+            for update in downloading {
+                update.progress = OtaProgress::Downloading {
+                    percent: (*offset as u128 * 100 / (*size).max(1) as u128) as u8,
+                };
+                update.downloaded = Some(*offset);
+                update.size = Some(*size);
+                update.last = now;
+            }
+        }
+        OtaEvent::Applying { node, version } | OtaEvent::Applied { node, version } => {
+            let progress = match event {
+                OtaEvent::Applying { .. } => OtaProgress::Applying { version: *version },
+                _ => OtaProgress::Applied { version: *version },
+            };
+            let update = updates.entry(node.node_id).or_insert(TrackedUpdate {
+                name: None,
+                progress: progress.clone(),
+                downloaded: None,
+                size: None,
+                started: now,
+                last: now,
+            });
+            update.progress = progress;
+            update.last = now;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::num::NonZeroU8;
+
+    use super::*;
+
+    const IMAGE: &str = "fff2-8002-257-f344bc.ota";
+
+    fn node(node_id: u64) -> OtaRequestorId {
+        OtaRequestorId {
+            fab_idx: NonZeroU8::new(1).unwrap(),
+            node_id,
+        }
+    }
+
+    #[test]
+    fn a_download_is_tracked_for_the_devices_offered_its_image() {
+        let mut updates = BTreeMap::new();
+
+        track(
+            &mut updates,
+            &OtaEvent::Offered {
+                node: node(7),
+                image: IMAGE.to_string(),
+            },
+        );
+        track(&mut updates, &OtaEvent::NotOffered { node: node(8) });
+        track(
+            &mut updates,
+            &OtaEvent::Downloaded {
+                image: IMAGE.to_string(),
+                offset: 250,
+                size: 1000,
+            },
+        );
+
+        assert_eq!(
+            updates[&7].progress,
+            OtaProgress::Downloading { percent: 25 }
+        );
+        assert_eq!(
+            (updates[&7].downloaded, updates[&7].size),
+            (Some(250), Some(1000))
+        );
+        assert_eq!(updates[&8].progress, OtaProgress::NotOffered);
+
+        track(
+            &mut updates,
+            &OtaEvent::Applied {
+                node: node(7),
+                version: 257,
+            },
+        );
+        assert_eq!(updates[&7].progress, OtaProgress::Applied { version: 257 });
+        assert_eq!(updates[&7].name.as_deref(), Some(IMAGE));
+    }
+
+    #[test]
+    fn the_time_left_follows_the_pace_so_far() {
+        let update = OtaUpdateInfo {
+            node_id: 7,
+            name: Some(IMAGE.to_string()),
+            progress: OtaProgress::Downloading { percent: 25 },
+            downloaded: Some(250),
+            size: Some(1000),
+            elapsed_secs: 60,
+            idle_secs: 1,
+        };
+
+        assert!(update.in_progress());
+        assert_eq!(update.remaining_secs(), Some(180));
+    }
 }

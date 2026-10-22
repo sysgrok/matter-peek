@@ -377,6 +377,53 @@ pub enum OtaProgress {
     Applied { version: u32 },
 }
 
+/// The latest OTA update of a device that asked us for one since the
+/// controller started: the image, and how far it got.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct OtaUpdateInfo {
+    pub node_id: u64,
+    /// The image offered; `None` if none was.
+    pub name: Option<String>,
+    pub progress: OtaProgress,
+    /// The bytes of the image downloaded so far, and its size.
+    pub downloaded: Option<u64>,
+    pub size: Option<u64>,
+    /// Seconds since the device asked for the update.
+    pub elapsed_secs: u64,
+    /// Seconds since its last progress: a download with none for minutes has
+    /// likely stalled.
+    pub idle_secs: u64,
+}
+
+impl OtaUpdateInfo {
+    /// Whether the update is still going: offered, downloading or applying.
+    pub fn in_progress(&self) -> bool {
+        matches!(
+            self.progress,
+            OtaProgress::Offered { .. }
+                | OtaProgress::Downloading { .. }
+                | OtaProgress::Applying { .. }
+        )
+    }
+
+    /// The time left to download, estimated from the pace so far.
+    pub fn remaining_secs(&self) -> Option<u64> {
+        let (OtaProgress::Downloading { .. }, Some(downloaded), Some(size)) =
+            (&self.progress, self.downloaded, self.size)
+        else {
+            return None;
+        };
+        if downloaded == 0 {
+            return None;
+        }
+
+        let left = size.saturating_sub(downloaded) as u128;
+
+        Some((left * self.elapsed_secs as u128 / downloaded as u128) as u64)
+    }
+}
+
 /// What kind of network a device, or one of its interfaces, is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]

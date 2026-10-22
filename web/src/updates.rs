@@ -62,9 +62,10 @@ impl App {
                                 .filter(|d| self.applicable(d).any(|other| other.name == image.name))
                                 .count();
                             let range = match (image.min_applicable_version, image.max_applicable_version) {
-                                (Some(min), Some(max)) => Some(format!("For versions {min} to {max}")),
-                                (Some(min), None) => Some(format!("For versions from {min}")),
-                                (None, Some(max)) => Some(format!("For versions up to {max}")),
+                                (Some(min), Some(max)) => Some(format!(
+                                    "For versions {} to {}", display::hex_u32(min), display::hex_u32(max))),
+                                (Some(min), None) => Some(format!("For versions from {}", display::hex_u32(min))),
+                                (None, Some(max)) => Some(format!("For versions up to {}", display::hex_u32(max))),
                                 (None, None) => None,
                             };
 
@@ -74,7 +75,7 @@ impl App {
                                     <div class="image-main">
                                         <p class="image-title">
                                             <span>{ image.version_str.clone() }</span>
-                                            { ui::pill(&format!("v{}", image.version), None, Some("Its software version number".into())) }
+                                            { ui::pill(&display::hex_u32(image.version), None, Some("Its software version number".into())) }
                                         </p>
                                         <p class="image-sub">
                                             { display::vendor_label(image.vendor_id, None) }

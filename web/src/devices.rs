@@ -383,7 +383,9 @@ impl App {
             .cloned()
             .or_else(|| images.first().map(|image| image.name.clone()));
         let title = match (progress, images.first()) {
-            (Some(api::OtaProgress::Applied { version }), _) => format!("Updated to {version}"),
+            (Some(api::OtaProgress::Applied { version }), _) => {
+                format!("Updated to {}", display::hex_u32(*version))
+            }
             (_, Some(image)) if images.len() == 1 => {
                 format!("Update available: {}", image.version_str)
             }
@@ -395,6 +397,9 @@ impl App {
             Some(api::OtaProgress::Downloading { percent }) => Some(*percent),
             _ => None,
         };
+        let remaining = percent
+            .and(self.ota_remaining.get(&node_id))
+            .map(|secs| format!(" · about {} left", display::duration(*secs)));
 
         html! {
             <div class={classes!("device-update", applied.then_some("is-done"))}>
@@ -404,7 +409,7 @@ impl App {
                 <div class="device-update-text">
                     <p class="device-update-title">{ title }</p>
                     if let Some(status) = status {
-                        <p class="device-update-status">{ status.clone() }</p>
+                        <p class="device-update-status">{ status.clone() }{ remaining.unwrap_or_default() }</p>
                     }
                     if let Some(percent) = percent {
                         <progress class="progress is-small is-link mt-1" value={percent.to_string()} max="100"></progress>

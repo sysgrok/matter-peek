@@ -307,6 +307,9 @@ enum ThreadView {
 enum Ota {
     /// List the stored OTA images.
     Images,
+    /// List the OTA updates devices asked us for in the last hour, and how far
+    /// they got.
+    Updates,
     /// Store an OTA image file.
     Upload { file: PathBuf },
     /// Delete a stored OTA image.
@@ -608,6 +611,9 @@ async fn run(cli: Cli) -> io::Result<bool> {
         Command::Ota(Ota::Images) => {
             images(&out, call(&conn, &out, wire::Request::OtaImages).await?)
         }
+        Command::Ota(Ota::Updates) => {
+            ota_updates(&out, call(&conn, &out, wire::Request::OtaUpdates).await?)
+        }
         Command::Ota(Ota::Upload { file }) => upload(&conn, &out, &file).await,
         Command::Ota(Ota::Delete { name }) => images(
             &out,
@@ -761,6 +767,45 @@ fn devices(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
     Ok(true)
 }
 
+fn ota_updates(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
+    let Some(wire::Response::OtaUpdates { updates }) = response else {
+        return Ok(response.is_some());
+    };
+
+    if out.json {
+        return Ok(true);
+    }
+
+    if updates.is_empty() {
+        println!("No device asked for an OTA update in the last hour.");
+    }
+    for update in updates {
+        let mut line = format!(
+            "{}  {}",
+            display::hex_u64(update.node_id),
+            ota_progress_text(&update.progress)
+        );
+        if let (Some(downloaded), Some(size)) = (update.downloaded, update.size) {
+            line.push_str(&format!(
+                "  {} of {} KiB",
+                downloaded / 1024,
+                size.div_ceil(1024)
+            ));
+        }
+        line.push_str(&format!(
+            "  for {}  last progress {} ago",
+            display::duration(update.elapsed_secs),
+            display::duration(update.idle_secs)
+        ));
+        if let Some(secs) = update.remaining_secs() {
+            line.push_str(&format!("  about {} left", display::duration(secs)));
+        }
+        println!("{line}");
+    }
+
+    Ok(true)
+}
+
 fn images(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
     let Some(wire::Response::OtaImages { images }) = response else {
         return Ok(response.is_some());
@@ -775,12 +820,11 @@ fn images(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
     }
     for image in images {
         println!(
-            "{}  vendor {}  product {}  version {} ({})  {} bytes",
+            "{}  vendor {}  product {}  version {}  {} bytes",
             image.name,
             display::vendor_label(image.vendor_id, None),
             display::product_label(image.vendor_id, image.product_id, None),
-            image.version_str,
-            image.version,
+            display::software_version_label(image.version, Some(image.version_str)),
             image.size
         );
     }
@@ -1584,8 +1628,12 @@ fn ota_progress_text(progress: &api::OtaProgress) -> String {
         api::OtaProgress::Offered { name } => format!("Offered {name}"),
         api::OtaProgress::NotOffered => "No update for the device".into(),
         api::OtaProgress::Downloading { percent } => format!("Downloading: {percent}%"),
-        api::OtaProgress::Applying { version } => format!("Applying version {version}..."),
-        api::OtaProgress::Applied { version } => format!("Updated: runs version {version}"),
+        api::OtaProgress::Applying { version } => {
+            format!("Applying version {}...", display::hex_u32(*version))
+        }
+        api::OtaProgress::Applied { version } => {
+            format!("Updated: runs version {}", display::hex_u32(*version))
+        }
     }
 }
 

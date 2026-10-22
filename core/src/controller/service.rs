@@ -44,7 +44,7 @@ use crate::ota::{OtaEvent, OtaImageStore, OtaProvider};
 use crate::persist::{ControllerStore, KvBuf};
 use crate::subscribe::Reports;
 
-use ota::{OtaFollower, Upload};
+use ota::{OtaFollower, TrackedUpdate, Upload};
 use watch::{SubJob, Watch};
 
 mod commission;
@@ -103,6 +103,8 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     ota: OtaProvider<O, Box<dyn Fn(OtaEvent)>>,
     /// Who follows which OTA update.
     ota_followers: Rc<RefCell<Vec<OtaFollower>>>,
+    /// The latest OTA update of each device, by node ID.
+    ota_updates: Rc<RefCell<BTreeMap<u64, TrackedUpdate>>>,
     /// The OTA image uploads in progress, by ID.
     uploads: RefCell<BTreeMap<u32, Upload<'a, C, O>>>,
     next_upload_id: Cell<u32>,
@@ -269,6 +271,9 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             Op::OtaImages(reply) => {
                 let _ = reply.send(Ok(self.ota_images())).await;
             }
+            Op::OtaUpdates(reply) => {
+                let _ = reply.send(Ok(self.ota_updates())).await;
+            }
             Op::OtaUploadBegin { size, reply } => {
                 let _ = reply.send(self.ota_upload_begin(size)).await;
             }
@@ -403,7 +408,8 @@ async fn run<'a, C, S, O, N, M>(
     }
 
     let ota_followers = Rc::new(RefCell::new(Vec::new()));
-    let ota = OtaProvider::new(ota, ota::events(ota_followers.clone()));
+    let ota_updates = Rc::new(RefCell::new(BTreeMap::new()));
+    let ota = OtaProvider::new(ota, ota::events(ota_followers.clone(), ota_updates.clone()));
 
     let (sub_jobs, sub_jobs_rx) = async_channel::unbounded();
 
@@ -421,6 +427,7 @@ async fn run<'a, C, S, O, N, M>(
         reports: Reports::new(),
         ota,
         ota_followers,
+        ota_updates,
         uploads: RefCell::new(BTreeMap::new()),
         next_upload_id: Cell::new(1),
         online: RefCell::new(None),
@@ -508,6 +515,7 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
                 refuse(reply, error).await
             }
             Op::OtaUploadBegin { reply, .. } => refuse(reply, error).await,
+            Op::OtaUpdates(reply) => refuse(reply, error).await,
             Op::OtaUploadChunk { reply, .. } => refuse(reply, error).await,
             Op::Assistant(reply) => refuse(reply, error).await,
             Op::ReadThreadMesh(reply) => refuse(reply, error).await,

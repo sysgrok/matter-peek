@@ -281,6 +281,12 @@ impl MatterPeek {
         self.call(Op::OtaImages).await
     }
 
+    /// The latest OTA update of each device that asked us for one since the
+    /// controller started (see [`OtaUpdateInfo`]).
+    pub async fn ota_updates(&self) -> Result<Vec<OtaUpdateInfo>, PeekError> {
+        self.call(Op::OtaUpdates).await
+    }
+
     /// Start storing an OTA image file (`.ota`) of `size` bytes, written in
     /// chunks. The file is checked as it arrives.
     pub async fn ota_upload(&self, size: u64) -> Result<Arc<OtaUpload>, PeekError> {
@@ -517,6 +523,7 @@ pub(crate) enum Op {
         watcher: u64,
     },
     OtaImages(Reply<Vec<OtaImageInfo>>),
+    OtaUpdates(Reply<Vec<OtaUpdateInfo>>),
     /// Start an upload; answers with its ID.
     OtaUploadBegin {
         size: u64,

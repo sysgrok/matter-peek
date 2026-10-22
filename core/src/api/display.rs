@@ -5,8 +5,8 @@
 //!   `0x000000000001B67B`);
 //! - vendors and products by name, with the ID in brackets (`Shelly (0x1490)`),
 //!   named by the device, else by the CSA's registry (the DCL);
-//! - versions by the device's string, with the number in brackets
-//!   (`esp32c6-8 (1)`);
+//! - versions by the device's string, with the number in hex in brackets
+//!   (`1.3.0-s1 (0x01030041)`);
 //! - durations in units, from the largest one present (`2mo 4d 0h 6m 1s`).
 
 use alloc::format;
@@ -62,22 +62,26 @@ impl DeviceInfo {
         }
     }
 
-    /// The device's hardware version, as [`version_label`] shows it; `None` if
-    /// the device served neither its number nor its string.
+    /// The device's hardware version, as [`hardware_version_label`] shows it;
+    /// `None` if the device served neither its number nor its string.
     pub fn hardware_version(&self) -> Option<String> {
-        version(
-            self.fingerprint.hardware_version.map(u32::from),
-            &self.hardware_version_string,
-        )
+        let name = non_empty(&self.hardware_version_string);
+
+        match self.fingerprint.hardware_version {
+            Some(version) => Some(hardware_version_label(version, name)),
+            None => name,
+        }
     }
 
-    /// The device's software version, as [`version_label`] shows it; `None` if
-    /// the device served neither its number nor its string.
+    /// The device's software version, as [`software_version_label`] shows it;
+    /// `None` if the device served neither its number nor its string.
     pub fn software_version(&self) -> Option<String> {
-        version(
-            self.fingerprint.software_version,
-            &self.software_version_string,
-        )
+        let name = non_empty(&self.software_version_string);
+
+        match self.fingerprint.software_version {
+            Some(version) => Some(software_version_label(version, name)),
+            None => name,
+        }
     }
 
     /// Whether the device has a test vendor ID (see [`is_test_vendor`]).
@@ -199,20 +203,32 @@ pub fn product_label(vid: u16, pid: u16, name: Option<String>) -> String {
     )
 }
 
-/// Version `version`, e.g. `1.4.2 (10402)`: named `name` (the device's
-/// version string), else, or when the name is just the number, `10402`.
+/// Hardware version `version`, e.g. `rev-b (0x0002)`: named `name` (the
+/// device's version string), else, or when the name is just the number,
+/// `0x0002`.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
-pub fn version_label(version: u32, name: Option<String>) -> String {
-    let number = version.to_string();
-    let name = name.filter(|name| !name.is_empty() && *name != number);
+pub fn hardware_version_label(version: u16, name: Option<String>) -> String {
+    versioned(version.into(), hex_u16(version), name)
+}
 
-    labelled(name.as_deref(), number)
+/// Software version `version`, e.g. `1.3.0-s1 (0x01030041)`: named `name`
+/// (the device's version string), else, or when the name is just the number,
+/// `0x01030041`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn software_version_label(version: u32, name: Option<String>) -> String {
+    versioned(version, hex_u32(version), name)
 }
 
 /// A 16-bit ID, e.g. `0x1490`.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn hex_u16(id: u16) -> String {
     format!("0x{id:04X}")
+}
+
+/// A 32-bit number (a software version, say), e.g. `0x01030041`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn hex_u32(id: u32) -> String {
+    format!("0x{id:08X}")
 }
 
 /// A 64-bit ID (a node ID, say), e.g. `0x000000000001B67B`.
@@ -275,16 +291,20 @@ pub fn bit_rate(bits_per_sec: u64) -> String {
     format!("{bits_per_sec} bit/s")
 }
 
-/// `name (id)`, or just `id`.
-fn version(version: Option<u32>, name: &str) -> Option<String> {
-    let name = Some(name.to_string()).filter(|name| !name.is_empty());
+/// `name (hex)`, leaving out a name that is just the number.
+fn versioned(version: u32, hex: String, name: Option<String>) -> String {
+    let name = name.filter(|name| {
+        !name.is_empty() && *name != version.to_string() && !name.eq_ignore_ascii_case(&hex)
+    });
 
-    match version {
-        Some(version) => Some(version_label(version, name)),
-        None => name,
-    }
+    labelled(name.as_deref(), hex)
 }
 
+fn non_empty(name: &str) -> Option<String> {
+    Some(name.to_string()).filter(|name| !name.is_empty())
+}
+
+/// `name (id)`, or just `id`.
 fn labelled(name: Option<&str>, id: String) -> String {
     match name {
         Some(name) => format!("{name} ({id})"),
@@ -344,12 +364,18 @@ mod tests {
     }
 
     #[test]
-    fn versions_show_the_string_then_the_number() {
-        assert_eq!(version_label(256, Some("0.1.0".into())), "0.1.0 (256)");
-        assert_eq!(version_label(256, Some(String::new())), "256");
-        assert_eq!(version_label(1, Some("1".into())), "1");
-        assert_eq!(version(None, "esp32c6-8").as_deref(), Some("esp32c6-8"));
-        assert_eq!(version(None, ""), None);
+    fn versions_show_the_string_then_the_number_in_hex() {
+        assert_eq!(
+            software_version_label(16_973_889, Some("1.3.0-s1".into())),
+            "1.3.0-s1 (0x01030041)"
+        );
+        assert_eq!(
+            software_version_label(256, Some(String::new())),
+            "0x00000100"
+        );
+        assert_eq!(software_version_label(1, Some("1".into())), "0x00000001");
+        assert_eq!(hardware_version_label(4, Some("v4".into())), "v4 (0x0004)");
+        assert_eq!(hardware_version_label(1, Some("0x0001".into())), "0x0001");
     }
 
     #[test]
