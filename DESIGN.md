@@ -81,6 +81,7 @@ controller serves the CLI, the MCP server and mobile apps.
 | Commissioning | `commission` (IP or BLE, network credentials, `remember`, a progress listener), `cancel_commission`, `read_qr_image`, `discover` (mDNS + BLE) |
 | Device list | `list_devices`, `sync`, `remember`, `set_tags`, `decommission` |
 | Health | `peek_device` (one-shot: also its heap, and the threads (tasks) of its software and their stacks, where it reports them), `subscribe` (live, General Diagnostics only: uptime, reboots, operating hours; returns a `Subscription`, which stops when dropped) |
+| Thread | `read_thread_mesh`: networks, nodes, links and findings, from our Thread devices' tables and the LAN's MeshCoP / Matter adverts |
 | Device | `read_network` (interfaces, known networks, Wi-Fi / Thread / Ethernet diagnostics), `change_network` (add or update, remove, connect, reorder a known network), `retrieve_logs`, `identify` |
 | OTA | `ota_images`, `ota_upload` (returns an `OtaUpload` to write chunks to), `ota_delete`, `ota_update` (a progress listener) |
 | Assistant | `assistant`, `set_assistant` (a key stays only for the same API address), `clear_assistant`: its model, kept in the store; never its key, which only `assistant_model` (Rust, for an agent in the same process) returns |
@@ -225,6 +226,25 @@ of it is private to `core`.
   `nn` and `xp`, browsed through Avahi and kept for the controller's lifetime);
   else by the extended PAN ID in hex.
 
+### Thread mesh
+- `read_thread_mesh` reads each of our Thread devices' networking in turn
+  (devices known to be offline are not tried; ops are serial), the Wi-Fi
+  channels of our Wi-Fi devices, the border routers' MeshCoP adverts (kept 10
+  minutes, as a browse may miss one) and the `_matter._tcp` hosts. A pure
+  builder (`controller/mesh.rs`) merges them: nodes by extended address (a
+  device's own from its diagnostics, else its Thread interface's hardware
+  address), links from the neighbour tables and the established routes of the
+  route tables, each side's hearing kept apart. A router only a route table
+  knows, with no link seen, is placed by its route: through which router our
+  router reaches it, and at what path cost (not drawn as a link). Link quality is 0–3, as
+  OpenThread devices report it (the spec scales it to 255).
+- Neighbour and route tables, like ThreadMetrics, are read item by item where
+  a device splits a list over chunks.
+- The findings are drawn from that partial view: a router is critical only
+  for our devices, not its own children, that lose every seen path to a border
+  router without it; one-way needs both sides' tables, or a route's quality 0
+  one way.
+
 ### OTA
 We are the devices' OTA Provider: images are stored as files (uploaded in
 chunks, checked as they arrive), `ota_update` announces us to the device, and
@@ -337,6 +357,12 @@ GitHub Copilot SDK (a Copilot subscription, on the desktop), as more kinds of
 `ModelConfig`, and several kept models to pick from per chat. Users of
 Claude or ChatGPT apps get the tools through a remote MCP connector: a relay
 to a controller that is always on.
+
+**Thread**: moving our Thread devices onto one network (the Thread twin of the
+Wi-Fi migration: add and connect under a fail-safe, find the device again,
+commit); then, if the mesh from Matter data proves too thin, diagnostics
+through the Border Agent (a MeshCoP commissioner: DTLS EC-JPAKE with the PSKc
+or ePSKc, `DIAG_GET` traversal), which sees every node.
 
 **Later**: consent-gated upload of logs and crash dumps; per-vendor crash
 parsers.

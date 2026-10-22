@@ -72,7 +72,7 @@ periodically, like the server), so to share the store with the web UI, run
 
 | Tools | Access |
 |-------|--------|
-| `discover`, `list_devices`, `peek_device`, `read_network`, `retrieve_logs`, `read_qr_image`, `ota_images` | read-only |
+| `discover`, `list_devices`, `peek_device`, `read_network`, `thread_mesh`, `thread_findings`, `retrieve_logs`, `read_qr_image`, `ota_images` | read-only |
 | `identify` | acts on the device (it blinks); not read-only, so agents ask first |
 | `commission`, `decommission`, `remember`, `set_tags`, `sync`, `add_network`, `remove_network`, `connect_network`, `reorder_network`, `ota_upload`, `ota_delete`, `ota_update` | **mutating** |
 
@@ -99,6 +99,24 @@ Add `"--allow-mutate"` to `args` only when the agent may change devices, and
 To see what a strong model makes of the tools alone, `scripts/claude-eval.sh`
 runs Claude Code with only these tools: no auto-memory, CLAUDE.md, user
 settings or Claude Code tools of its own.
+
+### Thread mesh
+
+The Thread page of the web UI, `matter-peek thread` (`thread findings` for the
+findings alone) and the MCP tools `thread_mesh` / `thread_findings` show the
+Thread mesh as our Thread devices see it, from Matter data only (no Thread
+credentials): each device's Thread Network Diagnostics (its neighbour and
+route tables), merged into one graph, labelled with the border routers' MeshCoP
+adverts (`_meshcop._udp`) and other fabrics' Matter nodes (`_matter._tcp`,
+whose host name on Thread is the extended address). The links show the link
+quality (0–3) and signal each way. The findings, in plain words: several
+networks on the LAN, a split network, weak or one-way links, routers some of
+our devices depend on, a single border router, devices that keep changing
+their parent or losing the network, a Thread channel within a Wi-Fi channel
+our Wi-Fi devices use, OpenThread's default credentials, and no route from
+this machine to a network's prefix (Linux). It reads the devices one after
+another, so it takes a few seconds; only the links our devices report are
+known.
 
 ### The assistant (an AI agent)
 

@@ -190,6 +190,14 @@ impl MatterPeek {
         self.call(|reply| Op::PeekDevice { node_id, reply }).await
     }
 
+    /// The Thread mesh as our Thread devices see it: their networks, the
+    /// nodes and links their neighbour and route tables show, the border
+    /// routers on the LAN, and what is wrong with it. Reads the devices one
+    /// after another, so it takes a few seconds.
+    pub async fn read_thread_mesh(&self) -> Result<ThreadMesh, PeekError> {
+        self.call(Op::ReadThreadMesh).await
+    }
+
     /// Read the networking of a listed device: its interfaces and addresses,
     /// the networks it knows, and the diagnostics of the network it is on.
     pub async fn read_network(&self, node_id: u64) -> Result<NetworkInfo, PeekError> {
@@ -538,6 +546,7 @@ pub(crate) enum Op {
         reply: Reply<()>,
     },
     Assistant(Reply<Option<ModelConfig>>),
+    ReadThreadMesh(Reply<ThreadMesh>),
     /// Keep the assistant's model; `None` forgets it.
     SetAssistant {
         model: Option<ModelConfig>,

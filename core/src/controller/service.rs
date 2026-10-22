@@ -34,7 +34,7 @@ use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::{NetworkReceive, NetworkSend, NoNetwork};
 use rs_matter::Matter;
 
-use crate::api::{Op, PeekConfig, PeekError, Service};
+use crate::api::{BorderRouter, Op, PeekConfig, PeekError, Service};
 use crate::ca::{CaTier, ControllerCa};
 use crate::matter::{Controller, FabricIdentity};
 use crate::mdns::Mdns;
@@ -50,6 +50,7 @@ use watch::{SubJob, Watch};
 mod commission;
 mod convert;
 mod devices;
+mod mesh;
 mod netconfig;
 mod ota;
 mod watch;
@@ -116,6 +117,8 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     thread_names: RefCell<BTreeMap<u64, String>>,
     /// When the border routers were last asked for names they did not have.
     thread_names_missed: Cell<Option<Instant>>,
+    /// The border routers seen lately, by name, and when.
+    border_routers: RefCell<BTreeMap<String, (BorderRouter, Instant)>>,
     /// The Bluetooth side of the transport, for commissioning over BLE.
     #[cfg(feature = "ble")]
     btp: &'a rs_matter::transport::network::btp::Btp,
@@ -228,6 +231,9 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             }
             Op::ReadNetwork { node_id, reply } => {
                 let _ = reply.send(self.read_network(node_id).await).await;
+            }
+            Op::ReadThreadMesh(reply) => {
+                let _ = reply.send(self.read_thread_mesh().await).await;
             }
             Op::ChangeNetwork {
                 node_id,
@@ -421,6 +427,7 @@ async fn run<'a, C, S, O, N, M>(
         transient: RefCell::new(Vec::new()),
         thread_names: RefCell::new(BTreeMap::new()),
         thread_names_missed: Cell::new(None),
+        border_routers: RefCell::new(BTreeMap::new()),
         #[cfg(feature = "ble")]
         btp: &btp,
     };
@@ -503,6 +510,7 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             Op::OtaUploadBegin { reply, .. } => refuse(reply, error).await,
             Op::OtaUploadChunk { reply, .. } => refuse(reply, error).await,
             Op::Assistant(reply) => refuse(reply, error).await,
+            Op::ReadThreadMesh(reply) => refuse(reply, error).await,
             Op::SetAssistant { reply, .. } => refuse(reply, error).await,
             Op::Unwatch { .. } | Op::OtaUploadDiscard { .. } => {}
         }

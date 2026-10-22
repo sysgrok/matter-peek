@@ -24,7 +24,8 @@ use rs_matter::dm::clusters::decl::network_commissioning::{
     NetworkCommissioningStatusEnum,
 };
 use rs_matter::dm::clusters::decl::thread_network_diagnostics::{
-    self as thread_diag, RoutingRoleEnum, ThreadNetworkDiagnosticsAttrResponses as _,
+    self as thread_diag, NeighborTableStruct, RouteTableStruct, RoutingRoleEnum,
+    ThreadNetworkDiagnosticsAttrResponses as _,
 };
 use rs_matter::dm::clusters::decl::wi_fi_network_diagnostics::{
     self as wifi_diag, SecurityTypeEnum, WiFiNetworkDiagnosticsAttrResponses as _, WiFiVersionEnum,
@@ -40,8 +41,10 @@ use rs_matter::Matter;
 
 use crate::api::{
     KnownNetwork, NetworkConfig, NetworkInfo, NetworkInterfaceInfo, NetworkKind, NetworkStatus,
-    ThreadDiag, ThreadNeighbor, ThreadRole, WifiSecurity, WifiVersion,
+    ThreadDiag, ThreadNeighbor, ThreadRole, ThreadRoute, WifiSecurity, WifiVersion,
 };
+
+use crate::diagnostics::list_items;
 
 /// General Diagnostics lives on the root endpoint.
 const ROOT_ENDPOINT: EndptId = 0;
@@ -385,38 +388,56 @@ fn thread(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {
         reads.detached_role_count(),
     );
 
-    for (_, list) in reads.neighbor_table() {
-        let Ok(list) = list else { continue };
+    seen |= list_items(
+        resp,
+        thread_diag::FULL_CLUSTER.id,
+        thread_diag::AttributeId::NeighborTable as _,
+        &mut diag.neighbors,
+        neighbor,
+    );
+    if list_items(
+        resp,
+        thread_diag::FULL_CLUSTER.id,
+        thread_diag::AttributeId::RouteTable as _,
+        &mut diag.routes,
+        route,
+    ) {
         seen = true;
-
-        diag.neighbors = list
-            .iter()
-            .filter_map(|n| {
-                let n = n.ok()?;
-                Some(ThreadNeighbor {
-                    ext_address: n.ext_address().ok()?,
-                    rloc16: n.rloc_16().ok()?,
-                    age_secs: n.age().ok()?,
-                    lqi: n.lqi().ok()?,
-                    average_rssi: n.average_rssi().ok()?.into_option(),
-                    last_rssi: n.last_rssi().ok()?.into_option(),
-                    frame_error_rate: n.frame_error_rate().ok()?,
-                    message_error_rate: n.message_error_rate().ok()?,
-                    is_child: n.is_child().ok()?,
-                    rx_on_when_idle: n.rx_on_when_idle().ok()?,
-                    full_thread_device: n.full_thread_device().ok()?,
-                })
-            })
-            .collect();
-    }
-    for (_, list) in reads.route_table() {
-        let Ok(list) = list else { continue };
-        seen = true;
-
-        diag.route_count = Some(list.iter().count() as u16);
+        diag.route_count = Some(diag.routes.len() as u16);
     }
 
     info.thread = seen.then_some(diag);
+}
+
+fn neighbor(n: &NeighborTableStruct<'_>) -> Option<ThreadNeighbor> {
+    Some(ThreadNeighbor {
+        ext_address: n.ext_address().ok()?,
+        rloc16: n.rloc_16().ok()?,
+        age_secs: n.age().ok()?,
+        lqi: n.lqi().ok()?,
+        average_rssi: n.average_rssi().ok()?.into_option(),
+        last_rssi: n.last_rssi().ok()?.into_option(),
+        frame_error_rate: n.frame_error_rate().ok()?,
+        message_error_rate: n.message_error_rate().ok()?,
+        is_child: n.is_child().ok()?,
+        rx_on_when_idle: n.rx_on_when_idle().ok()?,
+        full_thread_device: n.full_thread_device().ok()?,
+    })
+}
+
+fn route(r: &RouteTableStruct<'_>) -> Option<ThreadRoute> {
+    Some(ThreadRoute {
+        ext_address: r.ext_address().ok()?,
+        rloc16: r.rloc_16().ok()?,
+        router_id: r.router_id().ok()?,
+        next_hop: r.next_hop().ok()?,
+        path_cost: r.path_cost().ok()?,
+        lqi_in: r.lqi_in().ok()?,
+        lqi_out: r.lqi_out().ok()?,
+        age_secs: r.age().ok()?,
+        allocated: r.allocated().ok()?,
+        link_established: r.link_established().ok()?,
+    })
 }
 
 fn ethernet(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {

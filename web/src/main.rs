@@ -26,6 +26,7 @@ mod devices;
 mod icons;
 mod memory;
 mod network;
+mod thread;
 mod ui;
 mod updates;
 
@@ -87,6 +88,7 @@ enum Loading {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Devices,
+    Thread,
     Assistant,
     Commission,
     Updates,
@@ -129,6 +131,8 @@ enum Msg {
     Assistant(AssistantMsg),
     /// In a device's memory popup.
     Memory(memory::MemoryMsg),
+    /// On the Thread page.
+    Thread(thread::ThreadMsg),
     /// Open or close the navigation drawer (on phones).
     ToggleDrawer,
     Ask(Ask),
@@ -345,6 +349,7 @@ struct App {
     logs: Option<LogsView>,
     /// The memory popup, while open.
     memory: Option<memory::MemoryView>,
+    thread: thread::ThreadPage,
     /// The network popup, when open.
     network_view: Option<NetworkView>,
     /// The Assistant page.
@@ -417,6 +422,7 @@ impl Component for App {
             ota_status: HashMap::new(),
             logs: None,
             memory: None,
+            thread: Default::default(),
             network_view: None,
             assistant: Assistant::default(),
             chat_scroll: NodeRef::default(),
@@ -434,6 +440,10 @@ impl Component for App {
                     ctx.link().send_message(Msg::Assistant(AssistantMsg::Load));
                     self.scroll_chat = true;
                 }
+                if tab == Tab::Thread && self.thread.mesh.is_none() {
+                    ctx.link()
+                        .send_message(Msg::Thread(thread::ThreadMsg::Read));
+                }
                 // Lazily refresh the device list the first time the user opens
                 // the Devices tab with an empty list.
                 if tab == Tab::Devices && self.stored.is_empty() && !self.busy_stored {
@@ -450,6 +460,7 @@ impl Component for App {
             }
             Msg::Assistant(msg) => self.update_assistant(ctx, msg),
             Msg::Memory(msg) => self.update_memory(ctx, msg),
+            Msg::Thread(msg) => self.update_thread(ctx, msg),
             Msg::ToggleDrawer => {
                 self.drawer_open = !self.drawer_open;
                 true
@@ -1141,6 +1152,7 @@ impl Component for App {
                     // The Assistant page's own.
                     wire::Response::Chats { .. }
                     | wire::Response::Chat { .. }
+                    | wire::Response::ThreadMesh { .. }
                     | wire::Response::Assistant { .. }
                     | wire::Response::Models { .. }
                     | wire::Response::Tested { .. } => {}
@@ -1233,7 +1245,7 @@ impl Component for App {
             <>
                 { self.view_app_bar(link) }
                 <main class={classes!("page", match self.tab {
-                    Tab::Devices => None,
+                    Tab::Devices | Tab::Thread => None,
                     Tab::Assistant => Some("is-chat"),
                     Tab::Commission | Tab::Updates => Some("is-narrow"),
                 })}>
@@ -1251,6 +1263,7 @@ impl Component for App {
                             Tab::Assistant => self.view_assistant_tab(link),
                             Tab::Commission => self.view_commission_tab(link),
                             Tab::Updates => self.view_updates_tab(link),
+                            Tab::Thread => self.view_thread_tab(link),
                         }
                     }
                 </main>
@@ -1564,6 +1577,7 @@ impl App {
                 Icon::Updates,
                 Some(self.ota_images.len()),
             ),
+            (Tab::Thread, "Thread", Icon::Thread, None),
         ];
         let link_to =
             |class: &'static str, (tab, label, glyph, count): (Tab, &str, Icon, Option<usize>)| {

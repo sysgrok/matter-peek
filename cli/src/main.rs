@@ -148,6 +148,12 @@ enum Command {
     /// OTA images and device updates.
     #[command(subcommand)]
     Ota(Ota),
+    /// The Thread mesh as our Thread devices see it: networks, nodes, links
+    /// and what is wrong. Reads each Thread device in turn.
+    Thread {
+        #[command(subcommand)]
+        view: Option<ThreadView>,
+    },
     /// Offer the API to an AI agent, as MCP tools over stdio (the MCP stdio
     /// transport), until stdin closes. Without --server, holds the store while
     /// it runs.
@@ -286,6 +292,15 @@ enum NetworkChange {
         /// Its new place, from 0.
         index: u8,
     },
+}
+
+/// What of the Thread mesh to show.
+#[derive(Subcommand)]
+enum ThreadView {
+    /// Networks, nodes, links and findings.
+    Mesh,
+    /// Only what is wrong, and the networks.
+    Findings,
 }
 
 #[derive(Subcommand)]
@@ -600,6 +615,16 @@ async fn run(cli: Cli) -> io::Result<bool> {
         ),
         Command::Ota(Ota::Update { node, name }) => update(&conn, &out, node.0, name).await,
         Command::Assistant { action } => assistant(&conn, &out, action).await,
+        Command::Thread { view } => {
+            let response = call(&conn, &out, wire::Request::ReadThreadMesh).await?;
+            if let Some(wire::Response::ThreadMesh { mesh }) = &response {
+                if !out.json {
+                    let findings_only = matches!(view, Some(ThreadView::Findings));
+                    println!("{}", thread_text(mesh, findings_only));
+                }
+            }
+            Ok(response.is_some())
+        }
         Command::Mcp { .. } | Command::Chat { .. } => unreachable!("served above"),
     }
 }
@@ -755,6 +780,164 @@ fn images(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
     }
 
     Ok(true)
+}
+
+/// The Thread mesh, for a terminal.
+fn thread_text(mesh: &api::ThreadMesh, findings_only: bool) -> String {
+    let label = |ext: u64| {
+        mesh.nodes
+            .iter()
+            .find(|node| node.ext_address == ext)
+            .map(|node| node.label.clone())
+            .unwrap_or_else(|| format!("{ext:016X}"))
+    };
+    let mut lines = Vec::new();
+
+    if mesh.networks.is_empty() {
+        lines.push("No Thread networks: no Thread devices read, no border routers seen.".into());
+    }
+    for net in &mesh.networks {
+        let mut facts = Vec::new();
+        if let Some(channel) = net.channel {
+            facts.push(format!("channel {channel}"));
+        }
+        if let Some(pan) = net.pan_id {
+            facts.push(format!("PAN 0x{pan:04X}"));
+        }
+        if !net.partitions.is_empty() {
+            let partitions: Vec<String> = net.partitions.iter().map(u32::to_string).collect();
+            facts.push(format!("partition {}", partitions.join(", ")));
+        }
+        lines.push(format!(
+            "{}  {:016X}  {}",
+            net.name.as_deref().unwrap_or("(unnamed)"),
+            net.extended_pan_id,
+            facts.join(", ")
+        ));
+        if !net.devices.is_empty() {
+            let devices: Vec<String> = mesh
+                .nodes
+                .iter()
+                .filter(|node| {
+                    matches!(node.kind, api::MeshNodeKind::Device { node_id } if net.devices.contains(&node_id))
+                })
+                .map(|node| node.label.clone())
+                .collect();
+            lines.push(format!("  on our fabric: {}", devices.join(", ")));
+        }
+        if !net.border_routers.is_empty() {
+            lines.push(format!(
+                "  border routers: {}",
+                net.border_routers.join(", ")
+            ));
+        }
+    }
+
+    if !findings_only {
+        lines.push(String::new());
+        lines.push(format!("Nodes ({}):", mesh.nodes.len()));
+        lines.push(format!(
+            "  {:<8} {:<6} {:<16}  {:<30} {}",
+            "ROLE", "RLOC16", "EXT ADDRESS", "NAME", "PARENT"
+        ));
+        for node in &mesh.nodes {
+            let role = node.role.map(thread_role_text).unwrap_or("-");
+            let kind = match node.kind {
+                api::MeshNodeKind::BorderRouter => " (border router)",
+                _ => "",
+            };
+            lines.push(format!(
+                "  {role:<8} {:<6} {:016X}  {:<30} {}",
+                node.rloc16
+                    .map(|r| format!("{r:04X}"))
+                    .unwrap_or_else(|| "-".into()),
+                node.ext_address,
+                format!("{}{kind}", node.label),
+                node.parent.map(label).unwrap_or_default()
+            ));
+        }
+
+        lines.push(String::new());
+        lines.push(format!("Links ({}):", mesh.links.len()));
+        let signal = |signal: Option<api::LinkSignal>| match signal {
+            Some(api::LinkSignal { quality, rssi }) => {
+                let mut parts = Vec::new();
+                if let Some(q) = quality {
+                    parts.push(format!("{q}/3"));
+                }
+                if let Some(rssi) = rssi {
+                    parts.push(format!("{rssi} dBm"));
+                }
+                if parts.is_empty() {
+                    "heard".into()
+                } else {
+                    parts.join(" ")
+                }
+            }
+            None => "?".into(),
+        };
+        for link in &mesh.links {
+            let (a, b) = (label(link.a), label(link.b));
+            let kind = if link.parent_child {
+                "child"
+            } else {
+                "routers"
+            };
+            lines.push(format!(
+                "  {a} hears {b}: {}; {b} hears {a}: {}  ({kind})",
+                signal(link.a_hears_b),
+                signal(link.b_hears_a)
+            ));
+        }
+
+        if !mesh.routes.is_empty() {
+            lines.push(String::new());
+            lines.push(format!(
+                "Routes to routers with no known link ({}):",
+                mesh.routes.len()
+            ));
+            for route in &mesh.routes {
+                let via = route
+                    .via
+                    .map(|via| format!(" through {}", label(via)))
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "  {} reaches {}{via}, path cost {}",
+                    label(route.from),
+                    label(route.to),
+                    route.path_cost
+                ));
+            }
+        }
+    }
+
+    lines.push(String::new());
+    if mesh.findings.is_empty() {
+        lines.push("Nothing wrong found.".into());
+    } else {
+        lines.push(format!("Findings ({}):", mesh.findings.len()));
+        for finding in &mesh.findings {
+            let mark = match finding.severity {
+                api::FindingSeverity::Warning => "!",
+                api::FindingSeverity::Info => "i",
+            };
+            lines.push(format!("  {mark} {}", finding.text));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn thread_role_text(role: api::ThreadRole) -> &'static str {
+    match role {
+        api::ThreadRole::Unspecified => "?",
+        api::ThreadRole::Unassigned => "detached",
+        api::ThreadRole::SleepyEndDevice => "sleepy",
+        api::ThreadRole::EndDevice => "end",
+        api::ThreadRole::Reed => "reed",
+        api::ThreadRole::Router => "router",
+        api::ThreadRole::Leader => "leader",
+    }
 }
 
 /// Show, set, try or forget the assistant's model.

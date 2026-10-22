@@ -220,38 +220,61 @@ async fn read_software<C: Crypto>(
     Ok(diag)
 }
 
-/// The ThreadMetrics in `resp`, onto `into`: a whole list replaces it, an item
-/// is appended to it.
+/// The ThreadMetrics in `resp`, onto `into`.
 fn thread_metrics(resp: &ReportDataResp<'_>, into: &mut Option<alloc::vec::Vec<ThreadMetric>>) {
+    let had = into.is_some();
+    let mut list = into.take().unwrap_or_default();
+
+    let seen = list_items(
+        resp,
+        sw_diag::FULL_CLUSTER.id,
+        sw_diag::AttributeId::ThreadMetrics as _,
+        &mut list,
+        thread_metric,
+    );
+
+    *into = (had || seen).then_some(list);
+}
+
+/// The items of list attribute `attr` of `cluster` in `resp`, onto `into`: a
+/// whole list replaces it, an item is appended to it (a device sends a list
+/// item by item where it does not fit a chunk). Whether `resp` has any.
+pub(crate) fn list_items<'a, T, U>(
+    resp: &ReportDataResp<'a>,
+    cluster: u32,
+    attr: u32,
+    into: &mut alloc::vec::Vec<U>,
+    map: impl Fn(&T) -> Option<U>,
+) -> bool
+where
+    T: FromTLV<'a> + 'a,
+{
     let reports = resp
         .attr_reports
         .iter()
         .flat_map(|reports| reports.iter())
         .filter_map(Result::ok);
 
+    let mut seen = false;
     for report in reports {
         let AttrResp::Data(data) = report else {
             continue;
         };
-        if data.path.cluster != Some(sw_diag::FULL_CLUSTER.id)
-            || data.path.attr != Some(sw_diag::AttributeId::ThreadMetrics as _)
-        {
+        if data.path.cluster != Some(cluster) || data.path.attr != Some(attr) {
             continue;
         }
+        seen = true;
 
         if data.path.list_index.is_some() {
-            if let Ok(item) = ThreadMetricsStruct::from_tlv(&data.data) {
-                into.get_or_insert_with(alloc::vec::Vec::new)
-                    .extend(thread_metric(&item));
+            if let Ok(item) = T::from_tlv(&data.data) {
+                into.extend(map(&item));
             }
-        } else if let Ok(list) = TLVArray::<ThreadMetricsStruct>::from_tlv(&data.data) {
-            *into = Some(
-                list.iter()
-                    .filter_map(|item| thread_metric(&item.ok()?))
-                    .collect(),
-            );
+        } else if let Ok(list) = TLVArray::<T>::from_tlv(&data.data) {
+            *into = list.iter().filter_map(|item| map(&item.ok()?)).collect();
         }
     }
+
+    seen
 }
 
 fn thread_metric(item: &ThreadMetricsStruct<'_>) -> Option<ThreadMetric> {

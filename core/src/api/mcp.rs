@@ -222,6 +222,27 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
             }),
         ),
         tool(
+            "thread_mesh",
+            "The Thread mesh as our Thread devices see it: the Thread networks \
+             (our devices on each, their border routers), every node their \
+             neighbour and route tables show (ours by name, border routers by \
+             model, Matter nodes of other fabrics), the links between them with \
+             the link quality (0-3) and signal each way, each child's parent, how \
+             our routers reach the routers no link is known to (next hop, path \
+             cost), and the findings. Reads each Thread device in turn: takes a few seconds.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "thread_findings",
+            "What is wrong with the Thread mesh, in plain words: competing or \
+             split networks, weak or one-way links, routers some devices depend \
+             on, a single border router, devices that keep changing parent or \
+             losing the network, a Thread channel on top of busy Wi-Fi, default \
+             credentials, no route from this machine to the Thread network. \
+             Same reading as thread_mesh, without the graph.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
             "retrieve_logs",
             "Retrieve a diagnostic log from a listed device. Returns the log \
              text, or its size if it is binary.",
@@ -505,7 +526,37 @@ pub(crate) async fn tools_call<D: Dispatch>(
         call(dispatch, request).await?
     };
 
+    if let ("thread_findings", wire::Response::ThreadMesh { mesh }) = (name, &response) {
+        return Ok(text_result(compact(findings_only(mesh)).to_string()));
+    }
+
     Ok(tool_result(&response))
+}
+
+/// The findings of `mesh`, with its networks and the devices not read.
+fn findings_only(mesh: &api::ThreadMesh) -> Value {
+    let mut value = json!({
+        "networks": mesh.networks,
+        "findings": mesh.findings,
+        "unread": mesh.unread,
+    });
+    for (net, v) in mesh.networks.iter().zip(entries(&mut value, "networks")) {
+        v["xpan"] = json!(hex64(net.extended_pan_id));
+    }
+
+    value
+}
+
+fn text_result(text: String) -> Value {
+    json!({
+        "content": [ { "type": "text", "text": text } ],
+        "isError": false
+    })
+}
+
+/// 64 bits as 16 hex digits, as Thread tools show addresses and PAN IDs.
+fn hex64(value: u64) -> String {
+    format!("{value:016X}")
 }
 
 /// Run one request through `dispatch`.
@@ -586,6 +637,7 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
         "read_network" => wire::Request::ReadNetwork {
             node_id: arg_node(args)?,
         },
+        "thread_mesh" | "thread_findings" => wire::Request::ReadThreadMesh,
         "add_network" => wire::Request::ChangeNetwork {
             node_id: arg_node(args)?,
             endpoint: arg_endpoint(args)?,
@@ -825,6 +877,42 @@ fn labelled(response: &wire::Response) -> Value {
                         .map(|b| format!("{b:02X}"))
                         .collect::<String>());
                 }
+            }
+        }
+        wire::Response::ThreadMesh { mesh } => {
+            let label = |ext: u64| {
+                mesh.nodes
+                    .iter()
+                    .find(|node| node.ext_address == ext)
+                    .map(|node| node.label.clone())
+            };
+            for (node, v) in mesh.nodes.iter().zip(entries(&mut value["mesh"], "nodes")) {
+                v["ext"] = json!(hex64(node.ext_address));
+                if let Some(parent) = node.parent {
+                    v["parent_label"] = json!(label(parent));
+                }
+            }
+            for (link, v) in mesh.links.iter().zip(entries(&mut value["mesh"], "links")) {
+                v["a_label"] = json!(label(link.a));
+                v["b_label"] = json!(label(link.b));
+            }
+            for (route, v) in mesh
+                .routes
+                .iter()
+                .zip(entries(&mut value["mesh"], "routes"))
+            {
+                v["from_label"] = json!(label(route.from));
+                v["to_label"] = json!(label(route.to));
+                if let Some(via) = route.via {
+                    v["via_label"] = json!(label(via));
+                }
+            }
+            for (net, v) in mesh
+                .networks
+                .iter()
+                .zip(entries(&mut value["mesh"], "networks"))
+            {
+                v["xpan"] = json!(hex64(net.extended_pan_id));
             }
         }
         wire::Response::Peek { health, .. } => {

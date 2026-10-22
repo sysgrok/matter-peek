@@ -149,6 +149,9 @@ pub enum Request {
     ChatStop { chat_id: String },
     /// Delete chat `chat_id`. Answered with [`Response::Chats`].
     ChatDelete { chat_id: String },
+    /// See `MatterPeek::read_thread_mesh`. Answered with
+    /// [`Response::ThreadMesh`].
+    ReadThreadMesh,
     /// See `MatterPeek::assistant`. Answered with [`Response::Assistant`].
     Assistant,
     /// See `MatterPeek::set_assistant`. Answered with [`Response::Assistant`].
@@ -242,6 +245,9 @@ pub enum Response {
     },
     Chat {
         chat: Box<ChatView>,
+    },
+    ThreadMesh {
+        mesh: Box<ThreadMesh>,
     },
     /// The assistant's model; `None`: none is set.
     Assistant {

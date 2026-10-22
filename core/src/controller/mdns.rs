@@ -16,6 +16,8 @@
 use core::future::Future;
 
 use alloc::string::String;
+#[cfg(any(feature = "mdns-avahi", test))]
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use rs_matter::crypto::Crypto;
@@ -23,6 +25,8 @@ use rs_matter::error::Error;
 use rs_matter::transport::network::mdns::builtin::{BuiltinMdns, Host};
 use rs_matter::transport::network::{Ipv4Addr, NetworkReceive, NetworkSend};
 use rs_matter::Matter;
+
+use crate::api::BorderRouter;
 
 /// An mDNS backend for the controller's stack. It carries what it needs (a
 /// D-Bus connection, sockets, …). Only one may run against a stack: two would
@@ -231,17 +235,36 @@ impl Mdns for NoMdns {
     }
 }
 
-/// The Thread networks the border routers on the local network advertise
-/// (MeshCoP, `_meshcop._udp`): their extended PAN IDs and names. Looks until
-/// all of `wanted` are found, the daemon has nothing more, or
-/// [`MESHCOP_WINDOW`] has passed. Avahi only; none with the other backends.
-pub(crate) async fn thread_networks(wanted: &[u64]) -> Vec<(u64, String)> {
+/// The Thread border routers on the local network (MeshCoP, `_meshcop._udp`).
+/// Looks until every extended PAN ID of `wanted` (if any) is found, the daemon
+/// has nothing more, or [`BROWSE_WINDOW`] has passed. Avahi only; none with
+/// the other backends.
+pub(crate) async fn border_routers(wanted: &[u64]) -> Vec<BorderRouter> {
     #[cfg(feature = "mdns-avahi")]
-    match avahi_meshcop(wanted).await {
-        Ok(found) => found,
-        Err(e) => {
-            log::debug!("mdns: no Thread network names from Avahi: {e}");
-            Vec::new()
+    {
+        let done = |found: &[Resolved]| {
+            !wanted.is_empty()
+                && wanted.iter().all(|xpan| {
+                    found
+                        .iter()
+                        .any(|r| border_router(r).extended_pan_id == Some(*xpan))
+                })
+        };
+
+        match avahi_browse("_meshcop._udp", done).await {
+            Ok(found) => {
+                let mut routers: Vec<BorderRouter> = Vec::new();
+                for router in found.iter().map(border_router) {
+                    if !routers.iter().any(|known| known.name == router.name) {
+                        routers.push(router);
+                    }
+                }
+                routers
+            }
+            Err(e) => {
+                log::debug!("mdns: no border routers from Avahi: {e}");
+                Vec::new()
+            }
         }
     }
 
@@ -252,12 +275,66 @@ pub(crate) async fn thread_networks(wanted: &[u64]) -> Vec<(u64, String)> {
     }
 }
 
-/// How long [`thread_networks`] looks at most.
-#[cfg(feature = "mdns-avahi")]
-const MESHCOP_WINDOW: embassy_time::Duration = embassy_time::Duration::from_secs(2);
+/// The Thread networks of [`border_routers`]: their extended PAN IDs and
+/// names.
+pub(crate) async fn thread_networks(wanted: &[u64]) -> Vec<(u64, String)> {
+    border_routers(wanted)
+        .await
+        .into_iter()
+        .filter_map(|router| Some((router.extended_pan_id?, router.network_name?)))
+        .collect()
+}
 
+/// A Matter node on the local network, of any fabric, on Thread: its host
+/// name is its Thread extended address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MatterHost {
+    pub compressed_fabric_id: u64,
+    pub node_id: u64,
+    pub ext_address: u64,
+}
+
+/// The Matter nodes on Thread the local network advertises
+/// (`_matter._tcp`), looking for [`BROWSE_WINDOW`] at most. Avahi only.
+pub(crate) async fn matter_thread_hosts() -> Vec<MatterHost> {
+    #[cfg(feature = "mdns-avahi")]
+    match avahi_browse("_matter._tcp", |_| false).await {
+        Ok(found) => found.iter().filter_map(matter_host).collect(),
+        Err(e) => {
+            log::debug!("mdns: no Matter hosts from Avahi: {e}");
+            Vec::new()
+        }
+    }
+
+    #[cfg(not(feature = "mdns-avahi"))]
+    Vec::new()
+}
+
+/// How long a browse looks at most.
 #[cfg(feature = "mdns-avahi")]
-async fn avahi_meshcop(wanted: &[u64]) -> rs_matter::utils::zbus::Result<Vec<(u64, String)>> {
+const BROWSE_WINDOW: embassy_time::Duration = embassy_time::Duration::from_secs(2);
+
+/// How long a browse looks at least, though the daemon has nothing more: on a
+/// cold cache, it says so before slower responders have answered.
+#[cfg(feature = "mdns-avahi")]
+const BROWSE_MIN: embassy_time::Duration = embassy_time::Duration::from_millis(1500);
+
+/// A service instance, resolved.
+#[cfg(any(feature = "mdns-avahi", test))]
+struct Resolved {
+    name: String,
+    host: String,
+    address: String,
+    txt: Vec<Vec<u8>>,
+}
+
+/// The instances of `service_type`, resolved, until `done` says so with
+/// those found, the daemon has nothing more, or [`BROWSE_WINDOW`] has passed.
+#[cfg(feature = "mdns-avahi")]
+async fn avahi_browse(
+    service_type: &str,
+    done: impl Fn(&[Resolved]) -> bool,
+) -> rs_matter::utils::zbus::Result<Vec<Resolved>> {
     use embassy_futures::select::{select, select3, Either, Either3};
     use embassy_time::{Instant, Timer};
     use futures_util::StreamExt;
@@ -270,7 +347,7 @@ async fn avahi_meshcop(wanted: &[u64]) -> rs_matter::utils::zbus::Result<Vec<(u6
     let connection = rs_matter::utils::zbus::Connection::system().await?;
     let avahi = Server2Proxy::new(&connection).await?;
     let path = avahi
-        .service_browser_prepare(IF_UNSPEC, PROTO_UNSPEC, "_meshcop._udp", "", 0)
+        .service_browser_prepare(IF_UNSPEC, PROTO_UNSPEC, service_type, "", 0)
         .await?;
     let browser = ServiceBrowserProxy::builder(&connection)
         .path(path)?
@@ -280,16 +357,26 @@ async fn avahi_meshcop(wanted: &[u64]) -> rs_matter::utils::zbus::Result<Vec<(u6
     let mut all_for_now = browser.receive_all_for_now().await?;
     browser.start().await?;
 
-    let deadline = Instant::now() + MESHCOP_WINDOW;
+    let started = Instant::now();
+    let deadline = started + BROWSE_WINDOW;
     let mut found = Vec::new();
+    let mut nothing_more = false;
 
-    while !wanted
-        .iter()
-        .all(|xpan| found.iter().any(|(seen, _)| seen == xpan))
-    {
-        let item = match select3(items.next(), all_for_now.next(), Timer::at(deadline)).await {
-            Either3::First(Some(item)) => item,
-            _ => break,
+    while !done(&found) {
+        let item = if nothing_more {
+            match select(items.next(), Timer::at(started + BROWSE_MIN)).await {
+                Either::First(Some(item)) => item,
+                _ => break,
+            }
+        } else {
+            match select3(items.next(), all_for_now.next(), Timer::at(deadline)).await {
+                Either3::First(Some(item)) => item,
+                Either3::Second(Some(_)) if Instant::now() < started + BROWSE_MIN => {
+                    nothing_more = true;
+                    continue;
+                }
+                _ => break,
+            }
         };
         let Ok(args) = item.args() else { continue };
 
@@ -302,16 +389,15 @@ async fn avahi_meshcop(wanted: &[u64]) -> rs_matter::utils::zbus::Result<Vec<(u6
             PROTO_UNSPEC,
             0,
         );
-        let resolved = match select(resolve, Timer::at(deadline)).await {
-            Either::First(Ok(resolved)) => resolved,
+        match select(resolve, Timer::at(deadline)).await {
+            Either::First(Ok(resolved)) => found.push(Resolved {
+                name: resolved.2,
+                host: resolved.5,
+                address: resolved.7,
+                txt: resolved.9,
+            }),
             Either::First(Err(_)) => continue,
             Either::Second(()) => break,
-        };
-
-        if let Some(network) = meshcop_network(&resolved.9) {
-            if !found.iter().any(|(xpan, _)| *xpan == network.0) {
-                found.push(network);
-            }
         }
     }
 
@@ -320,22 +406,72 @@ async fn avahi_meshcop(wanted: &[u64]) -> rs_matter::utils::zbus::Result<Vec<(u6
     Ok(found)
 }
 
-/// The extended PAN ID (`xp`, 8 bytes) and name (`nn`) in a MeshCoP TXT
-/// record.
+/// A border router, as its MeshCoP TXT record describes it.
 #[cfg(any(feature = "mdns-avahi", test))]
-fn meshcop_network(txt: &[Vec<u8>]) -> Option<(u64, String)> {
+fn border_router(resolved: &Resolved) -> BorderRouter {
     let value = |key: &[u8]| {
-        txt.iter().find_map(|entry| {
+        resolved.txt.iter().find_map(|entry| {
             entry
                 .strip_prefix(key)
                 .and_then(|rest| rest.strip_prefix(b"="))
         })
     };
+    let text = |key: &[u8]| {
+        value(key)
+            .and_then(|v| core::str::from_utf8(v).ok())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let u64_of = |key: &[u8]| Some(u64::from_be_bytes(value(key)?.try_into().ok()?));
 
-    let xpan = u64::from_be_bytes(value(b"xp")?.try_into().ok()?);
-    let name = core::str::from_utf8(value(b"nn")?).ok()?.trim();
+    BorderRouter {
+        name: resolved.name.clone(),
+        vendor: text(b"vn"),
+        model: text(b"mn"),
+        network_name: text(b"nn"),
+        extended_pan_id: u64_of(b"xp"),
+        ext_address: u64_of(b"xa"),
+        partition_id: value(b"pt")
+            .and_then(|v| v.try_into().ok())
+            .map(u32::from_be_bytes),
+        thread_version: text(b"tv"),
+        omr_prefix: value(b"omr").and_then(omr_prefix),
+        address: Some(resolved.address.clone()).filter(|a| !a.is_empty()),
+    }
+}
 
-    (!name.is_empty()).then(|| (xpan, name.into()))
+/// An OMR prefix as MeshCoP gives it (its length in bits, then its bytes) in
+/// the usual notation.
+#[cfg(any(feature = "mdns-avahi", test))]
+fn omr_prefix(value: &[u8]) -> Option<String> {
+    let (&len, bytes) = value.split_first()?;
+    if len > 128 || bytes.len() < (len as usize).div_ceil(8) {
+        return None;
+    }
+
+    let mut octets = [0u8; 16];
+    octets[..bytes.len().min(16)].copy_from_slice(&bytes[..bytes.len().min(16)]);
+
+    Some(alloc::format!(
+        "{}/{len}",
+        core::net::Ipv6Addr::from(octets)
+    ))
+}
+
+/// A Matter node on Thread, as `_matter._tcp` names it: instance
+/// `<compressed fabric ID>-<node ID>` on host `<extended address>.local`.
+#[cfg(any(feature = "mdns-avahi", test))]
+fn matter_host(resolved: &Resolved) -> Option<MatterHost> {
+    let hex = |text: &str| (text.len() == 16).then(|| u64::from_str_radix(text, 16).ok())?;
+
+    let (fabric, node) = resolved.name.split_once('-')?;
+    let host = resolved.host.split('.').next()?;
+
+    Some(MatterHost {
+        compressed_fabric_id: hex(fabric)?,
+        node_id: hex(node)?,
+        ext_address: hex(host)?,
+    })
 }
 
 /// A connection to the system D-Bus.
@@ -395,28 +531,81 @@ mod tests {
     use super::*;
 
     #[test]
-    fn meshcop_txt_names_a_thread_network() {
+    fn meshcop_txt_describes_a_border_router() {
         // As a Google Nest Hub advertises it.
-        let txt = vec![
-            b"mn=Google Nest Hub".to_vec(),
-            b"nn=NEST-PAN-0FD8".to_vec(),
-            [
-                b"xp=".as_slice(),
-                &[0xB5, 0x66, 0x14, 0x7D, 0x38, 0xE3, 0x84, 0x20],
-            ]
-            .concat(),
-            b"tv=1.4.0".to_vec(),
-        ];
-        assert_eq!(
-            meshcop_network(&txt),
-            Some((0xB566_147D_38E3_8420, "NEST-PAN-0FD8".into()))
-        );
+        let resolved = Resolved {
+            name: "Google Inc. Google Nest Hub #9206".into(),
+            host: "fuchsia-1c53-f9d6-9dfe.local".into(),
+            address: "192.168.10.170".into(),
+            txt: vec![
+                b"mn=Google Nest Hub".to_vec(),
+                b"vn=Google Inc.".to_vec(),
+                b"nn=NEST-PAN-0FD8".to_vec(),
+                [
+                    b"xp=".as_slice(),
+                    &[0xB5, 0x66, 0x14, 0x7D, 0x38, 0xE3, 0x84, 0x20],
+                ]
+                .concat(),
+                [
+                    b"xa=".as_slice(),
+                    &[0x6A, 0x94, 0x70, 0x54, 0x00, 0x26, 0x92, 0x06],
+                ]
+                .concat(),
+                [b"pt=".as_slice(), &[0x24, 0x98, 0xFA, 0x62]].concat(),
+                [
+                    b"omr=".as_slice(),
+                    &[0x40, 0xFD, 0xAC, 0xBC, 0xDF, 0xA3, 0xC9, 0x00, 0x01],
+                ]
+                .concat(),
+                b"tv=1.4.0".to_vec(),
+            ],
+        };
 
-        // A short `xp`, or no name: nothing.
+        let router = border_router(&resolved);
+        assert_eq!(router.vendor.as_deref(), Some("Google Inc."));
+        assert_eq!(router.model.as_deref(), Some("Google Nest Hub"));
+        assert_eq!(router.network_name.as_deref(), Some("NEST-PAN-0FD8"));
+        assert_eq!(router.extended_pan_id, Some(0xB566_147D_38E3_8420));
+        assert_eq!(router.ext_address, Some(0x6A94_7054_0026_9206));
+        assert_eq!(router.partition_id, Some(0x2498_FA62));
+        assert_eq!(router.omr_prefix.as_deref(), Some("fdac:bcdf:a3c9:1::/64"));
+        assert_eq!(router.thread_version.as_deref(), Some("1.4.0"));
+
+        // A short `xp`: no extended PAN ID.
+        let short = Resolved {
+            txt: vec![b"xp=12".to_vec(), b"nn=X".to_vec()],
+            ..resolved
+        };
+        assert_eq!(border_router(&short).extended_pan_id, None);
+    }
+
+    #[test]
+    fn matter_hosts_on_thread_by_their_host_name() {
+        let resolved = |name: &str, host: &str| Resolved {
+            name: name.into(),
+            host: host.into(),
+            address: String::new(),
+            txt: Vec::new(),
+        };
+
         assert_eq!(
-            meshcop_network(&[b"xp=12".to_vec(), b"nn=X".to_vec()]),
+            matter_host(&resolved(
+                "EADDBAEB88C41C26-000000000001B685",
+                "EA8702656CD63E20.local"
+            )),
+            Some(MatterHost {
+                compressed_fabric_id: 0xEADD_BAEB_88C4_1C26,
+                node_id: 0x1B685,
+                ext_address: 0xEA87_0265_6CD6_3E20,
+            })
+        );
+        // On Wi-Fi: a 6-byte MAC.
+        assert_eq!(
+            matter_host(&resolved(
+                "EADDBAEB88C41C26-000000000001B67B",
+                "A0B1C2D3E4F5.local"
+            )),
             None
         );
-        assert_eq!(meshcop_network(&txt[2..3]), None);
     }
 }

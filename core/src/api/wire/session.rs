@@ -176,6 +176,13 @@ impl WireSession {
                     .await
                     .map(|()| Response::Ok)
             }
+            Request::ReadThreadMesh => {
+                peek.read_thread_mesh()
+                    .await
+                    .map(|mesh| Response::ThreadMesh {
+                        mesh: Box::new(mesh),
+                    })
+            }
             Request::Assistant => peek.assistant().await.map(assistant),
             Request::SetAssistant { update } => peek
                 .set_assistant(update)

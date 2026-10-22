@@ -553,6 +553,9 @@ pub struct ThreadDiag {
     pub neighbors: Vec<ThreadNeighbor>,
     /// How many routes its route table holds.
     pub route_count: Option<u16>,
+    /// Its route table: on a router, the other routers of its partition.
+    #[serde(default)]
+    pub routes: Vec<ThreadRoute>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -587,6 +590,29 @@ pub struct ThreadNeighbor {
     pub is_child: bool,
     pub rx_on_when_idle: bool,
     pub full_thread_device: bool,
+}
+
+/// A route of a Thread router, to another router of its partition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ThreadRoute {
+    pub ext_address: u64,
+    pub rloc16: u16,
+    pub router_id: u8,
+    /// The router ID of the next hop on the way there.
+    pub next_hop: u8,
+    pub path_cost: u8,
+    /// The quality of the link from that router, as this one hears it.
+    pub lqi_in: u8,
+    /// The quality of the link to that router, as that one hears it.
+    pub lqi_out: u8,
+    /// Seconds since last heard.
+    pub age_secs: u8,
+    /// Whether the router ID is allocated: entries that are not stand for no
+    /// router.
+    pub allocated: bool,
+    /// Whether this router links to that one directly.
+    pub link_established: bool,
 }
 
 /// Ethernet Network Diagnostics.
@@ -660,4 +686,192 @@ impl fmt::Debug for KeyChange {
             Self::Remove => f.write_str("Remove"),
         }
     }
+}
+
+/// A Thread border router on the local network, as it advertises itself
+/// (MeshCoP, `_meshcop._udp`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct BorderRouter {
+    /// As it names itself, e.g. `Google Inc. Google Nest Hub #9206`.
+    pub name: String,
+    pub vendor: Option<String>,
+    pub model: Option<String>,
+    pub network_name: Option<String>,
+    pub extended_pan_id: Option<u64>,
+    /// Its Thread extended address.
+    pub ext_address: Option<u64>,
+    pub partition_id: Option<u32>,
+    pub thread_version: Option<String>,
+    /// Its off-mesh routable prefix, through which the LAN reaches the
+    /// Thread devices, e.g. `fdac:bcdf:a3c9:1::/64`.
+    pub omr_prefix: Option<String>,
+    /// Its address on the LAN.
+    pub address: Option<String>,
+}
+
+/// The Thread mesh as our devices see it: their networks, the nodes and links
+/// their tables show, the border routers on the LAN, and what is wrong.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ThreadMesh {
+    pub networks: Vec<MeshNetwork>,
+    /// Our devices first, then the border routers, then the rest.
+    pub nodes: Vec<MeshNode>,
+    pub links: Vec<MeshLink>,
+    /// Where routers no link is known to sit: how our routers reach them.
+    #[serde(default)]
+    pub routes: Vec<MeshRoute>,
+    pub border_routers: Vec<BorderRouter>,
+    /// The warnings first.
+    pub findings: Vec<MeshFinding>,
+    /// Our Thread devices that were not read, and why.
+    pub unread: Vec<UnreadDevice>,
+}
+
+/// A Thread network: our devices on it, and its border routers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MeshNetwork {
+    pub extended_pan_id: u64,
+    pub name: Option<String>,
+    pub channel: Option<u16>,
+    pub pan_id: Option<u16>,
+    /// The partitions its nodes say they are in: more than one is a split
+    /// network.
+    pub partitions: Vec<u32>,
+    /// Our devices on it, by node ID.
+    pub devices: Vec<u64>,
+    /// Its border routers, by name.
+    pub border_routers: Vec<String>,
+}
+
+/// A node of the mesh.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MeshNode {
+    pub ext_address: u64,
+    pub label: String,
+    pub kind: MeshNodeKind,
+    pub role: Option<ThreadRole>,
+    pub rloc16: Option<u16>,
+    pub extended_pan_id: Option<u64>,
+    pub partition_id: Option<u32>,
+    /// A child's parent, by extended address.
+    pub parent: Option<u64>,
+}
+
+/// What a node of the mesh is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MeshNodeKind {
+    /// A device on our fabric.
+    Device {
+        node_id: u64,
+    },
+    BorderRouter,
+    /// A Matter node of another fabric.
+    OtherFabric {
+        node_id: u64,
+        compressed_fabric_id: u64,
+    },
+    /// Our devices' tables show it, but nothing names it.
+    Unknown,
+}
+
+/// A link between two nodes, as each hears the other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MeshLink {
+    pub a: u64,
+    pub b: u64,
+    /// Whether one is the other's parent; else, two routers.
+    pub parent_child: bool,
+    pub a_hears_b: Option<LinkSignal>,
+    pub b_hears_a: Option<LinkSignal>,
+}
+
+/// How one of our routers reaches a router it has no link to: through
+/// another router first, at a cost. Not a link: the routers in between are
+/// unknown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MeshRoute {
+    /// Our router.
+    pub from: u64,
+    /// The router it reaches.
+    pub to: u64,
+    /// The router it goes through first, where its route table names it.
+    pub via: Option<u64>,
+    pub path_cost: u8,
+}
+
+/// How well a node hears another.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct LinkSignal {
+    /// Link quality, from 0 (none) to 3 (good).
+    pub quality: Option<u8>,
+    /// Average signal strength, dBm.
+    pub rssi: Option<i8>,
+}
+
+/// Something wrong with the mesh, or worth knowing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MeshFinding {
+    pub severity: FindingSeverity,
+    pub kind: FindingKind,
+    /// What it is, and what to do about it, in plain words.
+    pub text: String,
+    /// The nodes it is about, by extended address.
+    pub nodes: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum FindingSeverity {
+    Warning,
+    Info,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum FindingKind {
+    /// Several Thread networks on the LAN.
+    CompetingNetworks,
+    /// A network split into partitions.
+    PartitionSplit,
+    WeakLink,
+    /// A node hears another that does not hear it.
+    OneWayLink,
+    /// A router some of our devices reach the border routers only through.
+    CriticalRouter,
+    SingleBorderRouter,
+    /// No border router on the LAN for a network of our devices.
+    NoBorderRouter,
+    /// A device that keeps changing its parent.
+    ParentChurn,
+    /// A device that keeps losing the network.
+    Detaches,
+    /// A Thread channel on top of a Wi-Fi channel in use.
+    ChannelOverlap,
+    /// A network with OpenThread's well-known default credentials.
+    DefaultCredentials,
+    /// No route from this machine to a network's prefix.
+    NoHostRoute,
+    /// Devices that were not read.
+    Unread,
+}
+
+/// One of our devices that was not read for the mesh, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct UnreadDevice {
+    pub node_id: u64,
+    pub title: String,
+    pub reason: String,
 }

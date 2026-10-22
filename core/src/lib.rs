@@ -43,6 +43,7 @@ mod controller {
     pub mod logs;
     pub mod matter;
     pub mod mdns;
+    pub mod mesh;
     pub mod model;
     pub mod netconfig;
     pub mod network;

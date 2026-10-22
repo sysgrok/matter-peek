@@ -175,3 +175,91 @@ pub(crate) fn read_qr_image(image: &[u8]) -> Result<String, PeekError> {
 
     Ok(text.to_string())
 }
+
+/// Whether this host has a route to `prefix` (e.g. `fdac:bcdf:a3c9:1::/64`)
+/// other than its default route; `None` where it cannot tell.
+pub(crate) fn routes_to(prefix: &str) -> Option<bool> {
+    let (address, len) = prefix.split_once('/')?;
+    let address: std::net::Ipv6Addr = address.parse().ok()?;
+    let len: u32 = len.parse().ok()?;
+
+    #[cfg(target_os = "linux")]
+    {
+        let routes = std::fs::read_to_string("/proc/net/ipv6_route").ok()?;
+        Some(
+            routes
+                .lines()
+                .filter_map(ipv6_route)
+                .any(|(dest, dest_len)| covers(dest, dest_len, address, len)),
+        )
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (address, len);
+        None
+    }
+}
+
+/// A route of `/proc/net/ipv6_route` that leads somewhere: its destination
+/// and prefix length.
+#[cfg(target_os = "linux")]
+fn ipv6_route(line: &str) -> Option<(std::net::Ipv6Addr, u32)> {
+    /// A route that rejects what it matches.
+    const RTF_REJECT: u32 = 0x0200;
+
+    let fields: alloc::vec::Vec<&str> = line.split_whitespace().collect();
+    let dest = u128::from_str_radix(fields.first()?, 16).ok()?;
+    let dest_len = u32::from_str_radix(fields.get(1)?, 16).ok()?;
+    let flags = u32::from_str_radix(fields.get(8)?, 16).ok()?;
+
+    (flags & RTF_REJECT == 0).then_some((std::net::Ipv6Addr::from(dest), dest_len))
+}
+
+/// Whether the route to `dest/dest_len` covers `address/len`; a default
+/// route (length 0) leads to the internet, not to a Thread network.
+fn covers(dest: std::net::Ipv6Addr, dest_len: u32, address: std::net::Ipv6Addr, len: u32) -> bool {
+    if dest_len == 0 || dest_len > len || dest_len > 128 {
+        return false;
+    }
+
+    let mask = u128::MAX << (128 - dest_len);
+    u128::from(dest) & mask == u128::from(address) & mask
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routes_cover_prefixes() {
+        let thread: std::net::Ipv6Addr = "fdac:bcdf:a3c9:1::".parse().unwrap();
+
+        assert!(covers(thread, 64, thread, 64));
+        assert!(covers("fdac::".parse().unwrap(), 16, thread, 64));
+        // The default route does not count, nor a route narrower than the prefix.
+        assert!(!covers(std::net::Ipv6Addr::UNSPECIFIED, 0, thread, 64));
+        assert!(!covers(thread, 80, thread, 64));
+        assert!(!covers(
+            "fdac:bcdf:a3c9:2::".parse().unwrap(),
+            64,
+            thread,
+            64
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_routes_parse() {
+        let line = "fdacbcdfa3c900010000000000000000 40 00000000000000000000000000000000 00 \
+                    fe80000000000000b6feb90a7b4e64a8 00000258 0000000d 00000000 00000003  wlp44s0";
+        assert_eq!(
+            ipv6_route(line),
+            Some(("fdac:bcdf:a3c9:1::".parse().unwrap(), 64))
+        );
+
+        let reject = "00000000000000000000000000000000 00 00000000000000000000000000000000 00 \
+                      00000000000000000000000000000000 ffffffff 00000001 00000000 00200200       lo";
+        assert_eq!(ipv6_route(reject), None);
+    }
+}
