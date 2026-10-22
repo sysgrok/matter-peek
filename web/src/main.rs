@@ -1525,8 +1525,8 @@ impl App {
         true
     }
 
-    /// The top bar: the brand and the pages, which fold into a drawer on
-    /// phones.
+    /// The top bar: the brand, the pages and, apart from them, the assistant;
+    /// all fold into a drawer on phones.
     fn view_app_bar(&self, link: &html::Scope<Self>) -> Html {
         let pages = [
             (
@@ -1535,7 +1535,6 @@ impl App {
                 Icon::Devices,
                 Some(self.stored.len()),
             ),
-            (Tab::Assistant, "Assistant", Icon::Sparkles, None),
             (Tab::Commission, "Commission", Icon::Commission, None),
             (
                 Tab::Updates,
@@ -1557,6 +1556,8 @@ impl App {
                     </a>
                 }
             };
+        let assistant = (self.tab == Tab::Assistant).then_some("is-active");
+        let open_assistant = link.callback(|_| Msg::SelectTab(Tab::Assistant));
 
         html! {
             <>
@@ -1572,6 +1573,11 @@ impl App {
                         </a>
                         <nav class="appbar-nav">
                             { for pages.into_iter().map(|page| link_to("appbar-link", page)) }
+                            <a class={classes!("appbar-link", "is-assistant", assistant)}
+                                onclick={open_assistant.clone()}>
+                                <span class="assistant-mark">{ icon(Icon::Sparkles, 13) }</span>
+                                <span>{ "Assistant" }</span>
+                            </a>
                         </nav>
                     </div>
                 </header>
@@ -1589,6 +1595,16 @@ impl App {
                     <nav class="drawer-nav">
                         { for pages.into_iter().map(|page| link_to("drawer-link", page)) }
                     </nav>
+                    <div class="drawer-foot">
+                        <a class={classes!("drawer-assistant", assistant)} onclick={open_assistant}>
+                            <span class="assistant-mark is-large">{ icon(Icon::Sparkles, 18) }</span>
+                            <span class="drawer-assistant-text">
+                                <span class="drawer-assistant-title">{ "Assistant" }</span>
+                                <span class="drawer-assistant-sub">{ "Ask about your devices" }</span>
+                            </span>
+                            <span class="drawer-assistant-go">{ icon(Icon::ChevronRight, 18) }</span>
+                        </a>
+                    </div>
                 </aside>
             </>
         }
