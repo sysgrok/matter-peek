@@ -51,7 +51,7 @@ controller serves the CLI, the MCP server and mobile apps.
 
 ```
   Web UI (Yew/Wasm) ──── WebSocket/JSON ───┐
-  CLI (+ mcp) --server ─ WebSocket/JSON ───┤      matter-peek-server
+  CLI (+ mcp) --server ─ WebSocket/JSON ───┤      matter-peek serve
                                            │ ──►  (WireSession per connection)
                                            │              │
   CLI (+ mcp), no --server ─ in process ──┼──► WireSession┤
@@ -109,7 +109,7 @@ The same methods serve every binding:
   reply is asked once more for its answer. Its model (`ModelConfig`: API
   address, model, key, think) is kept in the store; the API shows it as
   `AssistantInfo`, without the key. The assistant runs where the store is,
-  so the key never travels: the server's chat hub (`server/src/chat.rs`),
+  so the key never travels: the server's chat hub (`matter-peek/src/server/chats.rs`),
   which `client::connect_in_process` also runs for the CLI on its own. The
   wire's `Chat…` requests list, open, ask, approve, stop and delete its chats,
   kept as JSON in the data directory, with what the model does as
@@ -157,8 +157,8 @@ of it is private to `core`.
 
 | Front-end | Binary | Reaches the controller |
 |---|---|---|
-| Server | `matter-peek-server` | starts one; serves `ws://127.0.0.1:8087` |
-| Web UI (Yew/Wasm, Bulma) | `trunk serve` | WebSocket |
+| Server | `matter-peek serve` | starts one; serves the API (`ws://127.0.0.1:8087/ws`) and the web UI (`http://127.0.0.1:8087/`) on one port |
+| Web UI (Yew/Wasm, Bulma) | taken into `matter-peek` at build time (`trunk serve` while working on it) | WebSocket, to the server that served it |
 | CLI | `matter-peek` | `--server <url>`, or a `WireSession` in process |
 | MCP server | `matter-peek mcp` | as the CLI (read-only unless `--allow-mutate`) |
 | Assistant (AI agent) | the server, or `matter-peek` without `--server` | runs where the store is, with the stored model (or `MATTER_PEEK_LLM_*`'s); the web UI and `matter-peek chat` ask it over the wire's `Chat…` requests |
@@ -169,6 +169,24 @@ of it is private to `core`.
 
 ## 4. Behavior worth knowing
 
+
+### One executable
+- `matter-peek` is the server (`serve`), the CLI, the MCP server and the
+  terminal chat. `serve` answers, on one port, a request to upgrade to
+  WebSocket with the API, and any other with a file of the web UI: it peeks
+  at the request's head, so the WebSocket handshake reads it whole.
+- `build.rs` takes the web UI's files (`MATTER_PEEK_WEB_DIST`, else
+  `../matter-peek-web/dist`) into the executable, each gzipped; they go out
+  as they are, with `Content-Encoding: gzip` (unpacked only for a client that
+  takes no gzip). Without them, `/` says how to add them. A release build
+  should take `trunk build --release`'s: the web crate's release profile
+  builds for size and goes through `wasm-opt -Oz` (2.9 MB of wasm down to
+  1.3 MB, 0.5 MB gzipped).
+- The web UI reaches the API on its own origin, at `/ws`; `trunk serve`
+  passes that on to the server (`Trunk.toml`).
+- It links no C library but ring's bit of C (rustls, for the assistant's
+  model over HTTPS, with its own root certificates), so it builds static
+  with musl.
 ### Devices and the fabric
 - One persistent controller fabric. Node IDs come from a persisted counter that
   every successful commissioning bumps; they are never reused.

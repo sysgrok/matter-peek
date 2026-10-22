@@ -1,13 +1,16 @@
-//! matter-peek — the command line: everything the web UI does, from a terminal.
+//! matter-peek — a Matter controller for diagnostics, in one executable.
 //!
-//! Every command goes through the matter-peek API: to a running
-//! `matter-peek-server` with `--server <ws-url>`, else to a controller started
-//! in this process (which needs the store to itself, so not while a server runs).
+//! `matter-peek serve` runs the server: the controller, its API over
+//! WebSocket and the web UI, on one port. Every other command goes through
+//! the API: to a running server with `--server <ws-url>`, else to a controller
+//! started in this process (which needs the store to itself, so not while a
+//! server runs): everything the web UI does, from a terminal.
 //! `matter-peek mcp` offers the API to AI agents, as MCP tools over stdio;
 //! `matter-peek chat` asks the assistant, whose model `matter-peek assistant`
 //! sets.
 //!
 //! ```text
+//! matter-peek serve [--listen 127.0.0.1:8087]
 //! matter-peek [--server ws://127.0.0.1:8087] [--json] <command> [args...]
 //! matter-peek --help
 //! ```
@@ -21,11 +24,15 @@ use base64::Engine as _;
 use clap::builder::BoolishValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::server::client::{self, Connection};
 use matter_peek_core::api::{self, display, wire};
-use matter_peek_server::client::{self, Connection};
 
 mod chat;
 mod mcp;
+mod server;
+
+/// Where `serve` listens by default, and where `--server` finds it.
+const DEFAULT_LISTEN: &str = "127.0.0.1:8087";
 
 /// How much of an OTA image goes in one upload request.
 const UPLOAD_CHUNK_LEN: usize = 256 * 1024;
@@ -182,6 +189,16 @@ enum Command {
     Thread {
         #[command(subcommand)]
         view: Option<ThreadView>,
+    },
+    /// Run the server: the controller, its API over WebSocket (at /ws) and the
+    /// web UI (at /), on one port, until stopped. The assistant's model is
+    /// the stored one, unless MATTER_PEEK_LLM_URL, MATTER_PEEK_LLM_MODEL and
+    /// MATTER_PEEK_LLM_KEY set one.
+    Serve {
+        /// The address to listen on. There is no authentication yet: whoever
+        /// reaches it controls the devices.
+        #[arg(long, default_value = DEFAULT_LISTEN, value_name = "ADDR")]
+        listen: String,
     },
     /// Offer the API to an AI agent, as MCP tools over stdio (the MCP stdio
     /// transport), until stdin closes. Without --server, holds the store while
@@ -411,15 +428,40 @@ fn main() -> ExitCode {
     // Logs go to stderr: stdout is the output, or the MCP stream; a chat
     // keeps to its conversation.
     let level = match cli.command {
-        Command::Mcp { .. } => "info",
+        Command::Serve { .. } | Command::Mcp { .. } => "info",
         Command::Chat { .. } => "error",
         _ => "warn",
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
 
-    match matter_peek_server::block_on(run(cli)) {
+    if let Command::Serve { listen } = &cli.command {
+        return serve(listen);
+    }
+
+    match server::block_on(run(cli)) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Run the server on `listen`, until stopped.
+fn serve(listen: &str) -> ExitCode {
+    let local = listen
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|addr| addr.ip().is_loopback());
+    if !local {
+        log::warn!(
+            "serve: listening on {listen}, beyond this machine, without authentication: \
+             whoever reaches it controls the devices"
+        );
+    }
+
+    match server::run(listen, server::llm::model_from_env()) {
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
@@ -768,7 +810,9 @@ async fn run(cli: Cli) -> io::Result<bool> {
             }
             Ok(response.is_some())
         }
-        Command::Mcp { .. } | Command::Chat { .. } => unreachable!("served above"),
+        Command::Serve { .. } | Command::Mcp { .. } | Command::Chat { .. } => {
+            unreachable!("served above")
+        }
     }
 }
 

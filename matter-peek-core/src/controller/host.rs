@@ -85,7 +85,7 @@ impl Store {
             Ok(()) => Ok(Self { dir, _lock: lock }),
             Err(TryLockError::WouldBlock) => Err(PeekError::failed(format!(
                 "the store at {} is in use by another matter-peek process; \
-                 if it is a matter-peek-server, connect to it instead",
+                 if it is a server (matter-peek serve), connect to it with --server",
                 dir.display()
             ))),
             Err(TryLockError::Error(e)) => {

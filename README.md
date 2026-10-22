@@ -21,20 +21,46 @@ a web UI, a command line, or an AI agent over MCP, all through one API.
 ## Layout
 
 ```
-core/    matter-peek-core — the API (`MatterPeek`, its types, wire messages and
-         MCP tools) and the controller behind it (wraps rs-matter); also the
-         UniFFI bindings
-server/  matter-peek-server — the API over WebSocket/JSON, its clients'
-         connection, and the web UI's assistant chats (binary: matter-peek-server)
-cli/     the command line, the MCP server for AI agents and the terminal chat
-         (binary: matter-peek)
-web/     matter-peek-web — Yew/Wasm web UI (WebSocket client; separate wasm crate)
+matter-peek-core/  the API (`MatterPeek`, its types, wire messages and MCP
+                   tools) and the controller behind it (wraps rs-matter); also
+                   the UniFFI bindings
+matter-peek/       the executable, `matter-peek`: the server (`serve`: the API
+                   over WebSocket/JSON and the web UI, on one port, and the
+                   assistant's chats), the command line, the MCP server for AI
+                   agents and the terminal chat
+matter-peek-web/   the Yew/Wasm web UI (a WebSocket client; a separate wasm
+                   crate, built with trunk and taken into `matter-peek`)
 ```
 
-Everything goes through the API. The web UI talks to a running
-`matter-peek-server`; the CLI (also as the MCP server) does too with `--server`,
-else it runs a controller in its own process. Only one process at a time can
-hold the store.
+Everything goes through the API. The web UI talks to the server that serves
+it; the CLI (also as the MCP server) does too with `--server`, else it runs a
+controller in its own process. Only one process at a time can hold the store.
+
+## One executable
+
+`matter-peek` is all of it: the server with the web UI (`matter-peek serve`),
+the command line, the MCP server and the terminal chat. Built with the web UI
+inside it, it is the only file to install:
+
+```sh
+# The web UI, small (size-optimized, through wasm-opt), for it to take in
+( cd matter-peek-web && trunk build --release )
+
+# The executable, with the web UI (gzipped) inside
+cargo build --release -p matter-peek
+
+# Static (musl): no shared libraries at all. ring's bit of C wants a C
+# compiler for the target: clang on x86_64, a cross gcc for a Raspberry Pi
+CC_x86_64_unknown_linux_musl=clang \
+  cargo build --release --target x86_64-unknown-linux-musl -p matter-peek
+CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc \
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc \
+  cargo build --release --target aarch64-unknown-linux-musl -p matter-peek
+```
+
+`cargo install --git https://github.com/sysgrok/matter-peek matter-peek` builds
+it too, without the web UI unless `MATTER_PEEK_WEB_DIST` points at a built
+one; crates.io has to wait for an rs-matter release with what it uses.
 
 ## Run
 
@@ -42,11 +68,16 @@ hold the store.
 # An accessory to try it on (here, rs-matter's system_tests with a crash log)
 ( cd ../rs-matter && cargo run -p rs-matter-tests --bin system_tests -- --crash_log /tmp/crash.log )
 
-# The server (default ws://127.0.0.1:8087)
-cargo run --bin matter-peek-server
+# The web UI, built for the server to serve (needs `trunk` + the wasm32 target
+# on nightly); without it, the server says how to add it
+( cd matter-peek-web && trunk build --release )
 
-# The web UI (needs `trunk` + the wasm32 target on nightly)
-( cd web && trunk serve )   # then open the printed http://… URL
+# The server: open http://127.0.0.1:8087/ (the API is at ws://127.0.0.1:8087/ws)
+cargo run --release --bin matter-peek -- serve [--listen 127.0.0.1:8087]
+
+# While working on the web UI: trunk rebuilds it on each change and passes its
+# API on to the server (open http://127.0.0.1:8080/)
+( cd matter-peek-web && trunk serve )
 
 # The CLI: through the server, or on its own while no server runs
 cargo run --bin matter-peek -- --server ws://127.0.0.1:8087 discover
@@ -70,7 +101,7 @@ clients); logs go to stderr. Each tool carries the MCP annotations
 or as its hex form (`"0x1B67B"`); a failed tool says why in plain words. Without
 `--server` it holds the store for as long as it runs (syncing the device list
 periodically, like the server), so to share the store with the web UI, run
-`matter-peek-server` and pass `--server`.
+`matter-peek serve` and pass `--server`.
 
 | Tools | Access |
 |-------|--------|
@@ -165,7 +196,7 @@ The assistant answers questions about the devices: its model looks into them
 with the same tools as MCP and answers in Markdown. Any model behind an
 OpenAI-compatible API will do: a local one (Ollama, LM Studio, vLLM) or a
 provider's (OpenAI, OpenRouter, …). It runs where the store is: in
-`matter-peek-server`, or in the CLI when no server runs (`core`'s
+`matter-peek serve`, or in the CLI when no server runs (`matter-peek-core`'s
 `api::agent`, so the mobile apps can have it too).
 
 Its model is kept in the store, with the API's key, which never leaves the side

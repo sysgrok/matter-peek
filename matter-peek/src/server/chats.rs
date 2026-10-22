@@ -2,7 +2,7 @@
 //! [`matter_peek_core::api::agent`]) run here against the controller and kept
 //! as JSON files in the data directory, and its model, kept in the
 //! controller's store (or set by the environment, see
-//! [`crate::llm::model_from_env`]). Its key never leaves this process.
+//! [`super::llm::model_from_env`]). Its key never leaves this process.
 //!
 //! What the assistant does goes, as [`Event::Chat`]s, to the connection that
 //! asked; its requests to run tools are answered by any connection
@@ -32,7 +32,7 @@ use matter_peek_core::api::wire::{
 };
 use matter_peek_core::api::{AssistantUpdate, FabricRef, MatterPeek};
 
-use crate::llm::Ureq;
+use super::llm::Ureq;
 
 /// How long the assistant waits for its request to run a tool to be answered;
 /// then it takes it as a no.

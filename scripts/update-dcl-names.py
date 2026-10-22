@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate core/src/api/display/dcl.rs: the vendor and product names of the
+"""Regenerate matter-peek-core/src/api/display/dcl.rs: the vendor and product names of the
 CSA Distributed Compliance Ledger (DCL), the registry of Matter vendors and
 certified products.
 
@@ -13,7 +13,7 @@ import unicodedata
 import urllib.request
 
 DCL = "https://on.dcl.csa-iot.org/dcl"
-OUT = pathlib.Path(__file__).resolve().parent.parent / "core/src/api/display/dcl.rs"
+OUT = pathlib.Path(__file__).resolve().parent.parent / "matter-peek-core/src/api/display/dcl.rs"
 
 
 def fetch(path, key):

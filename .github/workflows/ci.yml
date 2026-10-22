@@ -22,7 +22,7 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
-  # Native workspace (core / proto / rpc / cli / mcp), on stable. The default
+  # Native workspace (matter-peek-core, matter-peek), on stable. The default
   # `mdns-avahi` feature pulls rs-matter's `zbus` backend, which is pure-Rust
   # DBus — no system libs needed.
   workspace:
@@ -54,14 +54,14 @@ jobs:
         run: cargo test --workspace
 
   # The web UI is a separate wasm crate, excluded from the native workspace, and
-  # pinned to nightly + wasm32 via web/rust-toolchain.toml. Build it with trunk.
+  # pinned to nightly + wasm32 via matter-peek-web/rust-toolchain.toml. Build it with trunk.
   web:
     name: Web (wasm)
     runs-on: ubuntu-latest
 
     defaults:
       run:
-        working-directory: web
+        working-directory: matter-peek-web
 
     steps:
       - name: Checkout
@@ -76,7 +76,7 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: web
+          workspaces: matter-peek-web
 
       - name: Install trunk
         uses: jetli/trunk-action@v0.5.0

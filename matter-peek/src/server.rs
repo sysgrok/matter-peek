@@ -1,10 +1,11 @@
-//! matter-peek-server — the matter-peek API over WebSocket/JSON.
+//! The server: the matter-peek API over WebSocket/JSON, and the web UI.
 //!
-//! The server ([`run`]) starts a [`MatterPeek`] and serves its [`wire`]
-//! messages to WebSocket clients: the web UI, the CLI and the MCP server with
-//! `--server`. Those clients reach it, or a controller in their own process,
-//! through a [`client::Connection`]. It also runs the assistant: its chats,
-//! with the model kept in the store or set by the environment ([`llm`]).
+//! [`run`] starts a [`MatterPeek`] and serves, on one port, its [`wire`]
+//! messages to WebSocket clients (the web UI, the CLI and the MCP server with
+//! `--server`) and the web UI's files ([`web`]). Those clients reach it, or a
+//! controller in their own process, through a [`client::Connection`]. It also
+//! runs the assistant: its chats, with the model kept in the store or set by
+//! the environment ([`llm`]).
 //!
 //! The shells run on a single-threaded [`LocalExecutor`] (smol/async-io
 //! family); the controller runs on its own thread.
@@ -20,10 +21,11 @@ use matter_peek_core::api::agent::ModelConfig;
 use matter_peek_core::api::platform::data_dir;
 use matter_peek_core::api::{MatterPeek, PeekConfig};
 
-mod chat;
+mod chats;
 pub mod client;
+mod http;
 pub mod llm;
-mod server;
+mod web;
 
 thread_local! {
     /// The thread-local executor, shared by clone. Tasks spawned via [`spawn`]
@@ -49,7 +51,7 @@ where
     futures_lite::future::block_on(ex.run(fut))
 }
 
-/// Run the server: start the controller, then serve WebSocket connections on
+/// Run the server: start the controller, then serve the API and the web UI on
 /// `addr`, with the assistant's model `env` sets, else the stored one.
 pub fn run(addr: &str, env: Option<ModelConfig>) -> std::io::Result<()> {
     let peek = MatterPeek::start(PeekConfig {
@@ -58,9 +60,9 @@ pub fn run(addr: &str, env: Option<ModelConfig>) -> std::io::Result<()> {
     })
     .map_err(std::io::Error::other)?;
 
-    let chats = chat::Chats::new(peek.clone(), env, data_dir().join("chats"));
+    let chats = chats::Chats::new(peek.clone(), env, data_dir().join("chats"));
 
-    block_on(server::serve(addr, peek, chats))
+    block_on(http::serve(addr, peek, chats))
 }
 
 /// Handle to the thread-local executor.

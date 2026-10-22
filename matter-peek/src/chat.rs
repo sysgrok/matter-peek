@@ -17,11 +17,11 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use termimad::MadSkin;
 
+use crate::server::client::Connection;
 use matter_peek_core::api::agent::{self, ToolCall, STOPPED};
 use matter_peek_core::api::mcp::Caps;
 use matter_peek_core::api::platform::data_dir;
 use matter_peek_core::api::wire::{Approval, ChatEvent, Event, Request, Response, ServerMsg};
-use matter_peek_server::client::Connection;
 
 use crate::mcp;
 

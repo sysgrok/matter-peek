@@ -1,7 +1,7 @@
 //! Connections to the matter-peek API, for its clients (the CLI, the MCP server).
 //!
 //! A [`Connection`] carries [`ClientMsg`]s in and [`ServerMsg`]s out, either over
-//! a WebSocket to a running `matter-peek-server` ([`connect`]) or to a
+//! a WebSocket to a running server (`matter-peek serve`) ([`connect`]) or to a
 //! controller in this process ([`connect_in_process`]). Either way, the requests
 //! are serviced the same way, the assistant's too.
 
@@ -21,11 +21,11 @@ use matter_peek_core::api::wire::{
 };
 use matter_peek_core::api::{MatterPeek, PeekConfig};
 
-use crate::chat::Chats;
-use crate::llm::model_from_env;
+use super::chats::Chats;
+use super::llm::model_from_env;
 
 /// A connection to the API. Runs on the thread-local executor, so it must be
-/// driven by [`crate::block_on`].
+/// driven by [`super::block_on`].
 pub struct Connection {
     tx: async_channel::Sender<ClientMsg>,
     rx: async_channel::Receiver<ServerMsg>,
@@ -99,7 +99,7 @@ pub async fn connect(url: &str) -> io::Result<Connection> {
     let (client_tx, client_rx) = async_channel::unbounded::<ClientMsg>();
     let (server_tx, server_rx) = async_channel::unbounded::<ServerMsg>();
 
-    crate::spawn(async move {
+    super::spawn(async move {
         while let Ok(msg) = client_rx.recv().await {
             let Ok(json) = serde_json::to_string(&msg) else {
                 continue;
@@ -111,7 +111,7 @@ pub async fn connect(url: &str) -> io::Result<Connection> {
         }
     });
 
-    crate::spawn(async move {
+    super::spawn(async move {
         while let Some(frame) = read.next().await {
             let text = match frame {
                 Ok(Message::Text(text)) => text,
@@ -149,15 +149,15 @@ pub fn connect_in_process(config: PeekConfig) -> io::Result<Connection> {
     let chats = Chats::new(peek.clone(), model_from_env(), data_dir().join("chats"));
     let session = Rc::new(WireSession::new(peek, server_tx.clone()));
 
-    crate::spawn(async move {
+    super::spawn(async move {
         while let Ok(msg) = client_rx.recv().await {
             if msg.request.is_assistant() {
                 let chats = chats.clone();
                 let out = server_tx.clone();
-                crate::spawn(async move { chats.handle(msg, out).await });
+                super::spawn(async move { chats.handle(msg, out).await });
             } else {
                 let session = session.clone();
-                crate::spawn(async move { session.handle(msg).await });
+                super::spawn(async move { session.handle(msg).await });
             }
         }
     });

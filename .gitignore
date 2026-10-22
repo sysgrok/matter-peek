@@ -1,4 +1,4 @@
-# Build output — match the root `target/` and any nested one (e.g. web/target/,
+# Build output — match the root `target/` and any nested one (e.g. matter-peek-web/target/,
 # since the wasm `web` crate is its own workspace with its own target dir).
 target/
 /dist

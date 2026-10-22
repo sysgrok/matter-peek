@@ -15,9 +15,9 @@ use futures_lite::StreamExt;
 
 use log::{debug, info, warn};
 
+use crate::server::client::{self, Connection};
 use matter_peek_core::api::mcp::{handle, jsonrpc, Caps, Dispatch};
 use matter_peek_core::api::{wire, FabricRef, PeekConfig};
-use matter_peek_server::client::{self, Connection};
 
 /// A [`Dispatch`] over a connection to the API: to a controller in this
 /// process, or to the server at `url`, connected on the first call and

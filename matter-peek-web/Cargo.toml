@@ -12,7 +12,7 @@ repository = "https://github.com/sysgrok/matter-peek"
 
 [dependencies]
 # The API's types and messages only, without the controller.
-matter-peek-core = { path = "../core", default-features = false }
+matter-peek-core = { path = "../matter-peek-core", default-features = false }
 
 yew = { version = "0.21", features = ["csr"] }
 gloo-net = { version = "0.6", features = ["websocket"] }
@@ -42,3 +42,10 @@ base64 = "0.22"
 # Manual pairing code check digit (as rs-matter does).
 verhoeff = { version = "1", default-features = false }
 pulldown-cmark = { version = "0.13.5", default-features = false, features = ["html"] }
+
+# The release build is what the server serves: as small as it gets.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

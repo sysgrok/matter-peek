@@ -233,7 +233,7 @@ impl WireSession {
             | Request::ChatDelete { .. }
             | Request::AssistantModels { .. }
             | Request::AssistantTest { .. } => Err(PeekError::failed(
-                "the assistant runs in matter-peek-server, not in this process",
+                "the assistant runs in the server (matter-peek serve), not in this process",
             )),
         };
 

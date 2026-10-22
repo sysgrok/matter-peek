@@ -8,7 +8,7 @@
 //! assistant does. [`WireSession`] runs them against a
 //! [`MatterPeek`](super::MatterPeek); the assistant's chats and its model (the
 //! `Chat…` and `…Assistant…` requests) are run by whoever runs the assistant
-//! (`matter-peek-server`, or the CLI on its own).
+//! (`matter-peek serve`, or the CLI on its own).
 
 use alloc::boxed::Box;
 use alloc::string::String;

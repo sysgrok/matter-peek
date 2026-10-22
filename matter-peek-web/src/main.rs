@@ -33,8 +33,20 @@ mod thread;
 mod ui;
 mod updates;
 
-/// Where the server listens (see `matter-peek-server`'s default).
-const WS_URL: &str = "ws://127.0.0.1:8087";
+/// Where the API is: on the server that served the page, at `/ws`
+/// (`trunk serve` passes it on to the server, see `Trunk.toml`).
+fn ws_url() -> String {
+    let location = web_sys::window().map(|window| window.location());
+    let host = location
+        .as_ref()
+        .and_then(|location| location.host().ok())
+        .unwrap_or_else(|| "127.0.0.1:8087".into());
+    let secure = location
+        .and_then(|location| location.protocol().ok())
+        .is_some_and(|protocol| protocol == "https:");
+
+    format!("{}://{host}/ws", if secure { "wss" } else { "ws" })
+}
 
 #[derive(Clone, PartialEq)]
 struct StepLine {
@@ -1482,7 +1494,7 @@ impl App {
             if delay_ms > 0 {
                 gloo_timers::future::TimeoutFuture::new(delay_ms).await;
             }
-            let ws = match WebSocket::open(WS_URL) {
+            let ws = match WebSocket::open(&ws_url()) {
                 Ok(ws) => ws,
                 Err(_) => {
                     link.send_message(Msg::SubWsClosed(gen));
@@ -1940,7 +1952,7 @@ fn request_loop(
     failed: fn(String) -> Msg,
 ) {
     spawn_local(async move {
-        let ws = match WebSocket::open(WS_URL) {
+        let ws = match WebSocket::open(&ws_url()) {
             Ok(ws) => ws,
             Err(e) => {
                 link.send_message(failed(format!("connect failed: {e}")));
@@ -2015,7 +2027,7 @@ fn send_camera_frame(link: html::Scope<App>, image: String) {
 /// Send `request` on its own WS, answering with its response (events left
 /// out).
 async fn exchange(request: wire::Request) -> Result<wire::Response, String> {
-    let ws = WebSocket::open(WS_URL).map_err(|e| e.to_string())?;
+    let ws = WebSocket::open(&ws_url()).map_err(|e| e.to_string())?;
     let (mut write, mut read) = ws.split();
 
     let json = serde_json::to_string(&wire::ClientMsg { req_id: 1, request })
@@ -2079,7 +2091,7 @@ fn send_ota_upload(link: html::Scope<App>, file: web_sys::File) {
 async fn ota_upload(link: &html::Scope<App>, file: gloo_file::File) -> Result<(), String> {
     use base64::Engine as _;
 
-    let ws = WebSocket::open(WS_URL).map_err(|e| format!("connect failed: {e}"))?;
+    let ws = WebSocket::open(&ws_url()).map_err(|e| format!("connect failed: {e}"))?;
     let (mut write, mut read) = ws.split();
 
     let size = file.size();
@@ -2171,7 +2183,7 @@ fn response_error(response: wire::Response) -> String {
 /// until the device runs the new image.
 fn send_ota_update(link: html::Scope<App>, node_id: u64, name: String) {
     spawn_local(async move {
-        let ws = match WebSocket::open(WS_URL) {
+        let ws = match WebSocket::open(&ws_url()) {
             Ok(ws) => ws,
             Err(e) => {
                 link.send_message(Msg::Error(format!("connect failed: {e}")));
@@ -2262,7 +2274,7 @@ fn read_ota_updates(link: html::Scope<App>, delay_ms: u32) {
 /// the server's cancel flag at a safepoint.
 fn send_cancel() {
     spawn_local(async move {
-        let Ok(ws) = WebSocket::open(WS_URL) else {
+        let Ok(ws) = WebSocket::open(&ws_url()) else {
             return;
         };
         let (mut write, _read) = ws.split();

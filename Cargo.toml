@@ -1,12 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "core",
-    "server",
-    "cli",
-    # "web" is a separate wasm crate, excluded from the native workspace build.
+    "matter-peek-core",
+    "matter-peek",
+    # "matter-peek-web" is a separate wasm crate, excluded from the native workspace build.
 ]
-exclude = ["web"]
+exclude = ["matter-peek-web"]
 
 [workspace.package]
 version = "0.1.0"
@@ -50,3 +49,7 @@ nix = { version = "0.30", features = ["net"] }
 [patch.crates-io]
 #rs-matter = { path = "../rs-matter/rs-matter" }
 rs-matter = { git = "https://github.com/project-chip/rs-matter" }
+
+# A release `matter-peek` is a file to hand out: no symbols in it.
+[profile.release]
+strip = true

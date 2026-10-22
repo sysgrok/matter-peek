@@ -8,6 +8,8 @@
     <link data-trunk rel="copy-file" href="bulma.min.css" />
     <link rel="stylesheet" href="bulma.min.css" />
     <link data-trunk rel="css" href="style.css" />
+    <!-- The app; its release build goes through wasm-opt for size. -->
+    <link data-trunk rel="rust" data-wasm-opt="z" />
   </head>
   <body></body>
 </html>

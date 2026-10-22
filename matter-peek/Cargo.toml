@@ -1,0 +1,51 @@
+[package]
+name = "matter-peek"
+description = "A Matter controller for diagnostics, in one executable: the server with its web UI, the command line, and MCP tools for AI agents"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "matter-peek"
+path = "src/main.rs"
+
+[dependencies]
+# The API, its controller and its messages.
+matter-peek-core = { path = "../matter-peek-core", features = ["ble"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true }
+# Logs and OTA images travel base64-encoded.
+base64 = "0.22"
+log = { workspace = true }
+env_logger = { workspace = true }
+# The executor of the server and its clients (smol family), and blocking work
+# (stdin/stdout of `mcp`, the assistant's model calls) on a thread pool.
+async-executor = { workspace = true }
+async-io = { workspace = true }
+async-channel = { workspace = true }
+blocking = "1"
+futures-lite = { workspace = true }
+futures-util = { workspace = true }
+# `serve`: the API over WebSocket, and the web UI over HTTP, on one port.
+async-net = { workspace = true }
+async-tungstenite = { workspace = true }
+# The assistant's model, over HTTPS (rustls, with its own root certificates).
+ureq = "3.5"
+# The web UI's files are kept gzipped; a client that takes no gzip gets them
+# unpacked.
+flate2 = "1"
+# `chat`: the model's Markdown in the terminal, and a line editor with history
+# for the prompt.
+termimad = "0.35"
+rustyline = "19"
+# `assistant set --api-key`: the key, typed without echo.
+rpassword = "7"
+
+[build-dependencies]
+# The web UI's files, gzipped into the executable.
+flate2 = "1"
