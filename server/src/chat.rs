@@ -1,6 +1,8 @@
-//! The assistant's chats: conversations with a model (see
-//! [`matter_peek_core::api::agent`]), run here against the server's
-//! controller, and kept as JSON files in the data directory.
+//! The assistant: its chats, conversations with a model (see
+//! [`matter_peek_core::api::agent`]) run here against the controller and kept
+//! as JSON files in the data directory, and its model, kept in the
+//! controller's store (or set by the environment, see
+//! [`crate::llm::model_from_env`]). Its key never leaves this process.
 //!
 //! What the assistant does goes, as [`Event::Chat`]s, to the connection that
 //! asked; its requests to run tools are answered by any connection
@@ -12,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_io::Timer;
 use futures_lite::FutureExt as _;
@@ -20,15 +22,17 @@ use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
 use matter_peek_core::api::agent::openai::OpenAi;
-use matter_peek_core::api::agent::{Agent, AgentListener, Message, ToolCall};
+use matter_peek_core::api::agent::{
+    Agent, AgentListener, Message, ModelConfig, Provider as _, Think, ToolCall, Usage,
+};
 use matter_peek_core::api::mcp::{Caps, Dispatch};
 use matter_peek_core::api::wire::{
     Approval, ChatEvent, ChatSummary, ChatView, ClientMsg, Event, Request, Response, ServerMsg,
     WireSession,
 };
-use matter_peek_core::api::MatterPeek;
+use matter_peek_core::api::{AssistantUpdate, MatterPeek};
 
-use crate::llm::{LlmConfig, Ureq};
+use crate::llm::Ureq;
 
 /// How long the assistant waits for its request to run a tool to be answered;
 /// then it takes it as a no.
@@ -37,9 +41,10 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// How long a chat's title, from its first question, may be.
 const TITLE_MAX: usize = 60;
 
-/// The assistant's chats.
+/// The assistant's chats, and its model.
 pub(crate) struct Chats {
-    llm: Option<LlmConfig>,
+    /// The model the environment sets, over the one in the store.
+    env: Option<ModelConfig>,
     http: Ureq,
     peek: Arc<MatterPeek>,
     dir: PathBuf,
@@ -70,9 +75,9 @@ struct Chat {
 }
 
 impl Chats {
-    /// The chats kept in `dir`, run with the model of `llm` (none: no
-    /// assistant).
-    pub(crate) fn new(peek: Arc<MatterPeek>, llm: Option<LlmConfig>, dir: PathBuf) -> Rc<Self> {
+    /// The chats kept in `dir`, run with the model `env` sets, else with the
+    /// one in `peek`'s store.
+    pub(crate) fn new(peek: Arc<MatterPeek>, env: Option<ModelConfig>, dir: PathBuf) -> Rc<Self> {
         let mut chats = BTreeMap::new();
 
         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -104,21 +109,16 @@ impl Chats {
             }
         }
 
-        match &llm {
-            Some(llm) => info!(
-                "chats: the assistant is {} at {}; {} chat(s) in {}",
-                llm.model,
-                llm.url,
-                chats.len(),
-                dir.display()
-            ),
-            None => info!(
-                "chats: no assistant (set MATTER_PEEK_LLM_URL and MATTER_PEEK_LLM_MODEL to have one)"
-            ),
+        info!("chats: {} in {}", chats.len(), dir.display());
+        if let Some(env) = &env {
+            info!(
+                "chats: the environment sets the assistant's model: {} at {}",
+                env.model, env.url
+            );
         }
 
         Rc::new(Self {
-            llm,
+            env,
             http: Ureq::new(),
             peek,
             dir,
@@ -135,7 +135,7 @@ impl Chats {
         out: async_channel::Sender<ServerMsg>,
     ) {
         let response = match msg.request {
-            Request::ChatList => Ok(self.list()),
+            Request::ChatList => Ok(self.list().await),
             Request::ChatOpen { chat_id } => self.view(&chat_id),
             Request::ChatAsk {
                 chat_id,
@@ -148,8 +148,13 @@ impl Chats {
                 answer,
             } => self.approve(&chat_id, &call_id, answer),
             Request::ChatStop { chat_id } => self.stop(&chat_id),
-            Request::ChatDelete { chat_id } => self.delete(&chat_id),
-            _ => Err("not a chat request".into()),
+            Request::ChatDelete { chat_id } => self.delete(&chat_id).await,
+            Request::Assistant => self.assistant().await,
+            Request::SetAssistant { update } => self.set_assistant(update).await,
+            Request::ClearAssistant => self.clear_assistant().await,
+            Request::AssistantModels { update } => self.models(update).await,
+            Request::AssistantTest { update } => self.test(update).await,
+            _ => Err("not a request for the assistant".into()),
         };
 
         let response = response.unwrap_or_else(|message| Response::Error { message });
@@ -161,7 +166,9 @@ impl Chats {
             .await;
     }
 
-    fn list(&self) -> Response {
+    async fn list(&self) -> Response {
+        let model = self.stored_or_env().await.ok().flatten();
+
         let mut chats: Vec<ChatSummary> = self
             .chats
             .borrow()
@@ -175,9 +182,127 @@ impl Chats {
         chats.sort_by_key(|chat| core::cmp::Reverse(chat.updated));
 
         Response::Chats {
-            model: self.llm.as_ref().map(|llm| llm.model.clone()),
+            model: model.map(|model| model.model),
             chats,
         }
+    }
+
+    /// The model the environment sets, else the one in the store, if any.
+    async fn stored_or_env(&self) -> Result<Option<ModelConfig>, String> {
+        match &self.env {
+            Some(env) => Ok(Some(env.clone())),
+            None => self.peek.assistant_model().await.map_err(|e| e.to_string()),
+        }
+    }
+
+    /// The model, to ask.
+    async fn model(&self) -> Result<ModelConfig, String> {
+        self.stored_or_env().await?.ok_or_else(|| {
+            "there is no assistant yet: give it a model on the Assistant page, \
+             or with `matter-peek assistant set`"
+                .into()
+        })
+    }
+
+    /// The model as it would be after `update`; without one, as it is.
+    async fn candidate(&self, update: Option<AssistantUpdate>) -> Result<ModelConfig, String> {
+        match update {
+            Some(update) => {
+                let current = self.stored_or_env().await?;
+                ModelConfig::updated(current.as_ref(), update)
+            }
+            None => self.model().await,
+        }
+    }
+
+    async fn assistant(&self) -> Result<Response, String> {
+        let assistant = match &self.env {
+            Some(env) => Some(env.info(true)),
+            None => self.peek.assistant().await.map_err(|e| e.to_string())?,
+        };
+
+        Ok(Response::Assistant { assistant })
+    }
+
+    async fn set_assistant(&self, update: AssistantUpdate) -> Result<Response, String> {
+        self.not_from_env()?;
+
+        let info = self
+            .peek
+            .set_assistant(update)
+            .await
+            .map_err(|e| e.to_string())?;
+        info!(
+            "chats: the assistant's model is now {} at {}",
+            info.model, info.url
+        );
+
+        Ok(Response::Assistant {
+            assistant: Some(info),
+        })
+    }
+
+    async fn clear_assistant(&self) -> Result<Response, String> {
+        self.not_from_env()?;
+
+        self.peek
+            .clear_assistant()
+            .await
+            .map_err(|e| e.to_string())?;
+        info!("chats: the assistant has no model now");
+
+        Ok(Response::Assistant { assistant: None })
+    }
+
+    fn not_from_env(&self) -> Result<(), String> {
+        match self.env {
+            Some(_) => Err("the environment sets the assistant's model \
+                            (MATTER_PEEK_LLM_URL, MATTER_PEEK_LLM_MODEL): \
+                            change it there, or unset it to change it here"
+                .into()),
+            None => Ok(()),
+        }
+    }
+
+    async fn models(&self, update: Option<AssistantUpdate>) -> Result<Response, String> {
+        let candidate = self.candidate(update).await?;
+        let api = OpenAi::new(self.http.clone(), &candidate.url, "", candidate.api_key);
+
+        Ok(Response::Models {
+            models: api.models().await?,
+        })
+    }
+
+    async fn test(&self, update: Option<AssistantUpdate>) -> Result<Response, String> {
+        let candidate = self.candidate(update).await?;
+        if candidate.model.is_empty() {
+            return Err("name the model".into());
+        }
+
+        let api = OpenAi::new(
+            self.http.clone(),
+            &candidate.url,
+            &candidate.model,
+            candidate.api_key,
+        );
+        let messages = [
+            Message::System("Answer in one short sentence.".into()),
+            Message::User("Say hello to the user of matter-peek.".into()),
+        ];
+
+        let started = Instant::now();
+        let reply = api.complete(&messages, &[], Think::Off).await?;
+        let reply = if reply.text.is_empty() {
+            reply.thinking
+        } else {
+            reply.text
+        };
+
+        Ok(Response::Tested {
+            model: candidate.model,
+            reply,
+            millis: started.elapsed().as_millis() as u64,
+        })
     }
 
     fn view(&self, chat_id: &str) -> Result<Response, String> {
@@ -204,11 +329,7 @@ impl Chats {
         allow_changes: bool,
         out: &async_channel::Sender<ServerMsg>,
     ) -> Result<Response, String> {
-        let Some(llm) = &self.llm else {
-            return Err("there is no assistant: start matter-peek-server with \
-                        MATTER_PEEK_LLM_URL and MATTER_PEEK_LLM_MODEL set"
-                .into());
-        };
+        let llm = self.model().await?;
         let text = text.trim();
         if text.is_empty() {
             return Err("ask something".into());
@@ -237,7 +358,7 @@ impl Chats {
         };
         self.save(&chat_id);
 
-        let provider = OpenAi::new(self.http.clone(), &llm.url, &llm.model, llm.api_key.clone());
+        let provider = OpenAi::new(self.http.clone(), &llm.url, &llm.model, llm.api_key);
         let caps = Caps {
             allow_mutate: allow_changes,
         };
@@ -330,7 +451,7 @@ impl Chats {
         Ok(Response::Ok)
     }
 
-    fn delete(&self, chat_id: &str) -> Result<Response, String> {
+    async fn delete(&self, chat_id: &str) -> Result<Response, String> {
         {
             let mut chats = self.chats.borrow_mut();
             let chat = chats.get(chat_id).ok_or_else(|| no_chat(chat_id))?;
@@ -346,7 +467,7 @@ impl Chats {
             }
         }
 
-        Ok(self.list())
+        Ok(self.list().await)
     }
 
     fn save(&self, chat_id: &str) {
@@ -394,6 +515,19 @@ impl Listener<'_> {
 impl AgentListener for Listener<'_> {
     fn on_model_call(&self) {
         self.send(ChatEvent::Thinking);
+    }
+
+    fn on_usage(&self, usage: Usage) {
+        self.send(ChatEvent::Usage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+        });
+    }
+
+    fn on_thinking(&self, thinking: &str) {
+        self.send(ChatEvent::Thought {
+            text: thinking.into(),
+        });
     }
 
     fn on_text(&self, text: &str) {

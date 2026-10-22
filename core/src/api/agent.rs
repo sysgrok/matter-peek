@@ -9,12 +9,14 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::fmt;
 use core::future::Future;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::mcp::{self, Caps, Dispatch};
+use super::{AssistantInfo, AssistantUpdate, KeyChange};
 
 pub mod openai;
 
@@ -109,6 +111,99 @@ pub enum Think {
     Off,
 }
 
+impl Think {
+    /// [`Think::Default`] if the model may think first, else [`Think::Off`].
+    pub fn from_bool(think: bool) -> Self {
+        if think {
+            Self::Default
+        } else {
+            Self::Off
+        }
+    }
+}
+
+/// The assistant's model: its API, the model, the API's key and whether it
+/// thinks first. Only the side that runs the agent holds it; the API shows
+/// [`AssistantInfo`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct ModelConfig {
+    /// An OpenAI-compatible API, e.g. `http://localhost:11434/v1`.
+    pub url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub think: Think,
+}
+
+impl ModelConfig {
+    /// `current` (`None`: none yet) changed by `update`. The key stays only
+    /// while the API stays at the same address. The model may be left empty.
+    pub fn updated(current: Option<&Self>, update: AssistantUpdate) -> Result<Self, String> {
+        let url = update
+            .url
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+            .or_else(|| current.map(|current| current.url.clone()))
+            .filter(|url| !url.is_empty())
+            .ok_or("give the address of the model's API")?;
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(format!(
+                "{url} is not the address of an API: it starts with http:// or https://"
+            ));
+        }
+
+        let model = update
+            .model
+            .map(|model| model.trim().to_string())
+            .or_else(|| current.map(|current| current.model.clone()))
+            .unwrap_or_default();
+        let think = update
+            .think
+            .map(Think::from_bool)
+            .or_else(|| current.map(|current| current.think))
+            .unwrap_or_default();
+        let api_key = match update.key {
+            KeyChange::Set { key } => Some(key.trim().to_string()).filter(|key| !key.is_empty()),
+            KeyChange::Remove => None,
+            KeyChange::Keep => current
+                .filter(|current| same_api(&current.url, &url))
+                .and_then(|current| current.api_key.clone()),
+        };
+
+        Ok(Self {
+            url,
+            model,
+            api_key,
+            think,
+        })
+    }
+
+    /// As the API shows it; `from_env` if the process's environment set it.
+    pub fn info(&self, from_env: bool) -> AssistantInfo {
+        AssistantInfo {
+            url: self.url.clone(),
+            model: self.model.clone(),
+            key_hint: self.api_key.as_deref().map(key_hint),
+            think: self.think == Think::Default,
+            from_env,
+        }
+    }
+}
+
+impl fmt::Debug for ModelConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ModelConfig")
+            .field("url", &self.url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_deref().map(key_hint))
+            .field("think", &self.think)
+            .finish()
+    }
+}
+
+/// The tools an agent with `caps` is offered.
+pub fn tools(caps: Caps) -> Vec<ToolSpec> {
+    mcp::tool_list(caps).iter().map(tool_spec).collect()
+}
+
 /// A model behind an LLM API.
 pub trait Provider {
     /// The model's reply to `messages`, offered `tools`.
@@ -129,6 +224,13 @@ pub trait Http {
         url: &str,
         headers: &[(&str, &str)],
         body: String,
+    ) -> impl Future<Output = Result<String, String>>;
+
+    /// GET `url` with `headers`: the response body, or why not.
+    fn get(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
     ) -> impl Future<Output = Result<String, String>>;
 }
 
@@ -178,7 +280,7 @@ impl<P: Provider, D: Dispatch> Agent<P, D> {
     /// An agent asking `provider`, running the tools `caps` allows through
     /// `dispatch`.
     pub fn new(provider: P, dispatch: D, caps: Caps, think: Think) -> Self {
-        let tools = mcp::tool_list(caps).iter().map(tool_spec).collect();
+        let tools = tools(caps);
 
         let mut agent = Self {
             provider,
@@ -408,6 +510,32 @@ fn clip(text: &str, max: usize) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+/// Whether the API addresses `a` and `b` are at the same place (scheme, host
+/// and port), where a key given for one may go to the other.
+pub fn same_api(a: &str, b: &str) -> bool {
+    origin(a.trim()).eq_ignore_ascii_case(origin(b.trim()))
+}
+
+/// `scheme://host:port` of `url`.
+fn origin(url: &str) -> &str {
+    let host = url.find("://").map_or(0, |at| at + 3);
+    let end = url[host..].find('/').map_or(url.len(), |at| host + at);
+
+    &url[..end]
+}
+
+/// What the API shows of `key`: its end, if it is long enough to keep the
+/// rest secret.
+fn key_hint(key: &str) -> String {
+    let count = key.chars().count();
+    if count < 12 {
+        return "…".into();
+    }
+
+    let end: String = key.chars().skip(count - 4).collect();
+    format!("…{end}")
 }
 
 #[cfg(test)]

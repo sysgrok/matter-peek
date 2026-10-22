@@ -3,8 +3,8 @@
 //! The server ([`run`]) starts a [`MatterPeek`] and serves its [`wire`]
 //! messages to WebSocket clients: the web UI, the CLI and the MCP server with
 //! `--server`. Those clients reach it, or a controller in their own process,
-//! through a [`client::Connection`]. With a model ([`llm`]), it also runs the
-//! assistant's chats.
+//! through a [`client::Connection`]. It also runs the assistant: its chats,
+//! with the model kept in the store or set by the environment ([`llm`]).
 //!
 //! The shells run on a single-threaded [`LocalExecutor`] (smol/async-io
 //! family); the controller runs on its own thread.
@@ -16,10 +16,9 @@ use std::rc::Rc;
 
 use async_executor::LocalExecutor;
 
+use matter_peek_core::api::agent::ModelConfig;
 use matter_peek_core::api::platform::data_dir;
 use matter_peek_core::api::{MatterPeek, PeekConfig};
-
-use llm::LlmConfig;
 
 mod chat;
 pub mod client;
@@ -51,15 +50,15 @@ where
 }
 
 /// Run the server: start the controller, then serve WebSocket connections on
-/// `addr`; with `llm`, the assistant's chats too.
-pub fn run(addr: &str, llm: Option<LlmConfig>) -> std::io::Result<()> {
+/// `addr`, with the assistant's model `env` sets, else the stored one.
+pub fn run(addr: &str, env: Option<ModelConfig>) -> std::io::Result<()> {
     let peek = MatterPeek::start(PeekConfig {
         store_dir: None,
         periodic_sync: true,
     })
     .map_err(std::io::Error::other)?;
 
-    let chats = chat::Chats::new(peek.clone(), llm, data_dir().join("chats"));
+    let chats = chat::Chats::new(peek.clone(), env, data_dir().join("chats"));
 
     block_on(server::serve(addr, peek, chats))
 }

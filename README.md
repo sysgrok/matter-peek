@@ -40,11 +40,8 @@ hold the store.
 # An accessory to try it on (here, rs-matter's system_tests with a crash log)
 ( cd ../rs-matter && cargo run -p rs-matter-tests --bin system_tests -- --crash_log /tmp/crash.log )
 
-# The server (default ws://127.0.0.1:8087); with a model, the web UI has an
-# assistant (see below)
+# The server (default ws://127.0.0.1:8087)
 cargo run --bin matter-peek-server
-MATTER_PEEK_LLM_URL=http://localhost:11434/v1 MATTER_PEEK_LLM_MODEL=qwen3.5:9b \
-    cargo run --bin matter-peek-server
 
 # The web UI (needs `trunk` + the wasm32 target on nightly)
 ( cd web && trunk serve )   # then open the printed http://… URL
@@ -57,8 +54,9 @@ cargo run --bin matter-peek -- --help
 # mutating tools need --allow-mutate
 cargo run --bin matter-peek -- --server ws://127.0.0.1:8087 mcp --allow-mutate
 
-# A chat with an AI model about the devices (any OpenAI-compatible API)
-cargo run --bin matter-peek -- chat --llm-url http://localhost:11434/v1 --model qwen3.5:9b
+# The assistant: give it a model (any OpenAI-compatible API), then chat
+cargo run --bin matter-peek -- assistant set --url http://localhost:11434/v1 --model qwen3.5:9b
+cargo run --bin matter-peek -- chat
 ```
 
 ### MCP (AI agents)
@@ -102,44 +100,57 @@ To see what a strong model makes of the tools alone, `scripts/claude-eval.sh`
 runs Claude Code with only these tools: no auto-memory, CLAUDE.md, user
 settings or Claude Code tools of its own.
 
-### Chat (an AI agent in the terminal)
+### The assistant (an AI agent)
 
-`matter-peek chat` asks an AI model about the devices: the model looks into
-them with the same tools as MCP, run in process, and answers in Markdown,
-rendered in the terminal. Any model behind an OpenAI-compatible API will do: a
-local one (Ollama, LM Studio, vLLM) or a provider's (OpenAI, OpenRouter, …).
+The assistant answers questions about the devices: its model looks into them
+with the same tools as MCP and answers in Markdown. Any model behind an
+OpenAI-compatible API will do: a local one (Ollama, LM Studio, vLLM) or a
+provider's (OpenAI, OpenRouter, …). It runs where the store is: in
+`matter-peek-server`, or in the CLI when no server runs (`core`'s
+`api::agent`, so the mobile apps can have it too).
+
+Its model is kept in the store, with the API's key, which never leaves the side
+that runs the assistant: the API shows only its last four characters. A key
+stays only while the API stays at the same address. Set the model on the web
+UI's Assistant page (the model's name in a chat's header), or:
 
 ```sh
-export MATTER_PEEK_LLM_URL=http://localhost:11434/v1   # or --llm-url
-export MATTER_PEEK_LLM_MODEL=qwen3.5:9b                # or --model
-export MATTER_PEEK_LLM_KEY=…                           # if the API needs a key
-matter-peek chat                                       # a chat; /reset, /tools, /quit
+matter-peek assistant                                   # show it
+matter-peek assistant models --url http://localhost:11434/v1   # what an API offers
+matter-peek assistant set --url http://localhost:11434/v1 --model qwen3.5:9b
+matter-peek assistant set --api-key                     # asks for the key, hidden
+echo "$KEY" | matter-peek assistant set --api-key-stdin
+matter-peek assistant set --think off                   # faster, less careful
+matter-peek assistant test                              # the model says hello
+matter-peek assistant clear                             # forget it, and its key
+```
+
+`MATTER_PEEK_LLM_URL` and `MATTER_PEEK_LLM_MODEL` (and `MATTER_PEEK_LLM_KEY`)
+override the stored model wherever the assistant runs, e.g. for a server in a
+container; it cannot be changed through the API then. The model is not an MCP
+tool: an agent does not get to change its own model, or see keys.
+
+**Chats.** The assistant's chats are kept as JSON files in the data
+directory's `chats/`, listed by their first question, whichever front-end
+asked: the web UI's Assistant page lists, reopens, continues and deletes them.
+A chat goes on while its page is closed. "Allow changes" (`--allow-mutate` in
+the terminal) offers the model the tools that change things; each tool not
+marked read-only is asked for first: `identify` always. The web UI shows an
+approval card (Allow, Always allow for the chat, Deny), each tool call opening
+onto its arguments and result, and a stop button.
+
+```sh
+matter-peek chat                                       # a chat; /new, /tools, /quit
 matter-peek chat "Which of my devices are offline?"    # one question
 matter-peek chat --allow-mutate                        # may change things
 ```
 
-Every tool not marked read-only is asked for first (`[y]es / [n]o /
-[a]lways`): `identify` always, the ones that change things with
-`--allow-mutate`. The prompt edits like a shell's (arrows, Ctrl-A/E/W, …), with
-its history (↑/↓, Ctrl-R) kept across chats in the data directory; Ctrl-C
-drops the line, Ctrl-D ends the chat. `--no-think` asks the model not to think first
-(faster, less careful), `--show-thinking` shows its thinking, `--verbose` the
-tools' results and the model's tokens. Without `--server`, it holds the store
-and syncs the device list before the first question.
-
-The loop is `core`'s `api::agent`, so the web UI and the mobile apps can have
-the same chat.
-
-### Assistant (an AI agent in the web UI)
-
-With `MATTER_PEEK_LLM_URL` and `MATTER_PEEK_LLM_MODEL` (and `MATTER_PEEK_LLM_KEY`
-if needed) set, `matter-peek-server` runs the same loop for the web UI's
-Assistant page. Its chats are kept as JSON files in the data directory's
-`chats/`, listed by their first question; a chat can be reopened, continued
-and deleted, and goes on while the page is closed. "Allow changes" offers the
-model the tools that change things; each tool not marked read-only shows an
-approval card first (Allow, Always allow for the chat, Deny). Each tool call
-opens onto its arguments and result, and the stop button ends the answer.
+In the terminal, approvals are `[y]es / [n]o / [a]lways`. The prompt edits
+like a shell's (arrows, Ctrl-A/E/W, …), with its history (↑/↓, Ctrl-R) kept
+across chats in the data directory; Ctrl-C drops the line, Ctrl-D ends the
+chat. `--show-thinking` shows the model's thinking, `--verbose` the tools'
+results and the model's tokens. Without `--server`, it holds the store and
+syncs the device list before the first question.
 
 ### Mobile bindings
 

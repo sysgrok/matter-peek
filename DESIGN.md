@@ -83,6 +83,7 @@ controller serves the CLI, the MCP server and mobile apps.
 | Health | `peek_device` (one-shot), `subscribe` (live; returns a `Subscription`, which stops when dropped) |
 | Device | `read_network` (interfaces, known networks, Wi-Fi / Thread / Ethernet diagnostics), `change_network` (add or update, remove, connect, reorder a known network), `retrieve_logs`, `identify` |
 | OTA | `ota_images`, `ota_upload` (returns an `OtaUpload` to write chunks to), `ota_delete`, `ota_update` (a progress listener) |
+| Assistant | `assistant`, `set_assistant` (a key stays only for the same API address), `clear_assistant`: its model, kept in the store; never its key, which only `assistant_model` (Rust, for an agent in the same process) returns |
 
 The same methods serve every binding:
 - **Rust**: the server, the CLI and tests call them directly.
@@ -104,13 +105,18 @@ The same methods serve every binding:
   `Provider` (OpenAI-compatible today, over a platform `Http`), which runs the
   MCP tools in process. A tool not annotated read-only runs only once the
   user approves it (`AgentListener::approve`); a model that ends with an empty
-  reply is asked once more for its answer. `matter-peek chat` is the terminal
-  shell; `matter-peek-server` runs it for the web UI. The wire's `Chat*`
-  requests list, open, ask, approve, stop and delete the server's chats, kept
-  as JSON in the data directory, with what the model does as `Event::Chat`.
-  A chat outlives the page that asks: another page sees it at work, and its
-  approvals wait for up to 10 minutes. `WireSession` answers them with an
-  error: the chats live in the server, not in a session.
+  reply is asked once more for its answer. Its model (`ModelConfig`: API
+  address, model, key, think) is kept in the store; the API shows it as
+  `AssistantInfo`, without the key. The assistant runs where the store is,
+  so the key never travels: the server's chat hub (`server/src/chat.rs`),
+  which `client::connect_in_process` also runs for the CLI on its own. The
+  wire's `Chat…` requests list, open, ask, approve, stop and delete its chats,
+  kept as JSON in the data directory, with what the model does as
+  `Event::Chat`; `AssistantModels` and `AssistantTest` try a model before it
+  is kept. `MATTER_PEEK_LLM_*` override the stored model. A chat outlives the
+  page that asks: another page sees it at work, and its approvals wait for up
+  to 10 minutes. `WireSession` answers the chat requests with an error: the
+  chats live with the hub, not in a session.
 
 How values are shown to people is shared too (`api::display`, also exported over
 UniFFI): IDs as `0x` + uppercase hex, vendors and products by name with the ID
@@ -154,8 +160,7 @@ of it is private to `core`.
 | Web UI (Yew/Wasm, Bulma) | `trunk serve` | WebSocket |
 | CLI | `matter-peek` | `--server <url>`, or a `WireSession` in process |
 | MCP server | `matter-peek mcp` | as the CLI (read-only unless `--allow-mutate`) |
-| Chat (AI agent) | `matter-peek chat` | as the CLI; the model over an OpenAI-compatible API |
-| Assistant (web UI) | `matter-peek-server` | the server runs the chats; the model as above, set by `MATTER_PEEK_LLM_*` |
+| Assistant (AI agent) | the server, or `matter-peek` without `--server` | runs where the store is, with the stored model (or `MATTER_PEEK_LLM_*`'s); the web UI and `matter-peek chat` ask it over the wire's `Chat…` requests |
 | Mobile apps | — | UniFFI, in process |
 
 
@@ -321,10 +326,10 @@ others today); macOS desktop; Android and iOS apps (above), commissioning
 through the platform's own commissioner (Google Play services, Apple) rather
 than over BLE, with the chat of `api::agent` built in.
 
-**AI agent**: the chat (`api::agent`, `matter-peek chat`) works with any
-OpenAI-compatible API, in the terminal and in the web UI; next are the
-Anthropic API and the GitHub Copilot SDK (a Copilot subscription, on the
-desktop). Users of
+**AI agent**: the assistant (`api::agent`) works with any OpenAI-compatible
+API, in the terminal and in the web UI; next are the Anthropic API and the
+GitHub Copilot SDK (a Copilot subscription, on the desktop), as more kinds of
+`ModelConfig`, and several kept models to pick from per chat. Users of
 Claude or ChatGPT apps get the tools through a remote MCP connector: a relay
 to a controller that is always on.
 

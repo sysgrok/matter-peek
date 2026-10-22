@@ -3,7 +3,7 @@
 //! A [`Connection`] carries [`ClientMsg`]s in and [`ServerMsg`]s out, either over
 //! a WebSocket to a running `matter-peek-server` ([`connect`]) or to a
 //! controller in this process ([`connect_in_process`]). Either way, the requests
-//! are serviced the same way.
+//! are serviced the same way, the assistant's too.
 
 use core::cell::Cell;
 
@@ -15,10 +15,14 @@ use futures_util::{SinkExt, StreamExt};
 
 use log::{debug, warn};
 
+use matter_peek_core::api::platform::data_dir;
 use matter_peek_core::api::wire::{
     ClientMsg, Event, ReqId, Request, Response, ServerMsg, WireSession,
 };
 use matter_peek_core::api::{MatterPeek, PeekConfig};
+
+use crate::chat::Chats;
+use crate::llm::model_from_env;
 
 /// A connection to the API. Runs on the thread-local executor, so it must be
 /// driven by [`crate::block_on`].
@@ -133,20 +137,28 @@ pub async fn connect(url: &str) -> io::Result<Connection> {
     Ok(Connection::new(client_tx, server_rx))
 }
 
-/// Start a controller in this process, as `config` says, and connect to it.
-/// Fails if another matter-peek process (e.g. a running server) holds the store.
+/// Start a controller in this process, as `config` says, and connect to it;
+/// the assistant runs here too, as in the server. Fails if another matter-peek
+/// process (e.g. a running server) holds the store.
 pub fn connect_in_process(config: PeekConfig) -> io::Result<Connection> {
     let peek = MatterPeek::start(config).map_err(io::Error::other)?;
 
     let (client_tx, client_rx) = async_channel::unbounded::<ClientMsg>();
     let (server_tx, server_rx) = async_channel::unbounded::<ServerMsg>();
 
-    let session = Rc::new(WireSession::new(peek, server_tx));
+    let chats = Chats::new(peek.clone(), model_from_env(), data_dir().join("chats"));
+    let session = Rc::new(WireSession::new(peek, server_tx.clone()));
 
     crate::spawn(async move {
         while let Ok(msg) = client_rx.recv().await {
-            let session = session.clone();
-            crate::spawn(async move { session.handle(msg).await });
+            if msg.request.is_assistant() {
+                let chats = chats.clone();
+                let out = server_tx.clone();
+                crate::spawn(async move { chats.handle(msg, out).await });
+            } else {
+                let session = session.clone();
+                crate::spawn(async move { session.handle(msg).await });
+            }
         }
     });
 

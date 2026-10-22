@@ -13,6 +13,7 @@ use super::{Http, Message, Provider, Reply, Think, ToolCall, ToolSpec, Usage};
 /// A model behind an OpenAI-compatible API.
 pub struct OpenAi<H> {
     http: H,
+    /// The API, without a trailing `/`.
     url: String,
     model: String,
     api_key: Option<String>,
@@ -24,18 +25,40 @@ impl<H: Http> OpenAi<H> {
     pub fn new(http: H, base_url: &str, model: &str, api_key: Option<String>) -> Self {
         Self {
             http,
-            url: format!("{}/chat/completions", base_url.trim_end_matches('/')),
+            url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key,
         }
+    }
+
+    /// The models the API offers, by name.
+    pub async fn models(&self) -> Result<Vec<String>, String> {
+        let authorization = self.authorization();
+        let headers: Vec<(&str, &str)> = authorization
+            .iter()
+            .map(|authorization| ("Authorization", authorization.as_str()))
+            .collect();
+
+        let response = self
+            .http
+            .get(&format!("{}/models", self.url), &headers)
+            .await?;
+        models(&response)
+    }
+
+    fn authorization(&self) -> Option<String> {
+        self.api_key.as_ref().map(|key| format!("Bearer {key}"))
     }
 
     fn body(&self, messages: &[Message], tools: &[ToolSpec], think: Think) -> Value {
         let mut body = json!({
             "model": self.model,
             "messages": messages.iter().map(message).collect::<Vec<_>>(),
-            "tools": tools.iter().map(tool).collect::<Vec<_>>(),
         });
+        // Some APIs refuse an empty list.
+        if !tools.is_empty() {
+            body["tools"] = tools.iter().map(tool).collect();
+        }
         if think == Think::Off {
             body["reasoning_effort"] = json!("none");
         }
@@ -53,13 +76,16 @@ impl<H: Http> Provider for OpenAi<H> {
     ) -> Result<Reply, String> {
         let body = self.body(messages, tools, think).to_string();
 
-        let authorization = self.api_key.as_ref().map(|key| format!("Bearer {key}"));
+        let authorization = self.authorization();
         let mut headers = alloc::vec![("Content-Type", "application/json")];
         if let Some(authorization) = &authorization {
             headers.push(("Authorization", authorization));
         }
 
-        let response = self.http.post(&self.url, &headers, body).await?;
+        let response = self
+            .http
+            .post(&format!("{}/chat/completions", self.url), &headers, body)
+            .await?;
         reply(&response)
     }
 }
@@ -95,6 +121,30 @@ fn tool(tool: &ToolSpec) -> Value {
             "parameters": tool.parameters,
         },
     })
+}
+
+/// The models in a Models response, sorted.
+fn models(response: &str) -> Result<Vec<String>, String> {
+    let response: Value = serde_json::from_str(response)
+        .map_err(|e| format!("the API's list of models is not JSON: {e}"))?;
+
+    if let Some(error) = response.get("error") {
+        let message = error["message"].as_str().map(str::to_string);
+        return Err(format!(
+            "the model's API refused: {}",
+            message.unwrap_or_else(|| error.to_string())
+        ));
+    }
+
+    let mut models: Vec<String> = response["data"]
+        .as_array()
+        .ok_or("the API sent no list of models")?
+        .iter()
+        .filter_map(|model| model["id"].as_str().map(str::to_string))
+        .collect();
+    models.sort();
+
+    Ok(models)
 }
 
 /// The reply in a Chat Completions response.
@@ -258,5 +308,20 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[test]
+    fn models_sorted_by_name() {
+        // As Ollama lists them.
+        let listed = models(
+            r#"{"object":"list","data":[{"id":"qwen3.5:9b","object":"model","owned_by":"library"},
+                {"id":"llama3.2:3b","object":"model"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(listed, ["llama3.2:3b", "qwen3.5:9b"]);
+
+        let error = models(r#"{"error":{"message":"invalid key"}}"#).unwrap_err();
+        assert!(error.contains("invalid key"), "{error}");
+        assert!(models(r#"{"models":[]}"#).is_err());
     }
 }

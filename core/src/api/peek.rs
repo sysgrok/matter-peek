@@ -11,6 +11,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use super::agent::ModelConfig;
 use super::types::*;
 
 /// A controller of Matter devices: commissions them onto its fabric, keeps a
@@ -41,6 +42,12 @@ impl MatterPeek {
                 cancel,
             },
         )
+    }
+
+    /// The assistant's model with its key, for an agent run in this process;
+    /// the key goes nowhere else.
+    pub async fn assistant_model(&self) -> Result<Option<ModelConfig>, PeekError> {
+        self.call(Op::Assistant).await
     }
 
     /// Send the operation `op` builds around its reply channel, and wait for
@@ -105,6 +112,36 @@ impl MatterPeek {
     /// commission then fails with [`PeekError::Cancelled`].
     pub fn cancel_commission(&self) {
         self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// The assistant's model, if one is set; its key stays here.
+    pub async fn assistant(&self) -> Result<Option<AssistantInfo>, PeekError> {
+        Ok(self.assistant_model().await?.map(|model| model.info(false)))
+    }
+
+    /// Change the assistant's model. Its key stays only while its API stays at
+    /// the same address.
+    pub async fn set_assistant(&self, update: AssistantUpdate) -> Result<AssistantInfo, PeekError> {
+        let current = self.assistant_model().await?;
+        let model = ModelConfig::updated(current.as_ref(), update).map_err(PeekError::failed)?;
+        if model.model.is_empty() {
+            return Err(PeekError::failed("name the model"));
+        }
+
+        let info = model.info(false);
+        self.call(|reply| Op::SetAssistant {
+            model: Some(model),
+            reply,
+        })
+        .await?;
+
+        Ok(info)
+    }
+
+    /// Forget the assistant's model, and its key.
+    pub async fn clear_assistant(&self) -> Result<(), PeekError> {
+        self.call(|reply| Op::SetAssistant { model: None, reply })
+            .await
     }
 
     /// The devices on our fabric.
@@ -498,6 +535,12 @@ pub(crate) enum Op {
         node_id: u64,
         name: String,
         progress: Option<Arc<dyn OtaListener>>,
+        reply: Reply<()>,
+    },
+    Assistant(Reply<Option<ModelConfig>>),
+    /// Keep the assistant's model; `None` forgets it.
+    SetAssistant {
+        model: Option<ModelConfig>,
         reply: Reply<()>,
     },
 }

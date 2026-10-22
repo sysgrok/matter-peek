@@ -15,6 +15,12 @@ use wire::{Approval, ChatEvent, ChatSummary, ChatView};
 use crate::icons::{icon, Icon};
 use crate::{send_chat_request, textarea_value, ui, App, Ask, Msg};
 
+pub(crate) use settings::SettingsMsg;
+
+use settings::ModelForm;
+
+mod settings;
+
 /// Questions to start a chat with.
 const SUGGESTIONS: &[&str] = &[
     "Which of my devices are offline?",
@@ -48,6 +54,8 @@ pub struct Assistant {
     pub error: Option<String>,
     /// On phones: the list of chats, rather than the chat.
     pub show_list: bool,
+    /// The popup with the assistant's model, while open.
+    pub settings: Option<ModelForm>,
 }
 
 impl Assistant {
@@ -103,6 +111,8 @@ impl Assistant {
                 self.thinking = false;
                 self.error = Some(message);
             }
+            // For the terminal.
+            ChatEvent::Thought { .. } | ChatEvent::Usage { .. } => return false,
         }
 
         true
@@ -131,6 +141,8 @@ pub enum AssistantMsg {
     /// Look again at a chat the assistant is at work in for another page.
     Poll(String),
     ShowList,
+    /// In the popup with the assistant's model.
+    Settings(SettingsMsg),
 }
 
 impl App {
@@ -321,6 +333,7 @@ impl App {
                 assistant.show_list = true;
                 true
             }
+            AssistantMsg::Settings(msg) => self.update_settings(ctx, msg),
         }
     }
 
@@ -342,12 +355,14 @@ impl App {
                     { ui::empty_state(
                         Icon::Sparkles,
                         "No assistant yet",
-                        "The assistant is a model behind an OpenAI-compatible API, such as a local Ollama. \
-                         Start matter-peek-server with its address and name:",
+                        "The assistant is a model behind an OpenAI-compatible API: a local one, \
+                         such as Ollama's, or a provider's, such as OpenAI's. Give it one to start.",
                         html! {
-                            <pre class="chat-setup">{ "MATTER_PEEK_LLM_URL=http://localhost:11434/v1 \\\n\
-                                MATTER_PEEK_LLM_MODEL=qwen3.5:9b \\\n\
-                                matter-peek-server" }</pre>
+                            <button class="button is-link"
+                                onclick={link.callback(|_| Msg::Assistant(AssistantMsg::Settings(SettingsMsg::Open)))}>
+                                <span class="icon">{ icon(Icon::Sliders, 18) }</span>
+                                <span>{ "Set up the assistant" }</span>
+                            </button>
                         },
                     ) }
                 </div>
@@ -426,10 +441,12 @@ impl App {
                 </button>
                 <div class="chat-head-title">
                     <span class="chat-title">{ title.to_string() }</span>
-                    <span class="chat-model">
+                    <button class="chat-model" title="The assistant's model"
+                        onclick={link.callback(|_| Msg::Assistant(AssistantMsg::Settings(SettingsMsg::Open)))}>
                         { icon(Icon::Sparkles, 13) }
-                        { assistant.model.clone().unwrap_or_default() }
-                    </span>
+                        <span class="chat-model-name">{ assistant.model.clone().unwrap_or_default() }</span>
+                        { icon(Icon::Sliders, 13) }
+                    </button>
                 </div>
                 <label class="switch-row chat-allow"
                     title="Also offer the assistant the tools that change devices; it asks you before each">

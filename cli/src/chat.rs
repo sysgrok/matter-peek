@@ -1,12 +1,14 @@
-//! `matter-peek chat`: ask an AI model about the devices, in a chat. The model
-//! looks into them with the API's tools, and changes them only with
+//! `matter-peek chat`: ask the assistant about the devices, in a chat. Its
+//! model looks into them with the API's tools, and changes them only with
 //! `--allow-mutate` and once the user approves each change (see
-//! [`matter_peek_core::api::agent`]). Any model behind an OpenAI-compatible API
-//! will do: a local one (Ollama, LM Studio) or a provider's.
+//! [`matter_peek_core::api::agent`]).
+//!
+//! The assistant runs where its model's key is kept: in the server with
+//! `--server`, else in this process. Either way, the chat is one of its chats,
+//! kept like the web UI's.
 
-use core::cell::{Cell, RefCell};
+use core::cell::Cell;
 
-use std::collections::BTreeSet;
 use std::io::{self, BufRead as _, IsTerminal as _, Write as _};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -15,11 +17,11 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use termimad::MadSkin;
 
-use matter_peek_core::api::agent::openai::OpenAi;
-use matter_peek_core::api::agent::{Agent, AgentListener, Provider, Think, ToolCall, Usage};
-use matter_peek_core::api::mcp::{Caps, Dispatch};
+use matter_peek_core::api::agent::{self, ToolCall, STOPPED};
+use matter_peek_core::api::mcp::Caps;
 use matter_peek_core::api::platform::data_dir;
-use matter_peek_server::llm::Ureq;
+use matter_peek_core::api::wire::{Approval, ChatEvent, Event, Request, Response, ServerMsg};
+use matter_peek_server::client::Connection;
 
 use crate::mcp;
 
@@ -32,40 +34,52 @@ const HISTORY_MAX: usize = 1000;
 /// How much of a tool's result `--verbose` shows, in bytes.
 const SHOWN_RESULT_MAX: usize = 800;
 
-/// The chat's model and manners.
+/// The chat's manners.
 pub struct ChatArgs {
     /// Ask this, answer, and end.
     pub prompt: Option<String>,
-    pub llm_url: String,
-    pub model: String,
-    pub api_key: Option<String>,
-    pub think: Think,
     pub show_thinking: bool,
     pub verbose: bool,
     pub allow_mutate: bool,
 }
 
-/// Chat with the model through the server at `server`, else through a
-/// controller started in this process.
-pub async fn chat(server: Option<String>, args: ChatArgs) -> io::Result<()> {
-    let provider = OpenAi::new(Ureq::new(), &args.llm_url, &args.model, args.api_key);
-    let caps = Caps {
-        allow_mutate: args.allow_mutate,
-    };
+/// Chat with the assistant of the server at `server`, else of a controller
+/// started in this process; `false` if there is no assistant.
+pub async fn chat(server: Option<String>, args: ChatArgs) -> io::Result<bool> {
     let terminal = Terminal::new(args.show_thinking, args.verbose);
     if server.is_none() {
         terminal.note("Looking for the devices on our fabric…");
     }
     let dispatch = mcp::dispatch(server).await?;
+    let conn = dispatch.connection().await.map_err(io::Error::other)?;
 
-    let mut agent = Agent::new(provider, dispatch, caps, args.think);
+    let assistant = match conn.call(Request::Assistant, |_| ()).await? {
+        Response::Assistant {
+            assistant: Some(assistant),
+        } => assistant,
+        Response::Assistant { assistant: None } => {
+            eprintln!(
+                "error: there is no assistant yet; give it a model, e.g.\n  \
+                 matter-peek assistant set --url http://localhost:11434/v1 --model qwen3.5:9b"
+            );
+            return Ok(false);
+        }
+        Response::Error { message } => {
+            eprintln!("error: {message}");
+            return Ok(false);
+        }
+        _ => return Err(io::Error::other("an unexpected answer")),
+    };
 
-    let changing = agent.tools().iter().filter(|tool| !tool.read_only).count();
+    let tools = agent::tools(Caps {
+        allow_mutate: args.allow_mutate,
+    });
+    let changing = tools.iter().filter(|tool| !tool.read_only).count();
     terminal.note(&format!(
         "{} at {}: {} tools{}",
-        args.model,
-        args.llm_url,
-        agent.tools().len(),
+        assistant.model,
+        assistant.url,
+        tools.len(),
         if changing > 0 {
             format!(", {changing} of which are asked for first")
         } else {
@@ -73,30 +87,40 @@ pub async fn chat(server: Option<String>, args: ChatArgs) -> io::Result<()> {
         }
     ));
 
+    let mut chat = Chat {
+        conn: &conn,
+        id: None,
+        allow_changes: args.allow_mutate,
+        terminal: &terminal,
+    };
+
     if let Some(prompt) = args.prompt {
-        ask(&mut agent, &prompt, &terminal).await;
-        return Ok(());
+        chat.ask(&prompt).await?;
+        return Ok(true);
     }
 
-    terminal.note("Ask away. /reset forgets the conversation, /tools lists the tools, /quit ends.");
+    terminal.note(
+        "Ask away. /new starts a new chat, /tools lists the tools, /quit ends. \
+         The chats are kept, as the web UI's.",
+    );
 
     let mut prompt = Prompt::new();
 
     loop {
         println!();
         let Some(line) = prompt.read().await? else {
-            return Ok(());
+            return Ok(true);
         };
 
         match line.trim() {
             "" => {}
-            "/quit" | "/exit" => return Ok(()),
-            "/reset" => {
-                agent.reset();
-                terminal.note("Forgotten.");
+            "/quit" | "/exit" => return Ok(true),
+            "/new" | "/reset" => {
+                chat.id = None;
+                terminal.note("A new chat.");
             }
             "/tools" => {
-                for tool in agent.tools() {
+                for tool in &tools {
                     let changes = if tool.read_only {
                         ""
                     } else {
@@ -105,19 +129,105 @@ pub async fn chat(server: Option<String>, args: ChatArgs) -> io::Result<()> {
                     println!("  {}{changes}", tool.name);
                 }
             }
-            question => ask(&mut agent, question, &terminal).await,
+            question => chat.ask(question).await?,
         }
     }
 }
 
-async fn ask<P: Provider, D: Dispatch>(
-    agent: &mut Agent<P, D>,
-    question: &str,
-    terminal: &Terminal,
-) {
-    if let Err(e) = agent.ask(question, terminal).await {
-        terminal.done_waiting();
-        println!("{}", terminal.error(&format!("  {e}")));
+/// A chat of the assistant's, in this terminal.
+struct Chat<'a> {
+    conn: &'a Connection,
+    /// `None` until the assistant starts a new one.
+    id: Option<String>,
+    allow_changes: bool,
+    terminal: &'a Terminal,
+}
+
+impl Chat<'_> {
+    /// Ask `question`, showing what the assistant does until it answers.
+    async fn ask(&mut self, question: &str) -> io::Result<()> {
+        let req_id = self
+            .conn
+            .send(Request::ChatAsk {
+                chat_id: self.id.clone(),
+                text: question.into(),
+                allow_changes: self.allow_changes,
+            })
+            .await?;
+
+        loop {
+            let Some(msg) = self.conn.recv().await else {
+                return Err(io::Error::other("the connection closed"));
+            };
+
+            match msg {
+                ServerMsg::Event {
+                    event: Event::Chat { chat_id, update },
+                } => {
+                    // A new chat's first word names it.
+                    let id = self.id.get_or_insert_with(|| chat_id.clone());
+                    if *id == chat_id {
+                        self.show(update).await?;
+                    }
+                }
+                ServerMsg::Response {
+                    req_id: id,
+                    response,
+                } if id == req_id => {
+                    match response {
+                        Response::Chat { chat } => self.id = Some(chat.id),
+                        Response::Error { message } => {
+                            self.terminal.done_waiting();
+                            println!("{}", self.terminal.error(&format!("  {message}")));
+                        }
+                        _ => {}
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    async fn show(&self, update: ChatEvent) -> io::Result<()> {
+        let terminal = self.terminal;
+
+        match update {
+            ChatEvent::Thinking => terminal.model_call(),
+            ChatEvent::Thought { text } => terminal.thinking(&text),
+            ChatEvent::Usage {
+                input_tokens,
+                output_tokens,
+            } => terminal.usage(input_tokens, output_tokens),
+            ChatEvent::Text { text } => terminal.text(&text),
+            ChatEvent::ToolCall { call } => terminal.tool_call(&call),
+            ChatEvent::ToolResult {
+                result, is_error, ..
+            } => terminal.tool_result(&result, is_error),
+            ChatEvent::Approve { call } => {
+                let answer = terminal.approve(&call).await;
+                if let Some(chat_id) = self.id.clone() {
+                    self.conn
+                        .send(Request::ChatApprove {
+                            chat_id,
+                            call_id: call.id,
+                            answer,
+                        })
+                        .await?;
+                }
+            }
+            ChatEvent::Error { message } => {
+                terminal.done_waiting();
+                let message = if message == STOPPED {
+                    "Stopped."
+                } else {
+                    &message
+                };
+                println!("{}", terminal.error(&format!("  {message}")));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -210,8 +320,6 @@ struct Terminal {
     show_thinking: bool,
     verbose: bool,
     skin: MadSkin,
-    /// The tools approved for the rest of the chat.
-    always: RefCell<BTreeSet<String>>,
     /// When the model call or tool run in progress started.
     started: Cell<Option<Instant>>,
     /// A "…" waits on the current line for the model.
@@ -225,7 +333,6 @@ impl Terminal {
             show_thinking,
             verbose,
             skin: MadSkin::default(),
-            always: RefCell::new(BTreeSet::new()),
             started: Cell::new(None),
             waiting: Cell::new(false),
         }
@@ -265,10 +372,8 @@ impl Terminal {
             print!("\r\x1b[2K");
         }
     }
-}
 
-impl AgentListener for Terminal {
-    fn on_model_call(&self) {
+    fn model_call(&self) {
         self.started.set(Some(Instant::now()));
         if self.tty {
             print!("{}", self.dim("  …"));
@@ -277,24 +382,23 @@ impl AgentListener for Terminal {
         }
     }
 
-    fn on_usage(&self, usage: Usage) {
+    fn usage(&self, input_tokens: u32, output_tokens: u32) {
         self.done_waiting();
         let took = self.took();
         if self.verbose {
             self.note(&format!(
-                "  [model {took}: {} in / {} out tokens]",
-                usage.input_tokens, usage.output_tokens
+                "  [model {took}: {input_tokens} in / {output_tokens} out tokens]"
             ));
         }
     }
 
-    fn on_thinking(&self, thinking: &str) {
+    fn thinking(&self, thinking: &str) {
         if self.show_thinking {
             self.note(thinking);
         }
     }
 
-    fn on_text(&self, text: &str) {
+    fn text(&self, text: &str) {
         self.done_waiting();
         if self.tty {
             self.skin.print_text(text);
@@ -303,7 +407,7 @@ impl AgentListener for Terminal {
         }
     }
 
-    fn on_tool_call(&self, call: &ToolCall) {
+    fn tool_call(&self, call: &ToolCall) {
         self.done_waiting();
         let arguments = match call.arguments.trim() {
             "" | "{}" => String::new(),
@@ -317,7 +421,7 @@ impl AgentListener for Terminal {
         self.started.set(Some(Instant::now()));
     }
 
-    fn on_tool_result(&self, _call: &ToolCall, result: &str, is_error: bool) {
+    fn tool_result(&self, result: &str, is_error: bool) {
         let took = self.took();
         if is_error {
             println!(
@@ -340,11 +444,9 @@ impl AgentListener for Terminal {
         }
     }
 
-    async fn approve(&self, call: &ToolCall) -> bool {
-        if self.always.borrow().contains(&call.name) {
-            return true;
-        }
-
+    /// Ask the user whether `call` may run; the assistant remembers an
+    /// "always".
+    async fn approve(&self, call: &ToolCall) -> Approval {
         println!();
         loop {
             print!(
@@ -358,25 +460,22 @@ impl AgentListener for Terminal {
 
             let answer = match read_line().await {
                 Ok(Some(line)) => line.trim().to_lowercase(),
-                _ => return false,
+                _ => return Approval::No,
             };
 
-            match answer.as_str() {
-                "y" | "yes" => break,
-                "a" | "always" => {
-                    self.always.borrow_mut().insert(call.name.clone());
-                    break;
-                }
+            let answer = match answer.as_str() {
+                "y" | "yes" => Approval::Yes,
+                "a" | "always" => Approval::Always,
                 "" | "n" | "no" => {
                     print!("{}", self.dim("  refused"));
-                    return false;
+                    return Approval::No;
                 }
-                _ => {}
-            }
-        }
+                _ => continue,
+            };
 
-        self.started.set(Some(Instant::now()));
-        true
+            self.started.set(Some(Instant::now()));
+            return answer;
+        }
     }
 }
 

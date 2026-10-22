@@ -2,8 +2,8 @@
 //!
 //! Each connection is a [`WireSession`]: its [`ClientMsg`] frames run as
 //! requests (concurrently, so a `Cancel` reaches a running `Commission`), and
-//! their responses and events go back as [`ServerMsg`] frames. The chat
-//! requests go to the assistant's [`Chats`], which all connections share.
+//! their responses and events go back as [`ServerMsg`] frames. The requests
+//! for the assistant go to its [`Chats`], which all connections share.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -90,7 +90,7 @@ where
                 }
             };
 
-            if msg.request.is_chat() {
+            if msg.request.is_assistant() {
                 let chats = chats.clone();
                 let out = out.clone();
                 crate::spawn(async move { chats.handle(msg, out).await });

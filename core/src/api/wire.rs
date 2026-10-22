@@ -6,8 +6,9 @@
 //! `req_id`, and sends [`ServerMsg::Event`]s in between: a commission's steps,
 //! the reports of the connection's subscriptions, OTA progress, what the
 //! assistant does. [`WireSession`] runs them against a
-//! [`MatterPeek`](super::MatterPeek); `matter-peek-server` also runs the
-//! assistant's chats (the `Chat…` requests).
+//! [`MatterPeek`](super::MatterPeek); the assistant's chats and its model (the
+//! `Chat…` and `…Assistant…` requests) are run by whoever runs the assistant
+//! (`matter-peek-server`, or the CLI on its own).
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -45,7 +46,8 @@ pub enum ServerMsg {
 }
 
 /// A request; each mirrors a [`MatterPeek`](super::MatterPeek) method, but the
-/// `Chat…` ones: the server's assistant (see [`super::agent`]).
+/// `Chat…` ones and two of the assistant's: the assistant (see
+/// [`super::agent`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
@@ -147,11 +149,25 @@ pub enum Request {
     ChatStop { chat_id: String },
     /// Delete chat `chat_id`. Answered with [`Response::Chats`].
     ChatDelete { chat_id: String },
+    /// See `MatterPeek::assistant`. Answered with [`Response::Assistant`].
+    Assistant,
+    /// See `MatterPeek::set_assistant`. Answered with [`Response::Assistant`].
+    SetAssistant { update: AssistantUpdate },
+    /// See `MatterPeek::clear_assistant`. Answered with
+    /// [`Response::Assistant`].
+    ClearAssistant,
+    /// The models the assistant's API offers; with `update`, the API it would
+    /// have after it. Answered with [`Response::Models`].
+    AssistantModels { update: Option<AssistantUpdate> },
+    /// Ask the assistant's model to say a word; with `update`, the model it
+    /// would have after it. Answered with [`Response::Tested`].
+    AssistantTest { update: Option<AssistantUpdate> },
 }
 
 impl Request {
-    /// Whether it is about the assistant's chats, which the server runs.
-    pub fn is_chat(&self) -> bool {
+    /// Whether it is about the assistant (its chats, its model), which the
+    /// side that runs it answers.
+    pub fn is_assistant(&self) -> bool {
         matches!(
             self,
             Self::ChatList
@@ -160,6 +176,11 @@ impl Request {
                 | Self::ChatApprove { .. }
                 | Self::ChatStop { .. }
                 | Self::ChatDelete { .. }
+                | Self::Assistant
+                | Self::SetAssistant { .. }
+                | Self::ClearAssistant
+                | Self::AssistantModels { .. }
+                | Self::AssistantTest { .. }
         )
     }
 }
@@ -221,6 +242,19 @@ pub enum Response {
     },
     Chat {
         chat: Box<ChatView>,
+    },
+    /// The assistant's model; `None`: none is set.
+    Assistant {
+        assistant: Option<AssistantInfo>,
+    },
+    Models {
+        models: Vec<String>,
+    },
+    /// What `model` said, and how long it took.
+    Tested {
+        model: String,
+        reply: String,
+        millis: u64,
     },
     Error {
         message: String,
@@ -285,6 +319,13 @@ pub struct ChatView {
 pub enum ChatEvent {
     /// The model is asked.
     Thinking,
+    /// The model's thinking, where its API tells.
+    Thought { text: String },
+    /// The tokens a model call took.
+    Usage {
+        input_tokens: u32,
+        output_tokens: u32,
+    },
     /// The model's text, Markdown.
     Text { text: String },
     /// A tool is to run (or be asked for).

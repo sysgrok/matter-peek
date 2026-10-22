@@ -377,3 +377,81 @@ fn messages_kept_as_json() {
     let back: Vec<Message> = serde_json::from_value(json).unwrap();
     assert_eq!(back, messages);
 }
+
+#[test]
+fn model_settings_keep_the_key_only_for_the_same_api() {
+    let stored = ModelConfig::updated(
+        None,
+        AssistantUpdate {
+            url: Some(" https://api.example.com/v1/ ".into()),
+            model: Some("big".into()),
+            think: Some(false),
+            key: KeyChange::Set {
+                key: "sk-0123456789abcdef".into(),
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(stored.url, "https://api.example.com/v1");
+    assert_eq!(stored.think, Think::Off);
+    assert_eq!(stored.info(false).key_hint.as_deref(), Some("…cdef"));
+    assert!(!format!("{stored:?}").contains("0123"), "{stored:?}");
+
+    // Another model, the same API: the rest stays.
+    let other = AssistantUpdate {
+        model: Some("small".into()),
+        ..Default::default()
+    };
+    let changed = ModelConfig::updated(Some(&stored), other).unwrap();
+    assert_eq!(changed.model, "small");
+    assert_eq!(changed.api_key, stored.api_key);
+    assert_eq!(changed.think, Think::Off);
+
+    // The same host, another path: still the same API.
+    let moved = AssistantUpdate {
+        url: Some("https://API.example.com/v2".into()),
+        ..Default::default()
+    };
+    assert!(ModelConfig::updated(Some(&stored), moved)
+        .unwrap()
+        .api_key
+        .is_some());
+
+    // Another host: the key does not go along.
+    for url in ["https://evil.example.net/v1", "http://api.example.com/v1"] {
+        let moved = AssistantUpdate {
+            url: Some(url.into()),
+            ..Default::default()
+        };
+        let moved = ModelConfig::updated(Some(&stored), moved).unwrap();
+        assert_eq!(moved.api_key, None, "{url}");
+        assert_eq!(moved.model, "big");
+    }
+
+    let removed = AssistantUpdate {
+        key: KeyChange::Remove,
+        ..Default::default()
+    };
+    assert_eq!(
+        ModelConfig::updated(Some(&stored), removed)
+            .unwrap()
+            .api_key,
+        None
+    );
+
+    // A short key shows nothing of itself.
+    let short = AssistantUpdate {
+        key: KeyChange::Set { key: "abc".into() },
+        ..Default::default()
+    };
+    let short = ModelConfig::updated(Some(&stored), short).unwrap();
+    assert_eq!(short.info(false).key_hint.as_deref(), Some("…"));
+
+    // Without an API, nothing.
+    assert!(ModelConfig::updated(None, AssistantUpdate::default()).is_err());
+    let not_http = AssistantUpdate {
+        url: Some("localhost:11434".into()),
+        ..Default::default()
+    };
+    assert!(ModelConfig::updated(None, not_http).is_err());
+}

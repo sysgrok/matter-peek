@@ -176,12 +176,20 @@ impl WireSession {
                     .await
                     .map(|()| Response::Ok)
             }
+            Request::Assistant => peek.assistant().await.map(assistant),
+            Request::SetAssistant { update } => peek
+                .set_assistant(update)
+                .await
+                .map(|info| assistant(Some(info))),
+            Request::ClearAssistant => peek.clear_assistant().await.map(|()| assistant(None)),
             Request::ChatList
             | Request::ChatOpen { .. }
             | Request::ChatAsk { .. }
             | Request::ChatApprove { .. }
             | Request::ChatStop { .. }
-            | Request::ChatDelete { .. } => Err(PeekError::failed(
+            | Request::ChatDelete { .. }
+            | Request::AssistantModels { .. }
+            | Request::AssistantTest { .. } => Err(PeekError::failed(
                 "the assistant runs in matter-peek-server, not in this process",
             )),
         };
@@ -252,6 +260,10 @@ fn devices(list: DeviceList) -> Response {
 
 fn images(images: Vec<OtaImageInfo>) -> Response {
     Response::OtaImages { images }
+}
+
+fn assistant(assistant: Option<AssistantInfo>) -> Response {
+    Response::Assistant { assistant }
 }
 
 fn no_upload(upload_id: u32) -> PeekError {

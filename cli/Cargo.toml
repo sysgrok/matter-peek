@@ -30,3 +30,5 @@ futures-lite = { workspace = true }
 # for the prompt.
 termimad = "0.35"
 rustyline = "19"
+# `assistant set --api-key`: the key, typed without echo.
+rpassword = "7"

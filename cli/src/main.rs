@@ -3,7 +3,9 @@
 //! Every command goes through the matter-peek API: to a running
 //! `matter-peek-server` with `--server <ws-url>`, else to a controller started
 //! in this process (which needs the store to itself, so not while a server runs).
-//! `matter-peek mcp` offers the API to AI agents, as MCP tools over stdio.
+//! `matter-peek mcp` offers the API to AI agents, as MCP tools over stdio;
+//! `matter-peek chat` asks the assistant, whose model `matter-peek assistant`
+//! sets.
 //!
 //! ```text
 //! matter-peek [--server ws://127.0.0.1:8087] [--json] <command> [args...]
@@ -16,9 +18,9 @@ use std::process::ExitCode;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::builder::BoolishValueParser;
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use matter_peek_core::api::agent::Think;
 use matter_peek_core::api::{self, display, wire};
 use matter_peek_server::client::{self, Connection};
 
@@ -154,24 +156,12 @@ enum Command {
         #[arg(long)]
         allow_mutate: bool,
     },
-    /// Ask an AI model about the devices, in a chat: it looks into them with
-    /// the API's tools. Any model behind an OpenAI-compatible API will do,
-    /// e.g. a local Ollama. Without --server, holds the store while it runs.
+    /// Ask the assistant about the devices, in a chat: its model looks into
+    /// them with the API's tools. The chat is kept, as the web UI's. Without
+    /// --server, holds the store while it runs.
     Chat {
         /// Ask this, answer, and end (else chat until /quit or end of input).
         prompt: Option<String>,
-        /// The model's OpenAI-compatible API, e.g. http://localhost:11434/v1.
-        #[arg(long, env = "MATTER_PEEK_LLM_URL", value_name = "URL")]
-        llm_url: String,
-        /// The model, as the API names it, e.g. qwen3.5:9b.
-        #[arg(long, env = "MATTER_PEEK_LLM_MODEL")]
-        model: String,
-        /// The environment variable holding the API key, if the API needs one.
-        #[arg(long, value_name = "VAR", default_value = "MATTER_PEEK_LLM_KEY")]
-        api_key_env: String,
-        /// Ask the model not to think first: faster, less careful.
-        #[arg(long)]
-        no_think: bool,
         /// Show the model's thinking.
         #[arg(long)]
         show_thinking: bool,
@@ -183,6 +173,83 @@ enum Command {
         #[arg(long)]
         allow_mutate: bool,
     },
+    /// The assistant's model: any behind an OpenAI-compatible API, e.g. a
+    /// local Ollama. Kept in the store; its API key never leaves the side
+    /// that runs the assistant. Without a subcommand, shows it.
+    Assistant {
+        #[command(subcommand)]
+        action: Option<AssistantAction>,
+    },
+}
+
+/// What to do with the assistant's model.
+#[derive(Subcommand)]
+enum AssistantAction {
+    /// Show the assistant's model.
+    Show,
+    /// Set the assistant's model; what is not given stays. An API key stays
+    /// only while the API stays at the same address.
+    Set {
+        /// The model's OpenAI-compatible API, e.g. http://localhost:11434/v1.
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+        /// The model, as the API names it, e.g. qwen3.5:9b (see `assistant
+        /// models`).
+        #[arg(long)]
+        model: Option<String>,
+        #[command(flatten)]
+        key: KeyArgs,
+        /// Forget the API key.
+        #[arg(long, conflicts_with_all = ["api_key", "api_key_stdin"])]
+        no_api_key: bool,
+        /// Whether the model thinks before it answers: slower, more careful.
+        #[arg(long, value_name = "on|off", value_parser = BoolishValueParser::new())]
+        think: Option<bool>,
+    },
+    /// List the models the assistant's API offers, or another API's.
+    Models {
+        /// Another API than the assistant's.
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+        #[command(flatten)]
+        key: KeyArgs,
+    },
+    /// Ask the model to say hello, to see that it answers.
+    Test,
+    /// Forget the assistant's model, and its key.
+    Clear,
+}
+
+/// Where an API key comes from: never an argument, which shell histories and
+/// process lists show.
+#[derive(Args)]
+struct KeyArgs {
+    /// Ask for the API key (typed without echo).
+    #[arg(long, conflicts_with = "api_key_stdin")]
+    api_key: bool,
+    /// Read the API key from the first line of stdin.
+    #[arg(long)]
+    api_key_stdin: bool,
+}
+
+impl KeyArgs {
+    /// The key, as asked for; `Keep` if not.
+    fn read(&self) -> io::Result<api::KeyChange> {
+        let key = if self.api_key {
+            rpassword::prompt_password("API key: ")?
+        } else if self.api_key_stdin {
+            let mut line = String::new();
+            io::stdin().read_line(&mut line)?;
+            line
+        } else {
+            return Ok(api::KeyChange::Keep);
+        };
+
+        match key.trim() {
+            "" => Err(io::Error::other("no API key given")),
+            key => Ok(api::KeyChange::Set { key: key.into() }),
+        }
+    }
 }
 
 /// A change to the networks a device knows, each committed under a fail-safe.
@@ -298,28 +365,17 @@ async fn run(cli: Cli) -> io::Result<bool> {
         }
         Command::Chat {
             prompt,
-            llm_url,
-            model,
-            api_key_env,
-            no_think,
             show_thinking,
             verbose,
             allow_mutate,
         } => {
             let args = chat::ChatArgs {
                 prompt,
-                llm_url,
-                model,
-                api_key: std::env::var(api_key_env)
-                    .ok()
-                    .filter(|key| !key.is_empty()),
-                think: if no_think { Think::Off } else { Think::Default },
                 show_thinking,
                 verbose,
                 allow_mutate,
             };
-            chat::chat(cli.server, args).await?;
-            return Ok(true);
+            return chat::chat(cli.server, args).await;
         }
         _ => {}
     }
@@ -542,6 +598,7 @@ async fn run(cli: Cli) -> io::Result<bool> {
             call(&conn, &out, wire::Request::OtaDelete { name }).await?,
         ),
         Command::Ota(Ota::Update { node, name }) => update(&conn, &out, node.0, name).await,
+        Command::Assistant { action } => assistant(&conn, &out, action).await,
         Command::Mcp { .. } | Command::Chat { .. } => unreachable!("served above"),
     }
 }
@@ -697,6 +754,102 @@ fn images(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
     }
 
     Ok(true)
+}
+
+/// Show, set, try or forget the assistant's model.
+async fn assistant(
+    conn: &Connection,
+    out: &Out,
+    action: Option<AssistantAction>,
+) -> io::Result<bool> {
+    let request = match action.unwrap_or(AssistantAction::Show) {
+        AssistantAction::Show => wire::Request::Assistant,
+        AssistantAction::Set {
+            url,
+            model,
+            key,
+            no_api_key,
+            think,
+        } => wire::Request::SetAssistant {
+            update: api::AssistantUpdate {
+                url,
+                model,
+                think,
+                key: if no_api_key {
+                    api::KeyChange::Remove
+                } else {
+                    key.read()?
+                },
+            },
+        },
+        AssistantAction::Models { url, key } => {
+            let key = key.read()?;
+            let update =
+                (url.is_some() || key != api::KeyChange::Keep).then_some(api::AssistantUpdate {
+                    url,
+                    key,
+                    ..Default::default()
+                });
+
+            wire::Request::AssistantModels { update }
+        }
+        AssistantAction::Test => wire::Request::AssistantTest { update: None },
+        AssistantAction::Clear => wire::Request::ClearAssistant,
+    };
+
+    let response = call(conn, out, request).await?;
+    let answered = response.is_some();
+    if out.json {
+        return Ok(answered);
+    }
+
+    match response {
+        Some(wire::Response::Assistant {
+            assistant: Some(info),
+        }) => {
+            println!("Model:  {}", info.model);
+            println!("API:    {}", info.url);
+            println!(
+                "Key:    {}",
+                match &info.key_hint {
+                    Some(hint) => format!("set ({hint})"),
+                    None => "none".into(),
+                }
+            );
+            println!("Thinks: {}", if info.think { "yes" } else { "no" });
+            if info.from_env {
+                println!("(set by the environment: MATTER_PEEK_LLM_URL, MATTER_PEEK_LLM_MODEL)");
+            }
+        }
+        Some(wire::Response::Assistant { assistant: None }) => {
+            println!(
+                "No assistant model. Give it one, e.g.\n  \
+                 matter-peek assistant set --url http://localhost:11434/v1 --model qwen3.5:9b"
+            );
+        }
+        Some(wire::Response::Models { models }) => {
+            if models.is_empty() {
+                println!("The API offers no models.");
+            }
+            for model in models {
+                println!("{model}");
+            }
+        }
+        Some(wire::Response::Tested {
+            model,
+            reply,
+            millis,
+        }) => {
+            println!(
+                "{model} answered in {:.1} s: {}",
+                millis as f32 / 1000.0,
+                reply.trim()
+            );
+        }
+        _ => {}
+    }
+
+    Ok(answered)
 }
 
 /// Follow a device's health until the subscription stops or the process is

@@ -184,6 +184,20 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             Op::ListDevices(reply) => {
                 let _ = reply.send(self.list_devices(None)).await;
             }
+            Op::Assistant(reply) => {
+                let model = self
+                    .store
+                    .load_assistant()
+                    .map_err(|e| failed("cannot read the assistant's model", e));
+                let _ = reply.send(model).await;
+            }
+            Op::SetAssistant { model, reply } => {
+                let saved = self
+                    .store
+                    .save_assistant(model.as_ref())
+                    .map_err(|e| failed("cannot keep the assistant's model", e));
+                let _ = reply.send(saved).await;
+            }
             Op::Sync(reply) => {
                 let _ = reply.send(self.sync().await).await;
             }
@@ -481,6 +495,8 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             }
             Op::OtaUploadBegin { reply, .. } => refuse(reply, error).await,
             Op::OtaUploadChunk { reply, .. } => refuse(reply, error).await,
+            Op::Assistant(reply) => refuse(reply, error).await,
+            Op::SetAssistant { reply, .. } => refuse(reply, error).await,
             Op::Unwatch { .. } | Op::OtaUploadDiscard { .. } => {}
         }
     }

@@ -562,3 +562,60 @@ pub struct EthernetDiag {
     pub overrun_count: Option<u64>,
     pub time_since_reset_secs: Option<u64>,
 }
+
+/// The assistant's model, as the API shows it: never its key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AssistantInfo {
+    /// The model's API, OpenAI-compatible: e.g. `http://localhost:11434/v1`.
+    pub url: String,
+    /// The model, as the API names it.
+    pub model: String,
+    /// The end of the API key (`…4f2a`), if there is one.
+    pub key_hint: Option<String>,
+    /// Whether the model thinks before it answers: slower, more careful.
+    pub think: bool,
+    /// Set by the environment of the process that runs the assistant
+    /// (`MATTER_PEEK_LLM_*`), so not to be changed through the API.
+    #[serde(default)]
+    pub from_env: bool,
+}
+
+/// A change to the assistant's model; `None` keeps a setting as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AssistantUpdate {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub think: Option<bool>,
+    #[serde(default)]
+    pub key: KeyChange,
+}
+
+/// What becomes of the assistant's API key.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum KeyChange {
+    /// Keep it, while the API stays at the same address: a key only goes
+    /// where it was given for.
+    #[default]
+    Keep,
+    Set {
+        key: String,
+    },
+    Remove,
+}
+
+impl fmt::Debug for KeyChange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Keep => f.write_str("Keep"),
+            Self::Set { .. } => f.write_str("Set { .. }"),
+            Self::Remove => f.write_str("Remove"),
+        }
+    }
+}

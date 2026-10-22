@@ -2,36 +2,25 @@
 
 use std::time::Duration;
 
-use matter_peek_core::api::agent::{Http, Think};
+use matter_peek_core::api::agent::{Http, ModelConfig, Think};
 
 /// How long a model may take to answer.
 const MODEL_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// A model, and its API.
-#[derive(Clone, Debug)]
-pub struct LlmConfig {
-    /// The API, e.g. `http://localhost:11434/v1`.
-    pub url: String,
-    /// The model, as the API names it.
-    pub model: String,
-    pub api_key: Option<String>,
-    pub think: Think,
-}
+/// The model `MATTER_PEEK_LLM_URL` and `MATTER_PEEK_LLM_MODEL` name, with the
+/// key in `MATTER_PEEK_LLM_KEY` if the API needs one: it overrides the one
+/// kept in the store. `None` without both.
+pub fn model_from_env() -> Option<ModelConfig> {
+    let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
 
-impl LlmConfig {
-    /// The model `MATTER_PEEK_LLM_URL` and `MATTER_PEEK_LLM_MODEL` name, with
-    /// the key in `MATTER_PEEK_LLM_KEY` if the API needs one; `None` without
-    /// both.
-    pub fn from_env() -> Option<Self> {
-        let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-
-        Some(Self {
-            url: var("MATTER_PEEK_LLM_URL")?,
-            model: var("MATTER_PEEK_LLM_MODEL")?,
-            api_key: var("MATTER_PEEK_LLM_KEY"),
-            think: Think::Default,
-        })
-    }
+    Some(ModelConfig {
+        url: var("MATTER_PEEK_LLM_URL")?
+            .trim_end_matches('/')
+            .to_string(),
+        model: var("MATTER_PEEK_LLM_MODEL")?,
+        api_key: var("MATTER_PEEK_LLM_KEY"),
+        think: Think::Default,
+    })
 }
 
 /// The model's API over HTTP(S): blocking calls, on the thread pool.
@@ -65,10 +54,7 @@ impl Http for Ureq {
     ) -> Result<String, String> {
         let agent = self.0.clone();
         let url = url.to_string();
-        let headers: Vec<(String, String)> = headers
-            .iter()
-            .map(|(name, value)| (name.to_string(), value.to_string()))
-            .collect();
+        let headers = owned(headers);
 
         blocking::unblock(move || {
             let mut request = agent.post(&url);
@@ -76,26 +62,67 @@ impl Http for Ureq {
                 request = request.header(name, value);
             }
 
-            let mut response = request
-                .send(body)
-                .map_err(|e| format!("cannot reach the model at {url}: {e}"))?;
-            let status = response.status();
-            let text = response
-                .body_mut()
-                .read_to_string()
-                .map_err(|e| format!("cannot read the model's answer: {e}"))?;
-
-            if status.is_success() {
-                Ok(text)
-            } else {
-                Err(format!(
-                    "the model's API answered {status}: {}",
-                    clip(&text, 300)
-                ))
-            }
+            answer(request.send(body), &url)
         })
         .await
     }
+
+    async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<String, String> {
+        let agent = self.0.clone();
+        let url = url.to_string();
+        let headers = owned(headers);
+
+        blocking::unblock(move || {
+            let mut request = agent.get(&url);
+            for (name, value) in &headers {
+                request = request.header(name, value);
+            }
+
+            answer(request.call(), &url)
+        })
+        .await
+    }
+}
+
+fn owned(headers: &[(&str, &str)]) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+}
+
+/// The body of the API's answer, or why not.
+fn answer(
+    response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    url: &str,
+) -> Result<String, String> {
+    let mut response =
+        response.map_err(|e| format!("cannot reach the model's API at {url}: {e}"))?;
+    let status = response.status();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("cannot read the model's answer: {e}"))?;
+
+    if status.is_success() {
+        return Ok(text);
+    }
+
+    // Most APIs say why in `{"error": {"message": …}}`.
+    let error = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|body| {
+            let error = &body["error"];
+            error["message"]
+                .as_str()
+                .or_else(|| error.as_str())
+                .map(str::to_string)
+        });
+
+    Err(format!(
+        "the model's API answered {status}: {}",
+        error.as_deref().unwrap_or_else(|| clip(&text, 300))
+    ))
 }
 
 /// At most `max` bytes of `text`, cut at a character.

@@ -29,6 +29,7 @@ use rs_matter::tlv::{FromTLV, OctetsVec, TLVElement, ToTLV};
 use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::sync::blocking::Mutex;
 
+use crate::api::agent::{ModelConfig, Think};
 use crate::model::{DeviceHandle, NetworkKind, StoredDevice};
 
 /// Scratch buffer size for the KV store (fits a fabric blob or our device list).
@@ -54,6 +55,8 @@ const DEVICES_KEY: u16 = VENDOR_KEYS_START;
 const CA_KEY: u16 = VENDOR_KEYS_START + 1;
 /// The next device node ID to hand out.
 const NEXT_NODE_ID_KEY: u16 = VENDOR_KEYS_START + 2;
+/// The assistant's model, with its API key.
+const ASSISTANT_KEY: u16 = VENDOR_KEYS_START + 3;
 
 /// Owns a shared KV store and exposes the controller's persistence operations:
 /// load/save our fabric (via rs-matter) and our device records. Generic over the
@@ -184,6 +187,27 @@ impl<'a, S: KvBlobStore> ControllerStore<'a, S> {
         Persist::new(&self.kv).store_tlv(NEXT_NODE_ID_KEY, NextNodeId { node_id })
     }
 
+    /// The assistant's model, if one is set.
+    pub fn load_assistant(&self) -> Result<Option<ModelConfig>, Error> {
+        self.kv
+            .access(|kv, buf| match kv.load(ASSISTANT_KEY, buf)? {
+                Some(data) => Ok(Some(
+                    AssistantBlob::from_tlv(&TLVElement::new(data))?.into_model(),
+                )),
+                None => Ok(None),
+            })
+    }
+
+    /// Keep `model` as the assistant's; `None` forgets it, and its key.
+    pub fn save_assistant(&self, model: Option<&ModelConfig>) -> Result<(), Error> {
+        match model {
+            Some(model) => {
+                Persist::new(&self.kv).store_tlv(ASSISTANT_KEY, AssistantBlob::from_model(model))
+            }
+            None => self.kv.access(|kv, buf| kv.remove(ASSISTANT_KEY, buf)),
+        }
+    }
+
     /// Replace the local tag set of the device with this `node_id`, persisting
     /// the change. Tags are normalized (trimmed, empties dropped, de-duplicated,
     /// order preserved). Returns `true` if a matching device was found and
@@ -258,6 +282,35 @@ struct CaBlob {
     icac_tier: bool,
     /// The RCAC or ICAC private key, as a TLV octet string (not a u8 array).
     signing_key: OctetsVec,
+}
+
+/// Persisted assistant model.
+#[derive(ToTLV, FromTLV)]
+struct AssistantBlob {
+    url: String,
+    model: String,
+    api_key: Option<String>,
+    think: bool,
+}
+
+impl AssistantBlob {
+    fn from_model(model: &ModelConfig) -> Self {
+        Self {
+            url: model.url.clone(),
+            model: model.model.clone(),
+            api_key: model.api_key.clone(),
+            think: model.think == Think::Default,
+        }
+    }
+
+    fn into_model(self) -> ModelConfig {
+        ModelConfig {
+            url: self.url,
+            model: self.model,
+            api_key: self.api_key,
+            think: Think::from_bool(self.think),
+        }
+    }
 }
 
 /// Persisted next device node ID.
@@ -561,5 +614,23 @@ mod tests {
         s.reserve_node_id(300).unwrap();
         s.reserve_node_id(250).unwrap();
         assert_eq!(s.allocate_node_id(100).unwrap(), 301);
+    }
+
+    #[test]
+    fn assistant_model_round_trips_and_is_forgotten() {
+        let store = store();
+        assert_eq!(store.load_assistant().unwrap(), None);
+
+        let model = ModelConfig {
+            url: "http://localhost:11434/v1".into(),
+            model: "qwen3.5:9b".into(),
+            api_key: Some("sk-secret".into()),
+            think: Think::Off,
+        };
+        store.save_assistant(Some(&model)).unwrap();
+        assert_eq!(store.load_assistant().unwrap(), Some(model));
+
+        store.save_assistant(None).unwrap();
+        assert_eq!(store.load_assistant().unwrap(), None);
     }
 }

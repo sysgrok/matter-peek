@@ -119,6 +119,8 @@ enum Ask {
     Decommission(u64),
     DeleteImage(String),
     DeleteChat(String),
+    /// The assistant's model, and its key.
+    ForgetModel,
 }
 
 enum Msg {
@@ -468,6 +470,12 @@ impl Component for App {
                             ctx.link().clone(),
                             wire::Request::ChatDelete { chat_id },
                         );
+                    }
+                    Some(Ask::ForgetModel) => {
+                        ctx.link()
+                            .send_message(Msg::Assistant(AssistantMsg::Settings(
+                                assistant::SettingsMsg::Forget,
+                            )))
                     }
                     None => {}
                 }
@@ -1123,7 +1131,12 @@ impl Component for App {
                     // Uploads run on their own connection (`send_ota_upload`).
                     wire::Response::OtaUploadStarted { .. } => {}
                     // The Assistant page's requests answer to it.
-                    wire::Response::Chats { .. } | wire::Response::Chat { .. } => {}
+                    // The Assistant page's own.
+                    wire::Response::Chats { .. }
+                    | wire::Response::Chat { .. }
+                    | wire::Response::Assistant { .. }
+                    | wire::Response::Models { .. }
+                    | wire::Response::Tested { .. } => {}
                     wire::Response::Cancelled { decommissioned } => {
                         self.notice = Some(if decommissioned {
                             "Commission cancelled — the device had been added to our fabric and was cleaned up (decommissioned).".into()
@@ -1238,6 +1251,7 @@ impl Component for App {
                 { self.view_discover_modal(link) }
                 { self.view_camera_modal(link) }
                 { self.view_logs_modal(link) }
+                { self.view_settings_modal(link) }
                 { self.view_network_modal(link) }
                 { self.view_ask(link) }
             </>
@@ -1659,6 +1673,12 @@ impl App {
                 "Delete this chat?".to_string(),
                 "Its conversation is gone for good.".to_string(),
                 "Delete",
+            ),
+            Ask::ForgetModel => (
+                "Forget the assistant's model?".to_string(),
+                "Its API key goes too. The chats stay; the assistant answers again once it has a model."
+                    .to_string(),
+                "Forget",
             ),
             Ask::DeleteImage(name) => (
                 format!("Delete {name}?"),

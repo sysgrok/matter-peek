@@ -29,7 +29,8 @@ pub(crate) struct ApiDispatch {
 }
 
 impl ApiDispatch {
-    async fn connection(&self) -> Result<Rc<Connection>, String> {
+    /// The connection: made now, if not yet.
+    pub(crate) async fn connection(&self) -> Result<Rc<Connection>, String> {
         if let Some(conn) = self.conn.borrow().clone() {
             return Ok(conn);
         }
