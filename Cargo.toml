@@ -48,6 +48,7 @@ nix = { version = "0.30", features = ["net"] }
 # PASE session reuse.
 [patch.crates-io]
 rs-matter = { path = "../rs-matter/rs-matter" }
+rs-matter-codegen = { path = "../rs-matter/rs-matter-codegen" }
 #rs-matter = { git = "https://github.com/project-chip/rs-matter" }
 
 # `--profile dist`: the executable to hand out, as small as it gets without

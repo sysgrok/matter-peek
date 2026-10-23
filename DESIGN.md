@@ -83,6 +83,7 @@ controller serves the CLI, the MCP server and mobile apps.
 | Health | `peek_device` (one-shot: also its heap, and the threads (tasks) of its software and their stacks, where it reports them), `subscribe` (live: General Diagnostics (uptime, reboots, operating hours) and the fabrics the device is on; returns a `Subscription`, which stops when dropped) |
 | Thread | `read_thread_mesh`: networks, nodes, links and findings, from our Thread devices' tables and the LAN's MeshCoP / Matter adverts |
 | Device | `read_network` (interfaces, known networks, Wi-Fi / Thread / Ethernet diagnostics), `change_network` (add or update, remove, connect, reorder a known network), `retrieve_logs`, `identify` |
+| Data model | `read_model` (endpoints, device types, clusters, attribute values, accepted commands, with names and types), `write_attribute`, `invoke_command`: any cluster, values as JSON |
 | OTA | `ota_images`, `ota_upload` (returns an `OtaUpload` to write chunks to), `ota_delete`, `ota_update` (a progress listener) |
 | Assistant | `assistant`, `set_assistant` (a key stays only for the same API address), `clear_assistant`: its model, kept in the store; never its key, which only `assistant_model` (Rust, for an agent in the same process) returns |
 
@@ -219,6 +220,15 @@ of it is private to `core`.
   ConnectNetwork answer falls through to CASE, which decides.
 - Discovery lists only devices in commissioning mode (mDNS `CM` ≠ 0), plus
   commissionable BLE advertisements.
+- The data model works on any cluster with no code per cluster: `build.rs`
+  generates a schema from the Matter IDL rs-matter's clusters come from
+  (`rs_matter_codegen::parse_idl`): every cluster's attributes and commands,
+  their names and types, and the enums, bitmaps and structs they use. One
+  converter reads TLV into JSON and writes JSON as TLV by that schema (enums by
+  name, bitmaps as bit names, structs as objects by field name); rs-matter's
+  untyped `read_with` / `write_with` / `invoke_with` carry it. The web UI
+  builds its editors and command forms from the same types, and adds quick
+  controls (switches, sliders, choices, readings) declared per cluster.
 - `advertised_devices` browses `_matter._tcp` across all fabrics, resolves each
   node and groups the nodes sharing an address into one device. A foreign
   fabric is named (its controller's vendor, its label) when a device of ours is

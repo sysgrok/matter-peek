@@ -55,6 +55,7 @@ use window::OpenedWindow;
 mod advertised;
 mod commission;
 mod convert;
+mod datamodel;
 mod devices;
 mod fabrics;
 mod locks;
@@ -268,6 +269,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             | Op::ReadThreadMesh { fabric, .. } => self.fabric_keys(fabric, Mode::Read),
             Op::DeleteFabric { fabric, .. } => self.fabric_keys(fabric, Mode::Write),
             Op::PeekDevice { node_id, .. }
+            | Op::ReadModel { node_id, .. }
             | Op::ReadNetwork { node_id, .. }
             | Op::RetrieveLogs { node_id, .. }
             | Op::Identify { node_id, .. }
@@ -275,6 +277,8 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             | Op::Window { node_id, .. }
             | Op::DeviceTime { node_id, .. } => self.device_keys(*node_id, Mode::Read),
             Op::Decommission { node_id, .. }
+            | Op::WriteAttribute { node_id, .. }
+            | Op::InvokeCommand { node_id, .. }
             | Op::ChangeNetwork { node_id, .. }
             | Op::RemoveDeviceFabric { node_id, .. }
             | Op::OpenWindow { node_id, .. }
@@ -333,6 +337,41 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             }
             Op::AdvertisedDevices(reply) => {
                 let _ = reply.send(self.advertised_devices().await).await;
+            }
+            Op::ReadModel {
+                node_id,
+                endpoint,
+                cluster,
+                reply,
+            } => {
+                let model = self.read_model(node_id, endpoint, cluster.as_deref()).await;
+                let _ = reply.send(model).await;
+            }
+            Op::WriteAttribute {
+                node_id,
+                endpoint,
+                cluster,
+                attribute,
+                value,
+                reply,
+            } => {
+                let written = self
+                    .write_attribute(node_id, endpoint, &cluster, &attribute, &value)
+                    .await;
+                let _ = reply.send(written).await;
+            }
+            Op::InvokeCommand {
+                node_id,
+                endpoint,
+                cluster,
+                command,
+                fields,
+                reply,
+            } => {
+                let outcome = self
+                    .invoke_command(node_id, endpoint, &cluster, &command, &fields)
+                    .await;
+                let _ = reply.send(outcome).await;
             }
             Op::ReadQrImage { image, reply } => {
                 let _ = reply.send(read_qr_image(&image)).await;
@@ -731,6 +770,10 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
         match op {
             Op::Discover { reply, .. } => refuse(reply, error).await,
             Op::AdvertisedDevices(reply) => refuse(reply, error).await,
+            Op::ReadModel { reply, .. } | Op::WriteAttribute { reply, .. } => {
+                refuse(reply, error).await
+            }
+            Op::InvokeCommand { reply, .. } => refuse(reply, error).await,
             Op::ReadQrImage { reply, .. } => refuse(reply, error).await,
             Op::Commission { reply, .. } => refuse(reply, error).await,
             Op::ListDevices { reply, .. } | Op::Sync { reply, .. } => refuse(reply, error).await,

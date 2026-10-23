@@ -90,6 +90,32 @@ pub enum Request {
     /// See `MatterPeek::advertised_devices`. Answered with
     /// [`Response::AdvertisedDevices`].
     AdvertisedDevices,
+    /// See `MatterPeek::read_model`. Answered with [`Response::Model`].
+    ReadModel {
+        node_id: u64,
+        #[serde(default)]
+        endpoint: Option<u16>,
+        #[serde(default)]
+        cluster: Option<String>,
+    },
+    /// See `MatterPeek::write_attribute`. Answered with [`Response::Model`].
+    WriteAttribute {
+        node_id: u64,
+        endpoint: u16,
+        cluster: String,
+        attribute: String,
+        value: String,
+    },
+    /// See `MatterPeek::invoke_command`. Answered with
+    /// [`Response::CommandOutcome`].
+    InvokeCommand {
+        node_id: u64,
+        endpoint: u16,
+        cluster: String,
+        command: String,
+        #[serde(default)]
+        fields: String,
+    },
     /// See `MatterPeek::list_devices`. Answered with [`Response::Devices`].
     ListDevices {
         #[serde(default)]
@@ -281,6 +307,12 @@ pub enum Response {
     },
     AdvertisedDevices {
         devices: Vec<AdvertisedDevice>,
+    },
+    Model {
+        model: DeviceModel,
+    },
+    CommandOutcome {
+        outcome: CommandOutcome,
     },
     Peek {
         node_id: u64,

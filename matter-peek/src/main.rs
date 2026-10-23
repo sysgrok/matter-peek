@@ -136,6 +136,38 @@ enum Command {
     },
     /// Read the health of a device.
     Peek { node: Node },
+    /// Read a device's data model: its endpoints and their device types, their
+    /// clusters, the clusters' attributes (* writable) and commands.
+    Model {
+        node: Node,
+        /// Only this endpoint.
+        #[arg(long)]
+        endpoint: Option<u16>,
+        /// Only this cluster: its ID or name.
+        #[arg(long)]
+        cluster: Option<String>,
+    },
+    /// Write an attribute of a device: a JSON value (an enum by name, a
+    /// bitmap as the names of its bits, a struct as an object).
+    Write {
+        node: Node,
+        endpoint: u16,
+        /// The cluster: its ID or name.
+        cluster: String,
+        /// The attribute: its ID or name.
+        attribute: String,
+        value: String,
+    },
+    /// Invoke a command of a device, with its fields as a JSON object.
+    Invoke {
+        node: Node,
+        endpoint: u16,
+        /// The cluster: its ID or name.
+        cluster: String,
+        /// The command: its ID or name.
+        command: String,
+        fields: Option<String>,
+    },
     /// Read the networking of a device: its interfaces and addresses, the
     /// networks it knows, and the diagnostics of the network it is on; or
     /// change the networks it knows.
@@ -718,6 +750,85 @@ async fn run(cli: Cli) -> io::Result<bool> {
                 response => response.is_some(),
             },
         ),
+        Command::Model {
+            node,
+            endpoint,
+            cluster,
+        } => {
+            let request = wire::Request::ReadModel {
+                node_id: node.0,
+                endpoint,
+                cluster,
+            };
+            Ok(match call(&conn, &out, request).await? {
+                Some(wire::Response::Model { model }) if !out.json => {
+                    print_model(&model);
+                    true
+                }
+                response => response.is_some(),
+            })
+        }
+        Command::Write {
+            node,
+            endpoint,
+            cluster,
+            attribute,
+            value,
+        } => {
+            let request = wire::Request::WriteAttribute {
+                node_id: node.0,
+                endpoint,
+                cluster,
+                attribute: attribute.clone(),
+                value,
+            };
+            Ok(match call(&conn, &out, request).await? {
+                Some(wire::Response::Model { model }) if !out.json => {
+                    let written = model
+                        .endpoints
+                        .iter()
+                        .flat_map(|e| &e.clusters)
+                        .flat_map(|c| &c.attributes)
+                        .find(|a| {
+                            a.name
+                                .as_deref()
+                                .is_some_and(|name| name.eq_ignore_ascii_case(&attribute))
+                                || attribute.parse::<u32>().is_ok_and(|id| id == a.id)
+                        });
+                    match written.and_then(|a| a.value.as_deref()) {
+                        Some(value) => println!("Written; it reads {value}"),
+                        None => println!("Written."),
+                    }
+                    true
+                }
+                response => response.is_some(),
+            })
+        }
+        Command::Invoke {
+            node,
+            endpoint,
+            cluster,
+            command,
+            fields,
+        } => {
+            let request = wire::Request::InvokeCommand {
+                node_id: node.0,
+                endpoint,
+                cluster,
+                command,
+                fields: fields.unwrap_or_default(),
+            };
+            Ok(match call(&conn, &out, request).await? {
+                Some(wire::Response::CommandOutcome { outcome }) if !out.json => {
+                    match (outcome.response, outcome.fields) {
+                        (Some(response), Some(fields)) => println!("{response}: {fields}"),
+                        _ => println!("Done."),
+                    }
+                    true
+                }
+                response => response.is_some(),
+            })
+        }
         Command::Network {
             node,
             endpoint,
@@ -1181,8 +1292,13 @@ fn devices(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
         .any(|d| d.handle.fabric_index != devices[0].handle.fabric_index);
 
     for d in &devices {
+        let kind = d
+            .device_type()
+            .and_then(display::device_type_name)
+            .map(|name| format!(" ({name})"))
+            .unwrap_or_default();
         let mut line = format!(
-            "{}  {}  vendor {}",
+            "{}  {}{kind}  vendor {}",
             display::hex_u64(d.handle.node_id),
             d.title(),
             d.vendor().unwrap_or_else(|| "unknown".into())
@@ -2103,6 +2219,54 @@ fn threads_text(threads: &[api::ThreadMetric]) -> String {
     }
 
     lines.join("\n")
+}
+
+/// A device's data model: by endpoint, its device types, then each cluster's
+/// attributes and commands.
+fn print_model(model: &api::DeviceModel) {
+    for endpoint in &model.endpoints {
+        let types: Vec<String> = endpoint
+            .device_types
+            .iter()
+            .map(|t| display::device_type_label(t.id))
+            .collect();
+        println!("Endpoint {}: {}", endpoint.id, types.join(", "));
+
+        for cluster in &endpoint.clusters {
+            println!(
+                "  {}",
+                named(cluster.name.as_deref(), display::hex_u32(cluster.id))
+            );
+            for a in &cluster.attributes {
+                let value = match (&a.value, &a.error) {
+                    (Some(value), _) => value.clone(),
+                    (None, Some(e)) => format!("({e})"),
+                    (None, None) => String::new(),
+                };
+                println!(
+                    "    {}{}  {value}",
+                    named(a.name.as_deref(), display::hex_u32(a.id)),
+                    if a.writable { " *" } else { "" }
+                );
+            }
+            if !cluster.commands.is_empty() {
+                let commands: Vec<String> = cluster
+                    .commands
+                    .iter()
+                    .map(|c| named(c.name.as_deref(), display::hex_u32(c.id)))
+                    .collect();
+                println!("    commands: {}", commands.join(", "));
+            }
+        }
+    }
+}
+
+/// `name (id)`, or just the ID.
+fn named(name: Option<&str>, id: String) -> String {
+    match name {
+        Some(name) => format!("{name} ({id})"),
+        None => id,
+    }
 }
 
 /// A device the network advertises: its addresses, then its fabrics.

@@ -67,6 +67,13 @@ pub enum Icon {
     Stop,
     ArrowLeft,
     Sliders,
+    Model,
+    Bulb,
+    Plug,
+    Toggle,
+    Thermometer,
+    Fan,
+    Blinds,
 }
 
 pub fn icon(glyph: Icon, size: u32) -> Html {
@@ -361,6 +368,39 @@ pub fn icon(glyph: Icon, size: u32) -> Html {
             html! { <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" /> }
         }
         Icon::ArrowLeft => html! { <path d="M19 12H5M12 19l-7-7 7-7" /> },
+        Icon::Bulb => html! {
+            <path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5M9 18h6M10 22h4" />
+        },
+        Icon::Plug => html! {
+            <path d="M12 22v-5M9 8V2M15 8V2M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" />
+        },
+        Icon::Toggle => html! {
+            <>
+                <rect x="2" y="6" width="20" height="12" rx="6" />
+                <circle cx="16" cy="12" r="2" />
+            </>
+        },
+        Icon::Thermometer => html! {
+            <path d="M14 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z" />
+        },
+        Icon::Fan => html! {
+            <>
+                <path d="M10.83 16.38a6.08 6.08 0 0 1-8.62-7l5.41 1.45a6.08 6.08 0 0 1 7-8.62l-1.45 5.41a6.08 6.08 0 0 1 8.62 7l-5.41-1.45a6.08 6.08 0 0 1-7 8.62l1.45-5.41Z" />
+                <path d="M12 12v.01" />
+            </>
+        },
+        Icon::Blinds => html! {
+            <>
+                <path d="M3 3h18M20 7H8M20 11H8M10 19h10M8 15h12M4 3v14" />
+                <circle cx="4" cy="19" r="2" />
+            </>
+        },
+        Icon::Model => html! {
+            <>
+                <rect x="14" y="3" width="7" height="7" rx="1" />
+                <path d="M10 21V8a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H3" />
+            </>
+        },
         Icon::Sliders => html! {
             <path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4" />
         },
@@ -397,6 +437,23 @@ pub fn kind_icon(kind: Option<api::NetworkKind>) -> Option<Icon> {
         api::NetworkKind::Ethernet => Some(Icon::Ethernet),
         _ => None,
     }
+}
+
+/// The icon of a device type: what kind of device it is.
+pub fn device_type_icon(device_type: Option<u32>) -> Option<Icon> {
+    Some(match device_type? {
+        0x0100 | 0x0101 | 0x010C | 0x010D => Icon::Bulb,
+        0x010A | 0x010B | 0x010F | 0x0110 => Icon::Plug,
+        0x000F | 0x0103 | 0x0104 | 0x0105 => Icon::Toggle,
+        0x0072 | 0x0301 | 0x0302 | 0x0309 => Icon::Thermometer,
+        0x002B | 0x002D => Icon::Fan,
+        0x0202 | 0x0203 | 0x0230 | 0x0231 => Icon::Blinds,
+        0x000A => Icon::Lock,
+        0x0015 | 0x002C | 0x0043 | 0x0044 | 0x0045 | 0x0076 | 0x0106 | 0x0107 | 0x0305 | 0x0306
+        | 0x0307 => Icon::Gauge,
+        0x0091 => Icon::Router,
+        _ => return None,
+    })
 }
 
 /// The color class of a kind of network.

@@ -6,7 +6,7 @@ use yew::prelude::*;
 
 use matter_peek_core::api::{self, display};
 
-use crate::icons::{icon, kind_class, kind_icon, Icon};
+use crate::icons::{device_type_icon, icon, kind_class, kind_icon, Icon};
 use crate::ui;
 use crate::{
     input_value, log_intent_file, log_intent_name, network, select_value, App, Ask, LiveSub,
@@ -216,11 +216,15 @@ impl App {
                 <header class="device-head">
                     <span class={classes!("tile-icon", kind_class(d.network))}
                         title={d.network.map(|kind| kind.label())}>
-                        { icon(kind_icon(d.network).unwrap_or(Icon::Chip), 22) }
+                        { icon(device_type_icon(d.device_type()).or(kind_icon(d.network)).unwrap_or(Icon::Chip), 22) }
                     </span>
                     <div class="device-title">
                         <h2>{ d.title() }</h2>
                         <p>
+                            if let Some(name) = d.device_type().and_then(display::device_type_name) {
+                                <span class="device-type">{ name }</span>
+                                <span class="dot-sep"></span>
+                            }
                             { d.vendor().unwrap_or_else(|| "Unknown vendor".into()) }
                             if d.is_test_vendor() {
                                 { ui::pill("Test vendor", Some("is-warning"), None) }
@@ -276,6 +280,9 @@ impl App {
                         { ui::icon_button(Icon::Chip, "Memory", classes!("is-small", "is-soft"), offline,
                             Some("Its heap, and the stacks of its tasks"),
                             link.callback(move |_| Msg::Memory(crate::memory::MemoryMsg::Open(node_id)))) }
+                        { ui::icon_button(Icon::Model, "Model", classes!("is-small", "is-soft"), offline,
+                            Some("Its endpoints, clusters, attributes and commands"),
+                            link.callback(move |_| Msg::Model(crate::datamodel::ModelMsg::Open(node_id)))) }
                         { ui::icon_button(Icon::Clock, "Clock", classes!("is-small", "is-soft"), offline,
                             Some("Its clock; set it from ours"),
                             link.callback(move |_| Msg::Clock(crate::clock::ClockMsg::Open(node_id)))) }

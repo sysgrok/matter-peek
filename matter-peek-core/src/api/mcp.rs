@@ -59,18 +59,20 @@ const MUTATING_TOOLS: &[&str] = &[
     "rename_fabric",
     "set_default_fabric",
     "delete_fabric",
+    "write_attribute",
+    "invoke_command",
 ];
 
 /// What an agent should know about the tools, for its instructions.
 pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-only tools \
-     (discover, list_devices, peek_device, read_network, retrieve_logs, identify, \
+     (discover, list_devices, peek_device, read_model, read_network, retrieve_logs, identify, \
      read_qr_image, ota_images, ota_updates, commissioning_window, \
      device_time, list_fabrics) are always available. The tools that change \
      devices or the stored state (commission, decommission, remember, \
      set_tags, sync, ota_upload, ota_delete, ota_update, add_network, \
      remove_network, connect_network, reorder_network, \
      open/close_commissioning_window, set_device_time, remove_device_fabric, \
-     create/rename/set_default/delete_fabric) are \
+     create/rename/set_default/delete_fabric, write_attribute, invoke_command) are \
      available only if the operator allowed them (e.g. `matter-peek mcp \
      --allow-mutate`). Our devices are on fabrics of ours (\"homes\", see \
      list_fabrics); the tools that list or commission take an optional \
@@ -88,6 +90,7 @@ const ACTING_TOOLS: &[&str] = &["identify"];
 /// fabric, its network or its firmware, or lose an image.
 const DESTRUCTIVE_TOOLS: &[&str] = &[
     "decommission",
+    "invoke_command",
     "delete_fabric",
     "remove_device_fabric",
     "ota_delete",
@@ -229,6 +232,24 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
              it, how many devices are on it, and which is the default (what a \
              tool naming no fabric gets).",
             json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "read_model",
+            "Read the data model of a listed device: its endpoints and their \
+             device types, each endpoint's clusters with their attribute \
+             values by name (enums by name, bitmaps as the names of the bits \
+             set, temperatures in 0.01 degC) and which are writable, and the \
+             commands they accept with their fields' types. Narrow it with \
+             endpoint and cluster (an id or a name, e.g. \"Thermostat\").",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node_id": node_id_schema(),
+                    "endpoint": { "type": "integer", "description": "Only this endpoint." },
+                    "cluster": { "type": ["string", "integer"], "description": "Only this cluster: its id or name." }
+                },
+                "required": ["node_id"]
+            }),
         ),
         tool(
             "peek_device",
@@ -390,6 +411,43 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
     ];
 
     if caps.allow_mutate {
+        tools.push(tool(
+            "write_attribute",
+            "MUTATING: write an attribute of a listed device (one read_model \
+             lists as writable) and answer with its cluster read again. \
+             value is JSON: an enum by name or number, a bitmap as a list of \
+             bit names, a struct as an object of fields.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node_id": node_id_schema(),
+                    "endpoint": { "type": "integer" },
+                    "cluster": { "type": ["string", "integer"], "description": "Its id or name." },
+                    "attribute": { "type": ["string", "integer"], "description": "Its id or name." },
+                    "value": { "description": "The value, as read_model shows them." }
+                },
+                "required": ["node_id", "endpoint", "cluster", "attribute", "value"]
+            }),
+        ));
+        tools.push(tool(
+            "invoke_command",
+            "MUTATING: invoke a command of a listed device (one read_model lists \
+             for the cluster), with its fields as an object by field name; \
+             answers with the response's fields, if it has a response. A \
+             command can do anything the device offers, even remove a fabric: \
+             say what it will do before invoking it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node_id": node_id_schema(),
+                    "endpoint": { "type": "integer" },
+                    "cluster": { "type": ["string", "integer"], "description": "Its id or name." },
+                    "command": { "type": ["string", "integer"], "description": "Its id or name." },
+                    "fields": { "type": "object", "description": "The command's fields, by name." }
+                },
+                "required": ["node_id", "endpoint", "cluster", "command"]
+            }),
+        ));
         tools.push(tool(
             "commission",
             "Commission a Matter device onto a fabric of ours (`fabric`, else \
@@ -902,6 +960,31 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
             node_id: arg_node(args)?,
             name: arg_str(args, "name")?,
         },
+        "read_model" => wire::Request::ReadModel {
+            node_id: arg_node(args)?,
+            endpoint: args
+                .get("endpoint")
+                .and_then(Value::as_u64)
+                .map(|e| e as u16),
+            cluster: args.get("cluster").map(id_or_name),
+        },
+        "write_attribute" => wire::Request::WriteAttribute {
+            node_id: arg_node(args)?,
+            endpoint: arg_endpoint(args)?,
+            cluster: arg_id_or_name(args, "cluster")?,
+            attribute: arg_id_or_name(args, "attribute")?,
+            value: args
+                .get("value")
+                .ok_or((jsonrpc::INVALID_PARAMS, "missing 'value'".into()))?
+                .to_string(),
+        },
+        "invoke_command" => wire::Request::InvokeCommand {
+            node_id: arg_node(args)?,
+            endpoint: arg_endpoint(args)?,
+            cluster: arg_id_or_name(args, "cluster")?,
+            command: arg_id_or_name(args, "command")?,
+            fields: args.get("fields").map(Value::to_string).unwrap_or_default(),
+        },
         "peek_device" => wire::Request::PeekDevice {
             node_id: arg_node(args)?,
         },
@@ -1106,6 +1189,20 @@ fn arg_network(args: &Value) -> Result<Vec<u8>, ToolErr> {
         .ok_or((jsonrpc::INVALID_PARAMS, format!("'{hex}' is not hex")))
 }
 
+/// A cluster, attribute or command given by its id (an integer) or name.
+fn arg_id_or_name(args: &Value, key: &str) -> Result<String, ToolErr> {
+    args.get(key)
+        .map(id_or_name)
+        .ok_or((jsonrpc::INVALID_PARAMS, format!("missing '{key}'")))
+}
+
+fn id_or_name(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 fn arg_str(args: &Value, key: &str) -> Result<String, ToolErr> {
     args.get(key)
         .and_then(Value::as_str)
@@ -1146,12 +1243,19 @@ fn labelled(response: &wire::Response) -> Value {
                 v["product"] = json!(d.product());
                 v["hardware_version"] = json!(d.hardware_version());
                 v["software_version"] = json!(d.software_version());
+                v["device_type"] = json!(d.device_type().map(display::device_type_label));
             }
         }
         wire::Response::Discovered { ble_devices, .. } => {
             for (d, v) in ble_devices.iter().zip(entries(&mut value, "ble_devices")) {
                 v["vendor"] = json!(display::vendor_label(d.vendor_id, None));
                 v["product"] = json!(display::product_label(d.vendor_id, d.product_id, None));
+            }
+        }
+        wire::Response::Model { model } => value = model_json(model),
+        wire::Response::CommandOutcome { outcome } => {
+            if let Some(fields) = outcome.fields.as_deref() {
+                value["outcome"]["fields"] = serde_json::from_str(fields).unwrap_or(json!(fields));
             }
         }
         wire::Response::AdvertisedDevices { devices } => {
@@ -1335,6 +1439,88 @@ fn label_time(time: &api::DeviceTime, v: &mut Value) {
 }
 
 /// The entries of array `key` of `value`.
+/// A device model for an agent: per endpoint its device types, per cluster
+/// its attribute values by name, which are writable, and its commands with
+/// their fields' types.
+fn model_json(model: &api::DeviceModel) -> Value {
+    let endpoints: Vec<Value> = model
+        .endpoints
+        .iter()
+        .map(|e| {
+            let clusters: Vec<Value> = e
+                .clusters
+                .iter()
+                .map(|c| {
+                    let mut attributes = serde_json::Map::new();
+                    let mut writable = Vec::new();
+                    for a in c.attributes.iter().filter(|a| a.id < 0xFFF8) {
+                        let name = a.name.clone().unwrap_or_else(|| display::hex_u32(a.id));
+                        let value = match (&a.value, &a.error) {
+                            (Some(v), _) => serde_json::from_str(v).unwrap_or(Value::Null),
+                            (None, Some(e)) => json!({ "error": e }),
+                            (None, None) => Value::Null,
+                        };
+                        if a.writable {
+                            writable.push(name.clone());
+                        }
+                        attributes.insert(name, value);
+                    }
+                    let commands: serde_json::Map<String, Value> = c
+                        .commands
+                        .iter()
+                        .map(|cmd| {
+                            let fields: serde_json::Map<String, Value> = cmd
+                                .fields
+                                .iter()
+                                .map(|f| (f.name.clone(), json!(type_text(model, &f.value_type))))
+                                .collect();
+                            let name = cmd.name.clone().unwrap_or_else(|| display::hex_u32(cmd.id));
+                            (name, Value::Object(fields))
+                        })
+                        .collect();
+                    json!({
+                        "cluster": c.name.clone().unwrap_or_else(|| display::hex_u32(c.id)),
+                        "id": display::hex_u32(c.id),
+                        "attributes": attributes,
+                        "writable": writable,
+                        "commands": commands,
+                    })
+                })
+                .collect();
+            let device_types: Vec<String> = e
+                .device_types
+                .iter()
+                .map(|t| display::device_type_label(t.id))
+                .collect();
+            json!({ "endpoint": e.id, "device_types": device_types, "clusters": clusters })
+        })
+        .collect();
+
+    json!({ "node": display::hex_u64(model.node_id), "endpoints": endpoints })
+}
+
+/// A field's type for an agent: its IDL name, an enum's values, optional and
+/// nullable.
+fn type_text(model: &api::DeviceModel, ty: &api::ValueType) -> String {
+    let mut text = ty.idl.clone();
+    if let Some(info) = ty.schema.and_then(|i| model.types.get(i as usize)) {
+        if !info.values.is_empty() {
+            let names: Vec<&str> = info.values.iter().map(|v| v.name.as_str()).collect();
+            text = format!("{text}: {}", names.join("|"));
+        }
+    }
+    if ty.list {
+        text = format!("list of {text}");
+    }
+    if ty.nullable {
+        text.push_str(", nullable");
+    }
+    if ty.optional {
+        text.push_str(", optional");
+    }
+    text
+}
+
 fn entries<'a>(value: &'a mut Value, key: &str) -> impl Iterator<Item = &'a mut Value> {
     value
         .get_mut(key)

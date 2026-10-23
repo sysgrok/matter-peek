@@ -19,8 +19,18 @@ use super::types::{
 };
 
 mod dcl;
+mod device_types;
 
 impl DeviceInfo {
+    /// What the device is: the first device type of its application
+    /// endpoints that is not the node's plumbing.
+    pub fn device_type(&self) -> Option<u32> {
+        self.device_types
+            .iter()
+            .copied()
+            .find(|id| !is_utility_device_type(*id))
+    }
+
     /// What to call the device: its label, else its product name, else its
     /// stable IDs, else its node ID.
     pub fn title(&self) -> String {
@@ -257,6 +267,28 @@ pub fn product_label(vid: u16, pid: u16, name: Option<String>) -> String {
     )
 }
 
+/// The name of device type `id`, as the Device Library has it.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn device_type_name(id: u32) -> Option<String> {
+    device_type(id).map(|(_, name, _)| name.to_string())
+}
+
+/// Device type `id`, e.g. `On/Off Light (0x0100)`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn device_type_label(id: u32) -> String {
+    labelled(
+        device_type(id).map(|(_, name, _)| *name),
+        hex_u16(id as u16),
+    )
+}
+
+/// Whether device type `id` is the node's plumbing (Root Node, OTA Requestor,
+/// Power Source, …) rather than what the device is.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn is_utility_device_type(id: u32) -> bool {
+    device_type(id).is_some_and(|(_, _, utility)| *utility)
+}
+
 /// Hardware version `version`, e.g. `rev-b (0x0002)`: named `name` (the
 /// device's version string), else, or when the name is just the number,
 /// `0x0002`.
@@ -481,6 +513,13 @@ fn static_vendor_name(vid: u16) -> Option<&'static str> {
         .binary_search_by_key(&vid, |(id, _)| *id)
         .ok()
         .map(|i| dcl::VENDORS[i].1)
+}
+
+fn device_type(id: u32) -> Option<&'static (u32, &'static str, bool)> {
+    device_types::DEVICE_TYPES
+        .binary_search_by_key(&id, |(i, _, _)| *i)
+        .ok()
+        .map(|i| &device_types::DEVICE_TYPES[i])
 }
 
 fn static_product_name(vid: u16, pid: u16) -> Option<&'static str> {

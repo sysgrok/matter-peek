@@ -23,6 +23,7 @@ mod assistant;
 mod camera;
 mod clock;
 mod commission;
+mod datamodel;
 mod devices;
 mod fabrics;
 mod icons;
@@ -170,6 +171,8 @@ enum Msg {
     Assistant(AssistantMsg),
     /// In a device's memory popup.
     Memory(memory::MemoryMsg),
+    /// In a device's data model popup.
+    Model(datamodel::ModelMsg),
     /// In a device's share popup.
     Share(share::ShareMsg),
     /// In a device's clock popup.
@@ -415,6 +418,8 @@ struct App {
     logs: Option<LogsView>,
     /// The memory popup, while open.
     memory: Option<memory::MemoryView>,
+    /// The data model popup, while open.
+    model_view: Option<datamodel::ModelView>,
     /// The share popup, while open.
     share: Option<share::ShareView>,
     /// The clock popup, while open.
@@ -510,6 +515,7 @@ impl Component for App {
             ota_announcing: HashSet::new(),
             logs: None,
             memory: None,
+            model_view: None,
             share: None,
             clock: None,
             fabrics_of: None,
@@ -566,6 +572,7 @@ impl Component for App {
             }
             Msg::Assistant(msg) => self.update_assistant(ctx, msg),
             Msg::Memory(msg) => self.update_memory(ctx, msg),
+            Msg::Model(msg) => self.update_model(ctx, msg),
             Msg::Share(msg) => self.update_share(ctx, msg),
             Msg::Clock(msg) => self.update_clock(ctx, msg),
             Msg::Fabrics(msg) => self.update_fabrics(msg),
@@ -1368,8 +1375,10 @@ impl Component for App {
                     // the reads of the running updates (`read_ota_updates`).
                     wire::Response::OtaUploadStarted { .. } | wire::Response::OtaUpdates { .. } => {
                     }
-                    // The share and clock popups' own.
-                    wire::Response::CommissioningWindow { .. }
+                    // The share, clock and data model popups' own.
+                    wire::Response::Model { .. }
+                    | wire::Response::CommandOutcome { .. }
+                    | wire::Response::CommissioningWindow { .. }
                     | wire::Response::DeviceTime { .. }
                     | wire::Response::TimeSetup { .. } => {}
                     // The fabric module's own.
@@ -1494,6 +1503,7 @@ impl Component for App {
                 { self.view_camera_modal(link) }
                 { self.view_logs_modal(link) }
                 { self.view_memory_modal(link) }
+                { self.view_model_modal(link) }
                 { self.view_fabrics_modal(link) }
                 { self.view_manage_modal(link) }
                 { self.view_share_modal(link) }
@@ -2556,6 +2566,25 @@ pub(crate) fn input_value(e: InputEvent) -> String {
         .and_then(|t| t.dyn_into::<HtmlInputElement>().ok())
         .map(|i| i.value())
         .unwrap_or_default()
+}
+
+/// The value of the input, text area or select an event is of.
+pub(crate) fn field_value(e: &Event) -> String {
+    use wasm_bindgen::JsCast;
+    use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
+
+    let Some(target) = e.target() else {
+        return String::new();
+    };
+    if let Some(input) = target.dyn_ref::<HtmlInputElement>() {
+        input.value()
+    } else if let Some(area) = target.dyn_ref::<HtmlTextAreaElement>() {
+        area.value()
+    } else if let Some(select) = target.dyn_ref::<HtmlSelectElement>() {
+        select.value()
+    } else {
+        String::new()
+    }
 }
 
 pub(crate) fn select_value(e: Event) -> String {

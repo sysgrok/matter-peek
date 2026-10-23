@@ -47,6 +47,7 @@ pub(super) fn device(
         online,
         remembered,
         network: d.network,
+        device_types: d.device_types,
     }
 }
 

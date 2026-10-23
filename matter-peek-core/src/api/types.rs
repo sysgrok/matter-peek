@@ -190,6 +190,139 @@ pub struct AdvertisedFabric {
     pub label: Option<String>,
 }
 
+/// A device's data model as read from it: its endpoints, their device types
+/// and clusters, the clusters' attributes (with their values) and commands.
+/// Names and types come from the Matter IDL, where it has them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DeviceModel {
+    pub node_id: u64,
+    pub endpoints: Vec<EndpointModel>,
+    /// The enums, bitmaps and structs the values are of, by
+    /// [`ValueType::schema`].
+    pub types: Vec<TypeInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct EndpointModel {
+    pub id: u16,
+    pub device_types: Vec<DeviceTypeInfo>,
+    pub clusters: Vec<ClusterModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DeviceTypeInfo {
+    pub id: u32,
+    pub revision: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ClusterModel {
+    pub id: u32,
+    pub name: Option<String>,
+    pub attributes: Vec<AttributeModel>,
+    /// The commands it accepts.
+    pub commands: Vec<CommandModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AttributeModel {
+    pub id: u32,
+    pub name: Option<String>,
+    pub writable: bool,
+    /// Written with a timed interaction.
+    pub timed: bool,
+    pub value_type: Option<ValueType>,
+    /// Its value, as JSON.
+    pub value: Option<String>,
+    /// Why it has no value.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct CommandModel {
+    pub id: u32,
+    pub name: Option<String>,
+    pub fields: Vec<FieldType>,
+    /// The name of the command it answers with, unless a status.
+    pub response: Option<String>,
+    /// Invoked with a timed interaction.
+    pub timed: bool,
+}
+
+/// The type of a value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ValueType {
+    pub kind: ValueKind,
+    /// As the IDL names it: also says the unit (`temperature`: 0.01 °C,
+    /// `percent100ths`, `epoch_s`, …).
+    pub idl: String,
+    /// The bits of an integer.
+    pub bits: u8,
+    pub list: bool,
+    pub nullable: bool,
+    pub optional: bool,
+    /// An enum's, bitmap's or struct's index in [`DeviceModel::types`].
+    pub schema: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum ValueKind {
+    Bool,
+    UInt,
+    Int,
+    Float,
+    Text,
+    Octets,
+    Enum,
+    Bitmap,
+    Struct,
+    Unknown,
+}
+
+/// An enum (its values), a bitmap (its bits' masks) or a struct (its fields).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct TypeInfo {
+    pub name: String,
+    pub values: Vec<NamedValue>,
+    pub fields: Vec<FieldType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct NamedValue {
+    pub value: u64,
+    pub name: String,
+}
+
+/// A field of a struct or a command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct FieldType {
+    pub tag: u32,
+    pub name: String,
+    pub value_type: ValueType,
+}
+
+/// What a command answered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct CommandOutcome {
+    /// The response command's name, unless the answer is a status.
+    pub response: Option<String>,
+    /// Its fields, as JSON.
+    pub fields: Option<String>,
+}
+
 /// Identifies a commissioned device on our fabric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -319,6 +452,9 @@ pub struct DeviceInfo {
     /// The kind of network it is on, if known.
     #[serde(default)]
     pub network: Option<NetworkKind>,
+    /// The device types of its application endpoints, if known.
+    #[serde(default)]
+    pub device_types: Vec<u32>,
 }
 
 /// The numeric BasicInformation attributes of a device.

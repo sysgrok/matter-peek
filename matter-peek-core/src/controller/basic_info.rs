@@ -16,6 +16,7 @@ use log::debug;
 
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::decl::basic_information::{self, BasicInformationAttrResponses as _};
+use rs_matter::dm::clusters::decl::descriptor::{self, DescriptorAttrResponses as _};
 use rs_matter::dm::clusters::decl::network_commissioning::{
     self, NetworkCommissioningAttrResponses as _,
 };
@@ -70,6 +71,12 @@ async fn try_read_basic_info<C: Crypto>(
             Some(network_commissioning::FULL_CLUSTER.id),
             Some(network_commissioning::AttributeId::FeatureMap as _),
         )),
+        // What it is: the device types of every endpoint.
+        AttrPath::from_gp(&GenericPath::new(
+            None,
+            Some(descriptor::FULL_CLUSTER.id),
+            Some(descriptor::AttributeId::DeviceTypeList as _),
+        )),
     ];
 
     let exchange = Exchange::initiate(matter, crypto, fab_idx, node_id).await?;
@@ -112,6 +119,20 @@ async fn try_read_basic_info<C: Crypto>(
             );
             if let Some(features) = feature_map {
                 identity.network = crate::network::kind_of(features);
+            }
+
+            for (endpoint, list) in resp.descriptor_read_resp().device_type_list() {
+                if endpoint == ROOT_ENDPOINT {
+                    continue;
+                }
+                let types = list.into_iter().flat_map(|list| list.iter());
+                for device_type in types.filter_map(Result::ok) {
+                    if let Ok(id) = device_type.device_type() {
+                        if !identity.device_types.contains(&id) {
+                            identity.device_types.push(id);
+                        }
+                    }
+                }
             }
         }
 

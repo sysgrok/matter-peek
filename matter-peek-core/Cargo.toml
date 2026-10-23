@@ -24,6 +24,7 @@ default = ["mdns-avahi"]
 # The controller: the Matter stack and the service behind `api::MatterPeek`.
 controller = [
     "dep:rs-matter",
+    "dep:rs-matter-codegen",
     "dep:embassy-futures",
     "dep:embassy-time",
     "dep:async-channel",
@@ -64,6 +65,10 @@ ble = ["std", "rs-matter/zbus"]
 uniffi = ["std", "dep:uniffi"]
 # The `uniffi-bindgen` binary.
 uniffi-cli = ["uniffi", "uniffi/cli", "uniffi/cargo-metadata"]
+
+[build-dependencies]
+# The Matter IDL, for the data model schema (`build.rs`).
+rs-matter-codegen = { version = "0.4", optional = true }
 
 [dependencies]
 # The API types and its MCP tools, for every build (the web UI's too).

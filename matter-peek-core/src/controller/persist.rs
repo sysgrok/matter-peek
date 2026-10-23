@@ -439,6 +439,8 @@ struct StoredDeviceWire {
     // BasicInformation version strings; appended last, as `network`.
     hardware_version_string: Option<String>,
     software_version_string: Option<String>,
+    // The device types of the application endpoints; appended last, as `network`.
+    device_types: Option<Vec<u32>>,
 }
 
 impl StoredDeviceList {
@@ -465,6 +467,7 @@ impl StoredDeviceList {
                     network: d.network.map(network_code),
                     hardware_version_string: opt_str(&d.hardware_version_string),
                     software_version_string: opt_str(&d.software_version_string),
+                    device_types: (!d.device_types.is_empty()).then(|| d.device_types.clone()),
                 })
                 .collect(),
         }
@@ -497,6 +500,7 @@ impl StoredDeviceList {
                     },
                     tags: w.tags,
                     network: w.network.and_then(network_kind),
+                    device_types: w.device_types.unwrap_or_default(),
                 })
             })
             .collect()
@@ -575,6 +579,7 @@ mod tests {
             fingerprint: fp(0x1234, 0x5678),
             tags: tags.iter().map(|t| t.to_string()).collect(),
             network: Some(NetworkKind::Thread),
+            device_types: vec![0x0100, 0x0302],
         }
     }
 

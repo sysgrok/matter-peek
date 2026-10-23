@@ -563,6 +563,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             software_version_string: device.software_version_string,
             fingerprint: device.fingerprint,
             network: device.network,
+            device_types: device.device_types,
         };
 
         self.update_devices(|devices| adopt(devices, device.handle, &ident), None)
@@ -666,6 +667,9 @@ fn refresh_identity(device: &mut StoredDevice, ident: DeviceIdentity) {
     if ident.network.is_some() {
         device.network = ident.network;
     }
+    if !ident.device_types.is_empty() {
+        device.device_types = ident.device_types;
+    }
 }
 
 /// Add a record for a device on our fabric. A record of the same unit under
@@ -702,5 +706,6 @@ pub(super) fn new_record(handle: DeviceHandle, ident: &DeviceIdentity) -> Stored
         fingerprint: ident.fingerprint,
         tags: Vec::new(),
         network: ident.network,
+        device_types: ident.device_types.clone(),
     }
 }

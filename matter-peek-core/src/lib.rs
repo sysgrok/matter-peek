@@ -35,6 +35,7 @@ mod controller {
     #[cfg(feature = "ble")]
     pub mod ble;
     pub mod ca;
+    pub mod datamodel;
     pub mod diagnostics;
     pub mod discovery;
     pub mod explain;
@@ -51,10 +52,12 @@ mod controller {
     pub mod node;
     pub mod ota;
     pub mod persist;
+    pub mod schema;
     pub mod service;
     pub mod setup_code;
     pub mod subscribe;
     pub mod time;
+    pub mod values;
     pub mod window;
 }
 

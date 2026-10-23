@@ -88,6 +88,8 @@ pub struct StoredDevice {
     pub tags: alloc::vec::Vec<alloc::string::String>,
     /// The kind of network it is on, if known.
     pub network: Option<NetworkKind>,
+    /// The device types of its application endpoints, if known.
+    pub device_types: alloc::vec::Vec<u32>,
 }
 
 /// Device identity read from the BasicInformation cluster at commission time.
@@ -121,6 +123,8 @@ pub struct DeviceIdentity {
     pub fingerprint: DeviceFingerprint,
     /// The kind of network it is on (of its primary network interface).
     pub network: Option<NetworkKind>,
+    /// The device types of its application endpoints (all but the root's).
+    pub device_types: alloc::vec::Vec<u32>,
 }
 
 /// The always-available numeric BasicInformation attributes.
@@ -246,6 +250,7 @@ mod tests {
             fingerprint,
             tags: vec!["keep-me".to_string()],
             network: None,
+            device_types: vec![],
         }
     }
 
@@ -260,6 +265,7 @@ mod tests {
             software_version_string: "".to_string(),
             fingerprint,
             network: None,
+            device_types: vec![],
         }
     }
 

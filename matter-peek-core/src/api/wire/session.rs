@@ -111,6 +111,34 @@ impl WireSession {
                     devices: found.devices,
                     ble_devices: found.ble_devices,
                 }),
+            Request::ReadModel {
+                node_id,
+                endpoint,
+                cluster,
+            } => peek
+                .read_model(node_id, endpoint, cluster)
+                .await
+                .map(|model| Response::Model { model }),
+            Request::WriteAttribute {
+                node_id,
+                endpoint,
+                cluster,
+                attribute,
+                value,
+            } => peek
+                .write_attribute(node_id, endpoint, cluster, attribute, value)
+                .await
+                .map(|model| Response::Model { model }),
+            Request::InvokeCommand {
+                node_id,
+                endpoint,
+                cluster,
+                command,
+                fields,
+            } => peek
+                .invoke_command(node_id, endpoint, cluster, command, fields)
+                .await
+                .map(|outcome| Response::CommandOutcome { outcome }),
             Request::AdvertisedDevices => peek
                 .advertised_devices()
                 .await

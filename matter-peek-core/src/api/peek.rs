@@ -87,6 +87,67 @@ impl MatterPeek {
         self.call(Op::AdvertisedDevices).await
     }
 
+    /// Read the data model of a listed device: its endpoints, their device
+    /// types and clusters, the clusters' attributes and commands. Only
+    /// `endpoint` and `cluster` (an ID, decimal or `0x` hex, or a name), if
+    /// given.
+    pub async fn read_model(
+        &self,
+        node_id: u64,
+        endpoint: Option<u16>,
+        cluster: Option<String>,
+    ) -> Result<DeviceModel, PeekError> {
+        self.call(|reply| Op::ReadModel {
+            node_id,
+            endpoint,
+            cluster,
+            reply,
+        })
+        .await
+    }
+
+    /// Write `value` (JSON) to an attribute (an ID or a name) of `cluster` on
+    /// `endpoint` of a listed device; answers with that cluster read afresh.
+    pub async fn write_attribute(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        cluster: String,
+        attribute: String,
+        value: String,
+    ) -> Result<DeviceModel, PeekError> {
+        self.call(|reply| Op::WriteAttribute {
+            node_id,
+            endpoint,
+            cluster,
+            attribute,
+            value,
+            reply,
+        })
+        .await
+    }
+
+    /// Invoke a command (an ID or a name) of `cluster` on `endpoint` of a
+    /// listed device, with `fields` (a JSON object, empty for none).
+    pub async fn invoke_command(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        cluster: String,
+        command: String,
+        fields: String,
+    ) -> Result<CommandOutcome, PeekError> {
+        self.call(|reply| Op::InvokeCommand {
+            node_id,
+            endpoint,
+            cluster,
+            command,
+            fields,
+            reply,
+        })
+        .await
+    }
+
     /// Read the setup code out of a picture of a device's QR code (a PNG or
     /// JPEG file).
     pub async fn read_qr_image(&self, image: Vec<u8>) -> Result<String, PeekError> {
@@ -588,6 +649,28 @@ pub(crate) enum Op {
         reply: Reply<Discovered>,
     },
     AdvertisedDevices(Reply<Vec<AdvertisedDevice>>),
+    ReadModel {
+        node_id: u64,
+        endpoint: Option<u16>,
+        cluster: Option<String>,
+        reply: Reply<DeviceModel>,
+    },
+    WriteAttribute {
+        node_id: u64,
+        endpoint: u16,
+        cluster: String,
+        attribute: String,
+        value: String,
+        reply: Reply<DeviceModel>,
+    },
+    InvokeCommand {
+        node_id: u64,
+        endpoint: u16,
+        cluster: String,
+        command: String,
+        fields: String,
+        reply: Reply<CommandOutcome>,
+    },
     ReadQrImage {
         image: Vec<u8>,
         reply: Reply<String>,
