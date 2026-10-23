@@ -929,6 +929,41 @@ button.dm-chip:hover { border-color: var(--bulma-link); color: var(--bulma-link)
 .dm-field-name { font-size: .85rem; font-weight: 600; }
 .dm-form-actions { display: flex; gap: .4rem; }
 
+/* Events: the device's, a cluster's; a priority colours each. */
+.dm-hero.is-events { --cat-hsl: var(--warning-hsl); }
+.dm-tree-events { flex: none; display: flex; align-items: center; gap: .5rem; width: 100%; padding: .55rem .75rem; border: 1px solid var(--bulma-border-weak); border-radius: 12px; background: var(--bulma-scheme-main); color: var(--bulma-text-strong); font: inherit; font-size: .9rem; font-weight: 700; text-align: left; cursor: pointer; }
+.dm-tree-events > svg { flex: none; color: hsl(var(--warning-hsl)); }
+.dm-tree-events:hover { background: var(--bulma-scheme-main-bis); }
+.dm-tree-events.is-selected { border-color: hsla(var(--link-hsl), .45); background: hsla(var(--link-hsl), .1); color: var(--bulma-link); }
+.dm-tree-events .dm-count { margin-left: 0; }
+.dm-event, .dm-chip.is-info { --p-hsl: var(--info-hsl); }
+.dm-event.is-critical, .dm-chip.is-critical { --p-hsl: var(--danger-hsl); }
+.dm-event.is-debug, .dm-chip.is-debug { --p-hsl: 220, 9%, 62%; }
+.dm-events { display: flex; flex-direction: column; }
+.dm-event { display: grid; grid-template-columns: 7.5rem 4.8rem minmax(0, 1fr); gap: .3rem .8rem; align-items: start; padding: .6rem .85rem; border-bottom: 1px solid var(--bulma-border-weak); border-left: 3px solid hsla(var(--p-hsl), .75); }
+.dm-event:last-child { border-bottom: none; }
+.dm-event.is-changed { animation: dm-flash 2.5s ease-out; }
+.dm-event-when { display: flex; flex-direction: column; }
+.dm-event-time { font-family: var(--mono); font-size: .82rem; font-weight: 600; color: var(--bulma-text-strong); }
+.dm-event-number { font-family: var(--mono); font-size: .7rem; color: var(--bulma-text-weak); }
+.dm-priority { justify-self: start; padding: .05rem .5rem; border-radius: 999px; background: hsla(var(--p-hsl), .15); font-size: .66rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: color-mix(in srgb, hsl(var(--p-hsl)) 70%, var(--bulma-text-strong)); }
+.dm-event-what { min-width: 0; }
+.dm-event-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .6rem; }
+.dm-event-where { font-size: .76rem; font-weight: 600; color: var(--bulma-text-weak); }
+.dm-event-name { font-weight: 700; color: var(--bulma-text-strong); }
+.dm-event-fields { margin-top: .3rem; font-size: .85rem; }
+.dm-event-types { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: -.25rem; }
+.dm-priority-dot { flex: none; width: .45rem; height: .45rem; border-radius: 50%; background: hsl(var(--p-hsl)); }
+.dm-events-none { font-size: .88rem; color: var(--bulma-text-weak); }
+@media (max-width: 600px) {
+  .dm-event { grid-template-columns: auto auto; }
+  .dm-event-what { grid-column: 1 / -1; }
+}
+.card-event { display: flex; align-items: center; gap: .45rem; margin-top: .6rem; padding: .45rem .6rem; border-radius: 10px; background: hsla(var(--warning-hsl), .1); font-size: .84rem; }
+.card-event > svg { flex: none; color: hsl(var(--warning-hsl)); }
+.card-event-what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--bulma-text-strong); }
+.card-event-when { flex: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; color: var(--bulma-text-weak); }
+
 /* A cluster as JSON. */
 .dm-json { margin: 0; padding: 1rem 1.15rem; background: transparent; font-family: var(--mono); font-size: .8rem; line-height: 1.6; white-space: pre; color: var(--bulma-text); }
 .j-key { color: var(--bulma-link); }
@@ -943,6 +978,24 @@ button.dm-chip:hover { border-color: var(--bulma-link); color: var(--bulma-link)
   .dm-hero-stats { gap: 1rem; }
   .dm-stat { align-items: flex-start; }
 }
+/* Controls of their own: a light's colour, its white, a remote, a PIN. */
+.dm-control > .dm-color, .dm-control > .dm-pin, .dm-control > .dm-keypad { justify-self: start; grid-column: 2 / span 2; }
+.dm-color { display: flex; align-items: center; gap: .6rem; }
+.dm-swatch { flex: none; width: 2rem; height: 2rem; border: 1px solid var(--bulma-border); border-radius: 50%; box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .45), 0 1px 4px rgba(0, 0, 0, .15); }
+.dm-swatch.is-unknown { background: repeating-linear-gradient(45deg, var(--bulma-scheme-main-ter) 0 4px, var(--bulma-scheme-main) 4px 8px) !important; }
+.dm-color-input { width: 2.6rem; height: 2rem; padding: 0 .15rem; border: 1px solid var(--bulma-border); border-radius: 8px; background: var(--bulma-scheme-main); cursor: pointer; }
+.dm-control-value.is-color { min-width: 0; text-align: left; font-size: .85rem; color: var(--bulma-text-weak); }
+.dm-slider.is-kelvin { -webkit-appearance: none; appearance: none; height: .45rem; border-radius: 999px; background: linear-gradient(90deg, #ff8a1f, #ffc98f 35%, #fff4e8 60%, #dfe9ff 85%, #bcd2ff); }
+.dm-slider.is-kelvin::-webkit-slider-thumb { -webkit-appearance: none; width: 1.1rem; height: 1.1rem; border: 2px solid var(--bulma-text-weak); border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .3); }
+.dm-slider.is-kelvin::-moz-range-thumb { width: 1rem; height: 1rem; border: 2px solid var(--bulma-text-weak); border-radius: 50%; background: #fff; }
+.dm-keypad { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1rem; }
+.dm-dpad { display: grid; grid-template-columns: repeat(3, 2.4rem); grid-auto-rows: 2.1rem; gap: .25rem; }
+.dm-dpad .button { width: 100%; height: 100%; padding: 0; }
+.dm-dpad .button.is-ok { font-weight: 700; }
+.dm-keypad .buttons, .dm-pin .buttons { margin-bottom: 0; }
+.dm-pin { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.dm-pin .input { width: 7rem; }
+
 /* On a phone, an attribute in two lines: its ID, name and actions, then its value. */
 @media (max-width: 600px) {
   .dm-attrs, .dm-attrs > tbody { display: block; }

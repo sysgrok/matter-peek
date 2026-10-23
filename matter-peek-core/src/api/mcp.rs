@@ -65,7 +65,7 @@ const MUTATING_TOOLS: &[&str] = &[
 
 /// What an agent should know about the tools, for its instructions.
 pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-only tools \
-     (discover, list_devices, peek_device, read_model, read_network, retrieve_logs, identify, \
+     (discover, list_devices, peek_device, read_model, read_events, read_network, retrieve_logs, identify, \
      read_qr_image, ota_images, ota_updates, commissioning_window, \
      device_time, list_fabrics) are always available. The tools that change \
      devices or the stored state (commission, decommission, remember, \
@@ -241,6 +241,23 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
              set, temperatures in 0.01 degC) and which are writable, and the \
              commands they accept with their fields' types. Narrow it with \
              endpoint and cluster (an id or a name, e.g. \"Thermostat\").",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node_id": node_id_schema(),
+                    "endpoint": { "type": "integer", "description": "Only this endpoint." },
+                    "cluster": { "type": ["string", "integer"], "description": "Only this cluster: its id or name." }
+                },
+                "required": ["node_id"]
+            }),
+        ),
+        tool(
+            "read_events",
+            "Read the events a listed device keeps (switch presses, alarms, \
+             faults, state changes, boots, ...), oldest first: each with its \
+             number, priority, time (UTC, or since the device started), \
+             endpoint, cluster and event by name, and its fields by name. \
+             Narrow it with endpoint and cluster (an id or a name).",
             json!({
                 "type": "object",
                 "properties": {
@@ -968,6 +985,14 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
                 .map(|e| e as u16),
             cluster: args.get("cluster").map(id_or_name),
         },
+        "read_events" => wire::Request::ReadEvents {
+            node_id: arg_node(args)?,
+            endpoint: args
+                .get("endpoint")
+                .and_then(Value::as_u64)
+                .map(|e| e as u16),
+            cluster: args.get("cluster").map(id_or_name),
+        },
         "write_attribute" => wire::Request::WriteAttribute {
             node_id: arg_node(args)?,
             endpoint: arg_endpoint(args)?,
@@ -1253,6 +1278,7 @@ fn labelled(response: &wire::Response) -> Value {
             }
         }
         wire::Response::Model { model } => value = model_json(model),
+        wire::Response::Events { events } => value = events_json(events),
         wire::Response::CommandOutcome { outcome } => {
             if let Some(fields) = outcome.fields.as_deref() {
                 value["outcome"]["fields"] = serde_json::from_str(fields).unwrap_or(json!(fields));
@@ -1439,6 +1465,35 @@ fn label_time(time: &api::DeviceTime, v: &mut Value) {
 }
 
 /// The entries of array `key` of `value`.
+/// Events for an agent: their times readable, their fields as objects.
+fn events_json(events: &[api::EventModel]) -> Value {
+    let events: Vec<Value> = events
+        .iter()
+        .map(|e| {
+            let time = match (e.utc_ms, e.uptime_ms) {
+                (Some(ms), _) => display::utc_label(ms),
+                (None, Some(ms)) => format!("{} after start", display::duration(ms / 1000)),
+                (None, None) => String::new(),
+            };
+            json!({
+                "number": e.number,
+                "priority": e.priority,
+                "time": time,
+                "endpoint": e.endpoint,
+                "cluster": e.cluster_name.clone().unwrap_or_else(|| display::hex_u32(e.cluster)),
+                "event": e.name.clone().unwrap_or_else(|| display::hex_u32(e.event)),
+                "fields": match (&e.fields, &e.error) {
+                    (Some(fields), _) => serde_json::from_str(fields).unwrap_or(Value::Null),
+                    (None, Some(error)) => json!({ "error": error }),
+                    (None, None) => Value::Null,
+                },
+            })
+        })
+        .collect();
+
+    json!({ "events": events })
+}
+
 /// A device model for an agent: per endpoint its device types, per cluster
 /// its attribute values by name, which are writable, and its commands with
 /// their fields' types.

@@ -49,7 +49,7 @@ use rs_matter::crypto::Crypto;
 use rs_matter::dm::{ReportContext, ReportDataHandler};
 use rs_matter::error::Error;
 use rs_matter::im::client::{ImClient as _, SubscribeOutcome, TxOutcome};
-use rs_matter::im::encoding::ReportDataResp;
+use rs_matter::im::encoding::{EventFilter, EventPath, ReportDataResp};
 use rs_matter::im::{AttrPath, GenericPath, IMStatusCode};
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::mrp::RetransEntry;
@@ -57,7 +57,7 @@ use rs_matter::transport::session::SessionMode;
 use rs_matter::utils::sync::Notification;
 use rs_matter::Matter;
 
-use crate::datamodel::{self, Decoded};
+use crate::datamodel::{self, Decoded, EventReport};
 use crate::diagnostics::{fabric_paths, health_cluster_ids, parse_health, ROOT_ENDPOINT};
 use crate::model::{DeviceHandle, DeviceHealth, DiagSet};
 
@@ -117,6 +117,24 @@ pub enum Coverage {
     Application,
     /// Every attribute.
     All,
+}
+
+/// What reports say beyond the health: attributes and events.
+#[derive(Debug, Default)]
+pub struct ModelUpdate {
+    pub attributes: Vec<Decoded>,
+    pub events: Vec<EventReport>,
+}
+
+impl ModelUpdate {
+    fn is_empty(&self) -> bool {
+        self.attributes.is_empty() && self.events.is_empty()
+    }
+
+    fn extend(&mut self, report: &ReportDataResp<'_>) {
+        self.attributes.extend(decoded(report));
+        self.events.extend(datamodel::decode_events(report));
+    }
 }
 
 /// The coverage of a subscription: what its listeners want, and what it has,
@@ -252,7 +270,7 @@ impl Reports {
             which,
             coverage,
             updates: RefCell::new(Vec::new()),
-            model_updates: RefCell::new(Vec::new()),
+            model_updates: RefCell::new(ModelUpdate::default()),
             last_report: Cell::new(Instant::now()),
             received: Notification::new(),
         });
@@ -311,7 +329,7 @@ impl ReportDataHandler for Reports {
         slot.last_report.set(Instant::now());
         slot.updates.borrow_mut().push(health);
         if slot.coverage != Coverage::Health {
-            slot.model_updates.borrow_mut().extend(decoded(report));
+            slot.model_updates.borrow_mut().extend(report);
         }
         slot.received.notify();
 
@@ -327,8 +345,8 @@ struct Slot {
     which: DiagSet,
     coverage: Coverage,
     updates: RefCell<Vec<DeviceHealth>>,
-    /// The attributes reported, for a coverage beyond the health.
-    model_updates: RefCell<Vec<Decoded>>,
+    /// What was reported, for a coverage beyond the health.
+    model_updates: RefCell<ModelUpdate>,
     /// When the most recent report arrived: the watchdog's heartbeat.
     last_report: Cell<Instant>,
     received: Notification,
@@ -355,8 +373,10 @@ impl Drop for Registration<'_> {
 ///
 /// - `on_update` receives the priming [`DeviceHealth`] first, then deltas
 ///   (merge them).
-/// - `on_model` receives the attributes reported beyond the health: the whole
-///   priming at once, with `true` (it replaces what was known), then deltas.
+/// - `on_model` receives the attributes and events reported beyond the
+///   health: the whole priming at once, with `true` (its attributes replace
+///   those known), then deltas. Each event comes once: a re-established
+///   subscription asks for those after the last.
 /// - `on_state` receives [`SubState`] transitions: `Live { max_int }` on each
 ///   (re-)establishment, `Offline` when the subscription went stale or could not
 ///   be established. The UI uses these to show "live" vs. "offline".
@@ -389,7 +409,7 @@ pub async fn subscribe<C, FU, FM, FS>(
 where
     C: Crypto + Copy,
     FU: FnMut(DeviceHealth),
-    FM: FnMut(Vec<Decoded>, bool),
+    FM: FnMut(ModelUpdate, bool),
     FS: FnMut(SubState),
 {
     if attr_paths(which).is_empty() {
@@ -400,6 +420,14 @@ where
     let node_id = dev.node_id;
     // The application endpoints, once a coverage needs them.
     let mut endpoints: Option<Vec<u16>> = None;
+    // The number of the next event to report.
+    let next_event = Cell::new(0);
+    let mut on_model = |update: ModelUpdate, fresh: bool| {
+        if let Some(last) = update.events.iter().map(|e| e.number).max() {
+            next_event.set(next_event.get().max(last + 1));
+        }
+        on_model(update, fresh);
+    };
 
     // Establish → watch → (on stale/error) tear down + re-establish, forever. A
     // re-subscribe gets a new device-side subscription id, invalidating the old
@@ -425,6 +453,7 @@ where
             }
         }
         let paths = paths_of(which, coverage, endpoints.as_deref().unwrap_or_default());
+        let events = event_paths_of(coverage, endpoints.as_deref().unwrap_or_default());
 
         // Track whether this pass ever went `Live` (so we can reset backoff). We
         // wrap the caller's `on_state` to observe it.
@@ -447,6 +476,8 @@ where
                 scope,
                 coverage,
                 &paths,
+                &events,
+                next_event.get(),
                 &mut on_update,
                 &mut on_model,
                 &mut on_state_wrapped,
@@ -541,6 +572,8 @@ async fn run_once<C, FU, FM, FS>(
     scope: &Scope,
     coverage: Coverage,
     paths: &[AttrPath],
+    events: &[EventPath],
+    next_event: u64,
     on_update: &mut FU,
     on_model: &mut FM,
     on_state: &mut FS,
@@ -548,7 +581,7 @@ async fn run_once<C, FU, FM, FS>(
 where
     C: Crypto + Copy,
     FU: FnMut(DeviceHealth),
-    FM: FnMut(Vec<Decoded>, bool),
+    FM: FnMut(ModelUpdate, bool),
     FS: FnMut(SubState),
 {
     let (fab_idx, node_id) = (dev.fabric_index, dev.node_id);
@@ -563,7 +596,8 @@ where
         None
     };
     let (subscription_id, max_int) = establish(
-        matter, crypto, fab_idx, node_id, which, coverage, paths, on_update, on_model,
+        matter, crypto, fab_idx, node_id, which, coverage, paths, events, next_event, on_update,
+        on_model,
     )
     .await?;
     drop(ticket);
@@ -638,13 +672,15 @@ async fn establish<C, FU, FM>(
     which: DiagSet,
     coverage: Coverage,
     paths: &[AttrPath],
+    events: &[EventPath],
+    next_event: u64,
     on_update: &mut FU,
     on_model: &mut FM,
 ) -> Result<(u32, u16), Error>
 where
     C: Crypto,
     FU: FnMut(DeviceHealth),
-    FM: FnMut(Vec<Decoded>, bool),
+    FM: FnMut(ModelUpdate, bool),
 {
     let min_int_floor = if coverage == Coverage::Health {
         MIN_INTERVAL_FLOOR_SECS
@@ -660,26 +696,37 @@ where
             TxOutcome::BuildRequest(builder) => {
                 // Our one subscription to a device replaces any earlier one,
                 // which the device may still hold after we gave it up.
-                sender = builder
+                let builder = builder
                     .keep_subs(false)?
                     .min_int_floor(min_int_floor)?
                     .max_int_ceil(MAX_INTERVAL_CEIL_SECS)?
-                    .attr_requests_from(paths)?
-                    .fabric_filtered(false)?
-                    .end()?;
+                    .attr_requests_from(paths)?;
+                sender = if events.is_empty() {
+                    builder.fabric_filtered(false)?.end()?
+                } else {
+                    builder
+                        .event_requests_from(events)?
+                        .event_filters_from(&[EventFilter {
+                            node: None,
+                            event_min: Some(next_event),
+                        }])?
+                        .fabric_filtered(false)?
+                        .end()?
+                };
             }
             TxOutcome::GotResponse(c) => break c,
         }
     };
 
-    // Each priming chunk carries a slice of the current attribute values.
-    let mut primed = Vec::new();
+    // Each priming chunk carries a slice of the current attribute values,
+    // and of the events since `next_event`.
+    let mut primed = ModelUpdate::default();
     let established = loop {
         {
             let resp = chunk.response()?;
             on_update(parse_health(&resp, which));
             if coverage != Coverage::Health {
-                primed.extend(decoded(&resp));
+                primed.extend(&resp);
             }
         }
         match chunk.complete().await? {
@@ -745,6 +792,18 @@ fn paths_of(which: DiagSet, coverage: Coverage, endpoints: &[u16]) -> Vec<AttrPa
             }
         }
         _ => every(),
+    }
+}
+
+/// The events a subscription of `coverage` follows: those of the one
+/// application endpoint, or all.
+fn event_paths_of(coverage: Coverage, endpoints: &[u16]) -> Vec<EventPath> {
+    match (coverage, endpoints) {
+        (Coverage::Health, _) => Vec::new(),
+        (Coverage::Application, [endpoint]) => {
+            alloc::vec![datamodel::event_path(Some(*endpoint), None)]
+        }
+        _ => alloc::vec![datamodel::event_path(None, None)],
     }
 }
 

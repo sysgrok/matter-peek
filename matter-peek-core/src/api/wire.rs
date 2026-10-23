@@ -98,6 +98,14 @@ pub enum Request {
         #[serde(default)]
         cluster: Option<String>,
     },
+    /// See `MatterPeek::read_events`. Answered with [`Response::Events`].
+    ReadEvents {
+        node_id: u64,
+        #[serde(default)]
+        endpoint: Option<u16>,
+        #[serde(default)]
+        cluster: Option<String>,
+    },
     /// See `MatterPeek::write_attribute`. Answered with [`Response::Model`].
     WriteAttribute {
         node_id: u64,
@@ -317,6 +325,9 @@ pub enum Response {
     },
     Model {
         model: DeviceModel,
+    },
+    Events {
+        events: Vec<EventModel>,
     },
     CommandOutcome {
         outcome: CommandOutcome,

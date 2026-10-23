@@ -17,12 +17,15 @@ use crate::api::{
     DeviceFabric, DeviceHealth, HealthListener, ModelListener, NetworkKind, PeekError,
     SubscriptionState,
 };
-use crate::datamodel::{self, AttrReport, Decoded};
+use crate::datamodel::{self, AttrReport, EventReport};
 use crate::model::{DeviceHandle, DiagSet};
 use crate::ota::OtaImageStore;
-use crate::subscribe::{Coverage, Scope};
+use crate::subscribe::{Coverage, ModelUpdate, Scope};
 
 use super::{convert, Ctx};
+
+/// The events kept of a device, the latest.
+const EVENTS_KEPT: usize = 500;
 
 /// A device's live health subscription, and its listeners.
 pub(super) struct Watch {
@@ -38,6 +41,8 @@ pub(super) struct Watch {
     scope: Rc<Scope>,
     /// The attributes reported beyond the health, as they are now.
     model: Vec<AttrReport>,
+    /// The latest events reported, oldest first.
+    events: Vec<EventReport>,
     /// The state, and the health merged from the reports, so far: what a
     /// listener joining now gets first.
     pub(super) state: Option<SubscriptionState>,
@@ -54,6 +59,7 @@ impl Watch {
             model_listeners: Vec::new(),
             scope: Rc::new(Scope::new()),
             model: Vec::new(),
+            events: Vec::new(),
             state: None,
             health: DeviceHealth::default(),
             reports: 0,
@@ -69,21 +75,33 @@ impl Watch {
             .unwrap_or(Coverage::Health)
     }
 
-    /// Note the attributes reported (`fresh`: a priming, replacing what was
-    /// known), and hand the listeners those that changed.
-    fn model_report(&mut self, node_id: u64, decoded: Vec<Decoded>, fresh: bool) {
+    /// Note the attributes and events reported (`fresh`: a priming, whose
+    /// attributes replace those known), and hand the listeners what changed
+    /// and the new events.
+    fn model_report(&mut self, node_id: u64, update: ModelUpdate, fresh: bool) {
         if fresh {
             self.model.clear();
         }
 
         let mut changed = Vec::new();
-        for decoded in decoded {
+        for decoded in update.attributes {
             let path = datamodel::note(&mut self.model, decoded);
             if !changed.contains(&path) {
                 changed.push(path);
             }
         }
-        if changed.is_empty() || self.model_listeners.is_empty() {
+
+        let last = self.events.last().map(|e| e.number);
+        let events: Vec<EventReport> = update
+            .events
+            .into_iter()
+            .filter(|e| last.is_none_or(|last| e.number > last))
+            .collect();
+        self.events.extend(events.iter().cloned());
+        let excess = self.events.len().saturating_sub(EVENTS_KEPT);
+        self.events.drain(..excess);
+
+        if (changed.is_empty() && events.is_empty()) || self.model_listeners.is_empty() {
             return;
         }
 
@@ -93,7 +111,7 @@ impl Watch {
             .filter(|r| changed.contains(&(r.endpoint, r.cluster, r.attribute)))
             .cloned()
             .collect();
-        let model = super::datamodel::model(node_id, &changed);
+        let model = super::datamodel::model(node_id, &changed, &events);
         for (_, _, listener) in &self.model_listeners {
             listener.on_model(node_id, model.clone());
         }
@@ -107,8 +125,11 @@ impl Watch {
         coverage: Coverage,
         listener: Arc<dyn ModelListener>,
     ) {
-        if !self.model.is_empty() {
-            listener.on_model(node_id, super::datamodel::model(node_id, &self.model));
+        if !self.model.is_empty() || !self.events.is_empty() {
+            listener.on_model(
+                node_id,
+                super::datamodel::model(node_id, &self.model, &self.events),
+            );
         }
 
         self.model_listeners.push((id, coverage, listener));
@@ -331,11 +352,11 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 self.mark_our_fabric(node_id, &mut health);
                 with_watch(&mut |watch| watch.report(node_id, health.clone()))
             },
-            |decoded, fresh| {
-                let mut decoded = Some(decoded);
+            |update, fresh| {
+                let mut update = Some(update);
                 with_watch(&mut |watch| {
-                    if let Some(decoded) = decoded.take() {
-                        watch.model_report(node_id, decoded, fresh);
+                    if let Some(update) = update.take() {
+                        watch.model_report(node_id, update, fresh);
                     }
                 })
             },

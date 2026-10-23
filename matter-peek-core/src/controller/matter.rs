@@ -447,7 +447,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
         scope: &crate::subscribe::Scope,
         retry: &Notification,
         on_update: impl FnMut(DeviceHealth),
-        on_model: impl FnMut(Vec<crate::datamodel::Decoded>, bool),
+        on_model: impl FnMut(crate::subscribe::ModelUpdate, bool),
         on_state: impl FnMut(crate::subscribe::SubState),
     ) -> Result<(), Error> {
         crate::subscribe::subscribe(

@@ -1471,6 +1471,7 @@ impl Component for App {
                     }
                     // The share, clock and data model popups' own.
                     wire::Response::Model { .. }
+                    | wire::Response::Events { .. }
                     | wire::Response::CommandOutcome { .. }
                     | wire::Response::CommissioningWindow { .. }
                     | wire::Response::DeviceTime { .. }
@@ -1776,8 +1777,10 @@ impl App {
                 self.sub_send(&wire::Request::UnsubscribeModel { node_id: *node_id });
             }
         }
-        self.card_models.retain(|node_id, _| self.flipped.contains(node_id));
-        self.card_errors.retain(|node_id, _| self.flipped.contains(node_id));
+        self.card_models
+            .retain(|node_id, _| self.flipped.contains(node_id));
+        self.card_errors
+            .retain(|node_id, _| self.flipped.contains(node_id));
         self.model_scopes = wanted;
 
         if !self.model_scopes.is_empty() {
@@ -1875,7 +1878,11 @@ impl App {
     /// for a device that's no longer stored. Opens the persistent WS if needed.
     fn sync_subscriptions(&mut self, ctx: &Context<Self>) {
         let stored_ids: Vec<u64> = self.stored.iter().map(|d| d.handle.node_id).collect();
-        if self.flipped.iter().any(|node_id| !stored_ids.contains(node_id)) {
+        if self
+            .flipped
+            .iter()
+            .any(|node_id| !stored_ids.contains(node_id))
+        {
             self.flipped.retain(|node_id| stored_ids.contains(node_id));
             self.sync_model_scopes(ctx);
         }

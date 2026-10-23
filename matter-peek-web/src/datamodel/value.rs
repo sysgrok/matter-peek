@@ -5,7 +5,7 @@
 use serde_json::{Map, Value};
 use yew::prelude::*;
 
-use matter_peek_core::api::{display, ClusterModel, DeviceModel, ValueKind, ValueType};
+use matter_peek_core::api::{display, ClusterModel, DeviceModel, FieldType, ValueKind, ValueType};
 
 const DESCRIPTOR: u32 = 0x001D;
 const SERVER_LIST: u32 = 0x0001;
@@ -113,6 +113,14 @@ pub(super) fn view(value: &Value, ty: Option<&ValueType>, model: &DeviceModel) -
     }
 }
 
+/// The fields of a struct or an event, `value`, typed as `fields` say.
+pub(super) fn fields(value: &Value, fields: Option<&[FieldType]>, model: &DeviceModel) -> Html {
+    match value {
+        Value::Object(values) => record(values, fields, model),
+        other => view(other, None, model),
+    }
+}
+
 /// An object of `fields`, in their order, as indented JSON, its parts
 /// coloured.
 pub(super) fn json(fields: &[(String, Value)]) -> Html {
@@ -139,7 +147,11 @@ pub(super) fn json_text(fields: &[(String, Value)]) -> String {
         .iter()
         .map(|(key, v)| {
             let v = serde_json::to_string_pretty(v).unwrap_or_default();
-            format!("  {}: {}", Value::String(key.clone()), v.replace('\n', "\n  "))
+            format!(
+                "  {}: {}",
+                Value::String(key.clone()),
+                v.replace('\n', "\n  ")
+            )
         })
         .collect();
 
@@ -155,7 +167,9 @@ fn number(n: &serde_json::Number, ty: Option<&ValueType>) -> Html {
     if let Some(id) = n.as_u64() {
         let named = match idl {
             Some("vendor_id") => Some((format!("0x{id:04X}"), display::vendor_name(id as u16))),
-            Some("devtype_id") => Some((format!("0x{id:04X}"), display::device_type_name(id as u32))),
+            Some("devtype_id") => {
+                Some((format!("0x{id:04X}"), display::device_type_name(id as u32)))
+            }
             Some("cluster_id" | "attrib_id" | "command_id" | "event_id" | "field_id") => {
                 Some((format!("0x{id:04X}"), None))
             }
@@ -285,7 +299,7 @@ fn list(items: &[Value], item: Option<&ValueType>, model: &DeviceModel) -> Html 
                             <tr>
                                 { for columns.iter().map(|c| html! {
                                     <td>{ match i.get(c) {
-                                        Some(v) => field(c, v, item, model),
+                                        Some(v) => field(c, v, item.and_then(|t| info_fields(t, model)), model),
                                         None => html! {},
                                     } }</td>
                                 }) }
@@ -328,37 +342,43 @@ fn columns(items: &[Value], item: Option<&ValueType>, model: &DeviceModel) -> Ve
 
 /// A struct: its fields and their values, in the order the struct has them.
 fn structure(fields: &Map<String, Value>, ty: Option<&ValueType>, model: &DeviceModel) -> Html {
-    let mut names: Vec<&String> = fields.keys().collect();
-    if let Some(order) = ty.and_then(|t| info_fields(t, model)) {
-        names.sort_by_key(|n| order.iter().position(|f| f.name == **n).unwrap_or(usize::MAX));
+    record(fields, ty.and_then(|t| info_fields(t, model)), model)
+}
+
+/// Named values, in the order of `types`, each as its type there says.
+fn record(values: &Map<String, Value>, types: Option<&[FieldType]>, model: &DeviceModel) -> Html {
+    let mut names: Vec<&String> = values.keys().collect();
+    if let Some(order) = types {
+        names.sort_by_key(|n| {
+            order
+                .iter()
+                .position(|f| f.name == **n)
+                .unwrap_or(usize::MAX)
+        });
     }
 
     html! {
         <dl class="v-struct">
-            { for names.into_iter().map(|name| (name, &fields[name])).map(|(name, v)| html! {
+            { for names.into_iter().map(|name| (name, &values[name])).map(|(name, v)| html! {
                 <>
                     <dt>{ name.clone() }</dt>
-                    <dd>{ field(name, v, ty, model) }</dd>
+                    <dd>{ field(name, v, types, model) }</dd>
                 </>
             }) }
         </dl>
     }
 }
 
-/// Field `name` of a struct of type `of`, as its type says.
-fn field(name: &str, value: &Value, of: Option<&ValueType>, model: &DeviceModel) -> Html {
-    let ty = of
-        .and_then(|t| info_fields(t, model))
+/// Field `name` among `types`, as its type says.
+fn field(name: &str, value: &Value, types: Option<&[FieldType]>, model: &DeviceModel) -> Html {
+    let ty = types
         .and_then(|fields| fields.iter().find(|f| f.name == name))
         .map(|f| &f.value_type);
     view(value, ty, model)
 }
 
 /// The fields of the struct `ty` is.
-fn info_fields<'m>(
-    ty: &ValueType,
-    model: &'m DeviceModel,
-) -> Option<&'m [matter_peek_core::api::FieldType]> {
+fn info_fields<'m>(ty: &ValueType, model: &'m DeviceModel) -> Option<&'m [FieldType]> {
     let info = model.types.get(ty.schema? as usize)?;
     Some(info.fields.as_slice())
 }

@@ -350,12 +350,17 @@ impl App {
         let node_id = d.handle.node_id;
         let busy = self.device_busy(node_id);
         let model = self.card_models.get(&node_id).filter(|_| flipped);
+        // The application endpoints with controls, or with events.
         let endpoints: Vec<_> = model
             .map(|model| {
                 model
                     .endpoints
                     .iter()
-                    .filter(|e| e.id != 0 && controls::any(e, true))
+                    .filter(|e| {
+                        e.id != 0
+                            && (controls::any(e, true)
+                                || model.events.iter().any(|ev| ev.endpoint == e.id))
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -385,6 +390,13 @@ impl App {
                             </p>
                         }
                         { controls::view(model, e, true, busy || offline, &on_act) }
+                        if let Some(event) = model.events.iter().rev().find(|ev| ev.endpoint == e.id && ev.priority != api::EventPriority::Debug) {
+                            <p class="card-event" title={format!("Event #{}", event.number)}>
+                                { icon(Icon::Bolt, 14) }
+                                <span class="card-event-what">{ crate::datamodel::event_brief(event) }</span>
+                                <span class="card-event-when">{ crate::datamodel::event_time(event) }</span>
+                            </p>
+                        }
                     </section>
                 }) }
             },

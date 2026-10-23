@@ -1,5 +1,6 @@
-//! Reads, writes and invokes on any cluster of a device, with the values as
-//! JSON (see [`crate::values`]), typed by the [schema](crate::schema).
+//! Reads, writes and invokes on any cluster of a device, and its events, with
+//! the values as JSON (see [`crate::values`]), typed by the
+//! [schema](crate::schema).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -10,7 +11,10 @@ use serde_json::Value;
 use rs_matter::crypto::Crypto;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::im::client::ImClient as _;
-use rs_matter::im::encoding::{AttrResp, CmdResp};
+use rs_matter::im::encoding::{
+    AttrResp, CmdResp, EventDataTimestamp, EventFilter, EventPath, EventPriority, EventResp,
+    ReportDataResp,
+};
 use rs_matter::im::{AttrDataTag, AttrPath, CmdDataTag, GenericPath, IMStatusCode};
 use rs_matter::tlv::TLVTag;
 use rs_matter::transport::exchange::Exchange;
@@ -18,7 +22,7 @@ use rs_matter::utils::storage::WriteBuf;
 use rs_matter::Matter;
 
 use crate::model::DeviceHandle;
-use crate::schema::{self, AttrSchema, CmdSchema};
+use crate::schema::{self, AttrSchema, CmdSchema, Priority};
 use crate::values::{self, ValueError};
 
 /// How long a timed write or invoke may take to follow its request, ms.
@@ -42,6 +46,29 @@ pub struct Decoded {
     pub report: AttrReport,
     /// One item to add to the attribute's list, rather than its value.
     pub item: bool,
+}
+
+/// An event as a device reports it.
+#[derive(Debug, Clone)]
+pub struct EventReport {
+    pub endpoint: u16,
+    pub cluster: u32,
+    pub event: u32,
+    /// Event numbers count up, also across the device's reboots.
+    pub number: u64,
+    pub priority: Priority,
+    pub time: EventTime,
+    /// Its fields, or why they could not be read.
+    pub fields: Result<Value, String>,
+}
+
+/// When an event happened, by the clock the device has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventTime {
+    /// UTC, ms since 1970.
+    Utc(u64),
+    /// Since the device started, ms.
+    Uptime(u64),
 }
 
 /// Why a write or an invoke failed.
@@ -105,6 +132,114 @@ pub async fn read<C: Crypto>(
             None => return Ok(reports),
         }
     }
+}
+
+/// Read the events of `dev` under `endpoint` and `cluster`, each a wildcard
+/// if `None`, numbered `from` on.
+pub async fn read_events<C: Crypto>(
+    matter: &Matter<'_>,
+    crypto: C,
+    dev: DeviceHandle,
+    endpoint: Option<u16>,
+    cluster: Option<u32>,
+    from: u64,
+) -> Result<Vec<EventReport>, Error> {
+    let paths = [event_path(endpoint, cluster)];
+    let filters = [EventFilter {
+        node: None,
+        event_min: Some(from),
+    }];
+
+    let exchange = Exchange::initiate(matter, crypto, dev.fabric_index, dev.node_id).await?;
+    let mut chunk = exchange
+        .read_with(|msg| {
+            msg.event_requests_from(&paths)?
+                .event_filters_from(&filters)?
+                .fabric_filtered(false)?
+                .end()
+        })
+        .await?;
+
+    let mut events = Vec::new();
+    loop {
+        events.extend(decode_events(&chunk.response()?));
+
+        match chunk.complete().await? {
+            Some(next) => chunk = next,
+            None => return Ok(events),
+        }
+    }
+}
+
+/// The events under `endpoint` and `cluster`, each a wildcard if `None`.
+pub fn event_path(endpoint: Option<u16>, cluster: Option<u32>) -> EventPath {
+    EventPath {
+        endpoint,
+        cluster,
+        ..Default::default()
+    }
+}
+
+/// The events `report` carries, decoded by the schema.
+pub fn decode_events(report: &ReportDataResp<'_>) -> Vec<EventReport> {
+    // A delta timestamp counts from the event before it in the report.
+    let mut last: Option<EventTime> = None;
+    let mut events = Vec::new();
+
+    for event in report.event_reports.iter().flat_map(|r| r.iter()) {
+        let data = match event {
+            Ok(EventResp::Data(data)) => data,
+            Ok(EventResp::Status(status)) => {
+                log::debug!("event status: {:?} {:?}", status.path, status.status.status);
+                continue;
+            }
+            Err(e) => {
+                log::warn!("event report: {e:?}");
+                continue;
+            }
+        };
+        let p = &data.path;
+        let (Some(endpoint), Some(cluster), Some(id)) = (p.endpoint, p.cluster, p.event) else {
+            continue;
+        };
+
+        let time = match data.timestamp {
+            EventDataTimestamp::EpochTimestamp(ms) => EventTime::Utc(ms),
+            EventDataTimestamp::SystemTimestamp(ms) => EventTime::Uptime(ms),
+            EventDataTimestamp::DeltaEpochTimestamp(ms) => match last {
+                Some(EventTime::Utc(before)) => EventTime::Utc(before + ms),
+                _ => EventTime::Utc(ms),
+            },
+            EventDataTimestamp::DeltaSystemTimestamp(ms) => match last {
+                Some(EventTime::Uptime(before)) => EventTime::Uptime(before + ms),
+                _ => EventTime::Uptime(ms),
+            },
+        };
+        last = Some(time);
+
+        let schema = schema::cluster(cluster).and_then(|c| c.event(id));
+        let fields = match schema {
+            Some(event) => values::fields_to_json(&data.data, event.fields),
+            None => values::to_json(&data.data, None),
+        }
+        .map_err(describe);
+
+        events.push(EventReport {
+            endpoint,
+            cluster,
+            event: id,
+            number: data.event_number,
+            priority: match data.priority {
+                EventPriority::Debug => Priority::Debug,
+                EventPriority::Info => Priority::Info,
+                EventPriority::Critical => Priority::Critical,
+            },
+            time,
+            fields,
+        });
+    }
+
+    events
 }
 
 /// Write `value` to attribute `attr` of `cluster` on `endpoint`.

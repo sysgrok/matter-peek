@@ -151,6 +151,20 @@ enum Command {
         #[arg(long)]
         live: bool,
     },
+    /// Read the events a device keeps (presses, alarms, faults, boots, ...),
+    /// oldest first.
+    Events {
+        node: Node,
+        /// Only this endpoint.
+        #[arg(long)]
+        endpoint: Option<u16>,
+        /// Only this cluster: its ID or name.
+        #[arg(long)]
+        cluster: Option<String>,
+        /// Then follow them live, printing those reported, until interrupted.
+        #[arg(long)]
+        live: bool,
+    },
     /// Write an attribute of a device: a JSON value (an enum by name, a
     /// bitmap as the names of its bits, a struct as an object).
     Write {
@@ -815,6 +829,81 @@ async fn run(cli: Cli) -> io::Result<bool> {
 
             Ok(true)
         }
+        Command::Events {
+            node,
+            endpoint,
+            cluster,
+            live,
+        } => {
+            let request = wire::Request::ReadEvents {
+                node_id: node.0,
+                endpoint,
+                cluster: cluster.clone(),
+            };
+            // The number of the first event not read.
+            let mut seen = 0;
+            let read = match call(&conn, &out, request).await? {
+                Some(wire::Response::Events { events }) => {
+                    seen = events.last().map_or(0, |e| e.number + 1);
+                    if !out.json {
+                        if events.is_empty() {
+                            println!("No events.");
+                        }
+                        for e in &events {
+                            println!("{}", event_text(e));
+                        }
+                    }
+                    true
+                }
+                response => response.is_some(),
+            };
+            if !(read && live) {
+                return Ok(read);
+            }
+
+            let scope = match endpoint {
+                Some(endpoint) if endpoint != 0 => api::ModelScope::Application,
+                _ => api::ModelScope::All,
+            };
+            let request = wire::Request::SubscribeModel {
+                node_id: node.0,
+                scope,
+            };
+            if call(&conn, &out, request).await?.is_none() {
+                return Ok(false);
+            }
+            // Only the events asked for, after those read.
+            let wanted_cluster = cluster.as_deref().map(str::to_lowercase);
+            while let Some(msg) = conn.recv().await {
+                let wire::ServerMsg::Event { mut event } = msg else {
+                    continue;
+                };
+                if let wire::Event::Model { model, .. } = &mut event {
+                    model.endpoints.clear();
+                    model.events.retain(|e| {
+                        e.number >= seen
+                            && endpoint.is_none_or(|wanted| wanted == e.endpoint)
+                            && wanted_cluster.as_deref().is_none_or(|wanted| {
+                                e.cluster_name.as_deref().map(str::to_lowercase).as_deref()
+                                    == Some(wanted)
+                                    || wanted
+                                        .trim_start_matches("0x")
+                                        .parse::<u32>()
+                                        .is_ok_and(|id| id == e.cluster)
+                            })
+                    });
+                    if let Some(last) = model.events.last() {
+                        seen = last.number + 1;
+                    }
+                    if model.events.is_empty() {
+                        continue;
+                    }
+                }
+                out.event(&event);
+            }
+
+            Ok(true)
+        }
         Command::Write {
             node,
             endpoint,
@@ -1049,6 +1138,9 @@ impl Out {
                 }
             }
             wire::Event::Model { model, .. } => {
+                for e in &model.events {
+                    println!("{}", event_text(e));
+                }
                 for e in &model.endpoints {
                     for c in &e.clusters {
                         let cluster = named(c.name.as_deref(), display::hex_u32(c.id));
@@ -2321,6 +2413,29 @@ fn print_model(model: &api::DeviceModel) {
             }
         }
     }
+}
+
+/// An event in one line: its number, time, priority, where, what, fields.
+fn event_text(e: &api::EventModel) -> String {
+    let time = match (e.utc_ms, e.uptime_ms) {
+        (Some(ms), _) => display::utc_label(ms),
+        (None, Some(ms)) => format!("+{} after start", display::duration(ms / 1000)),
+        (None, None) => String::new(),
+    };
+    let priority = match e.priority {
+        api::EventPriority::Debug => "debug",
+        api::EventPriority::Info => "info",
+        api::EventPriority::Critical => "CRITICAL",
+    };
+    let fields = e.fields.clone().or(e.error.clone()).unwrap_or_default();
+
+    format!(
+        "#{}  {time}  {priority}  {} {} {}  {fields}",
+        e.number,
+        e.endpoint,
+        named(e.cluster_name.as_deref(), display::hex_u32(e.cluster)),
+        named(e.name.as_deref(), display::hex_u32(e.event)),
+    )
 }
 
 /// `name (id)`, or just the ID.

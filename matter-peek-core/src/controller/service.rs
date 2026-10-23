@@ -275,6 +275,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             Op::DeleteFabric { fabric, .. } => self.fabric_keys(fabric, Mode::Write),
             Op::PeekDevice { node_id, .. }
             | Op::ReadModel { node_id, .. }
+            | Op::ReadEvents { node_id, .. }
             | Op::ReadNetwork { node_id, .. }
             | Op::RetrieveLogs { node_id, .. }
             | Op::Identify { node_id, .. }
@@ -352,6 +353,17 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             } => {
                 let model = self.read_model(node_id, endpoint, cluster.as_deref()).await;
                 let _ = reply.send(model).await;
+            }
+            Op::ReadEvents {
+                node_id,
+                endpoint,
+                cluster,
+                reply,
+            } => {
+                let events = self
+                    .read_events(node_id, endpoint, cluster.as_deref())
+                    .await;
+                let _ = reply.send(events).await;
             }
             Op::WriteAttribute {
                 node_id,
@@ -795,6 +807,7 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
                 refuse(reply, error).await
             }
             Op::InvokeCommand { reply, .. } => refuse(reply, error).await,
+            Op::ReadEvents { reply, .. } => refuse(reply, error).await,
             Op::ReadQrImage { reply, .. } => refuse(reply, error).await,
             Op::Commission { reply, .. } => refuse(reply, error).await,
             Op::ListDevices { reply, .. } | Op::Sync { reply, .. } => refuse(reply, error).await,

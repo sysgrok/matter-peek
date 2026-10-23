@@ -1,4 +1,5 @@
-//! A device's data model: read, written and invoked on, cluster by cluster.
+//! A device's data model: read, written and invoked on, cluster by cluster;
+//! and its events.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -12,11 +13,12 @@ use rs_matter::persist::KvBlobStore;
 
 use crate::api::{
     AttributeModel, ClusterModel, CommandModel, CommandOutcome, DeviceModel, DeviceTypeInfo,
-    EndpointModel, FieldType, NamedValue, PeekError, TypeInfo, ValueKind, ValueType,
+    EndpointModel, EventModel, EventPriority, EventTypeModel, FieldType, NamedValue, PeekError,
+    TypeInfo, ValueKind, ValueType,
 };
-use crate::datamodel::{self, AttrReport, ModelError};
+use crate::datamodel::{self, AttrReport, EventReport, EventTime, ModelError};
 use crate::ota::OtaImageStore;
-use crate::schema::{self, ClusterSchema, FieldSchema, TypeRef, ValueSchema};
+use crate::schema::{self, ClusterSchema, FieldSchema, Priority, TypeRef, ValueSchema};
 
 use super::{failed, Ctx};
 
@@ -51,7 +53,26 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         .await
         .map_err(|e| failed(&format!("device 0x{node_id:016X} did not answer"), e))?;
 
-        Ok(model(node_id, &reports))
+        Ok(model(node_id, &reports, &[]))
+    }
+
+    /// Read the events a listed device keeps under `endpoint` and `cluster`
+    /// (an ID or a name), each all if `None`.
+    pub(super) async fn read_events(
+        &self,
+        node_id: u64,
+        endpoint: Option<u16>,
+        cluster: Option<&str>,
+    ) -> Result<Vec<EventModel>, PeekError> {
+        let dev = self.lookup_device(node_id)?;
+        let cluster = cluster.map(cluster_id).transpose()?;
+
+        let events =
+            datamodel::read_events(self.matter, self.crypto, dev.handle, endpoint, cluster, 0)
+                .await
+                .map_err(|e| failed(&format!("device 0x{node_id:016X} did not answer"), e))?;
+
+        Ok(events.iter().map(event_model).collect())
     }
 
     /// Write `value` (JSON) to an attribute of a listed device, and answer
@@ -141,8 +162,8 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     }
 }
 
-/// The model of what `reports` say, by endpoint and cluster.
-pub(super) fn model(node_id: u64, reports: &[AttrReport]) -> DeviceModel {
+/// The model of what `reports` and `events` say, by endpoint and cluster.
+pub(super) fn model(node_id: u64, reports: &[AttrReport], events: &[EventReport]) -> DeviceModel {
     let mut types = Types::default();
     let mut endpoints: BTreeMap<u16, BTreeMap<u32, Vec<&AttrReport>>> = BTreeMap::new();
 
@@ -153,6 +174,14 @@ pub(super) fn model(node_id: u64, reports: &[AttrReport]) -> DeviceModel {
             .entry(report.cluster)
             .or_default()
             .push(report);
+    }
+    // The clusters of the events, with what their events hold.
+    for event in events {
+        endpoints
+            .entry(event.endpoint)
+            .or_default()
+            .entry(event.cluster)
+            .or_default();
     }
 
     let endpoints = endpoints
@@ -192,6 +221,45 @@ pub(super) fn model(node_id: u64, reports: &[AttrReport]) -> DeviceModel {
         node_id,
         endpoints,
         types: types.infos,
+        events: events.iter().map(event_model).collect(),
+    }
+}
+
+/// `event`, its name and fields as the schema has them.
+pub(super) fn event_model(event: &EventReport) -> EventModel {
+    let cluster = schema::cluster(event.cluster);
+    let name = cluster
+        .and_then(|c| c.event(event.event))
+        .map(|e| e.name.to_string());
+    let (utc_ms, uptime_ms) = match event.time {
+        EventTime::Utc(ms) => (Some(ms), None),
+        EventTime::Uptime(ms) => (None, Some(ms)),
+    };
+    let (fields, error) = match &event.fields {
+        Ok(fields) => (Some(fields.to_string()), None),
+        Err(e) => (None, Some(e.clone())),
+    };
+
+    EventModel {
+        endpoint: event.endpoint,
+        cluster: event.cluster,
+        event: event.event,
+        cluster_name: cluster.map(|c| c.name.to_string()),
+        name,
+        number: event.number,
+        priority: priority(event.priority),
+        utc_ms,
+        uptime_ms,
+        fields,
+        error,
+    }
+}
+
+fn priority(priority: Priority) -> EventPriority {
+    match priority {
+        Priority::Debug => EventPriority::Debug,
+        Priority::Info => EventPriority::Info,
+        Priority::Critical => EventPriority::Critical,
     }
 }
 
@@ -238,11 +306,24 @@ fn cluster_model(id: u32, attrs: &[&AttrReport], types: &mut Types) -> ClusterMo
         })
         .collect();
 
+    let events = schema
+        .map(|c| c.events)
+        .unwrap_or_default()
+        .iter()
+        .map(|e| EventTypeModel {
+            id: e.id,
+            name: e.name.to_string(),
+            priority: priority(e.priority),
+            fields: types.fields(e.fields),
+        })
+        .collect();
+
     ClusterModel {
         id,
         name: schema.map(|c| c.name.to_string()),
         attributes,
         commands,
+        events,
     }
 }
 

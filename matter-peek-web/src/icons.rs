@@ -77,6 +77,7 @@ pub enum Icon {
     Table,
     Braces,
     Play,
+    Bolt,
 }
 
 pub fn icon(glyph: Icon, size: u32) -> Html {
@@ -94,6 +95,7 @@ pub fn icon(glyph: Icon, size: u32) -> Html {
             </>
         },
         Icon::Play => html! { <path d="M6 4l14 8-14 8z" /> },
+        Icon::Bolt => html! { <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" /> },
         Icon::Wifi => html! {
             <>
                 <path d="M2 8.5a15 15 0 0 1 20 0" />

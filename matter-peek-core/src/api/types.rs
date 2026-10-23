@@ -191,8 +191,9 @@ pub struct AdvertisedFabric {
 }
 
 /// A device's data model as read from it: its endpoints, their device types
-/// and clusters, the clusters' attributes (with their values) and commands.
-/// Names and types come from the Matter IDL, where it has them.
+/// and clusters, the clusters' attributes (with their values), commands and
+/// events; and the events it reported. Names and types come from the Matter
+/// IDL, where it has them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DeviceModel {
@@ -201,6 +202,51 @@ pub struct DeviceModel {
     /// The enums, bitmaps and structs the values are of, by
     /// [`ValueType::schema`].
     pub types: Vec<TypeInfo>,
+    /// The events reported, oldest first.
+    #[serde(default)]
+    pub events: Vec<EventModel>,
+}
+
+/// An event a device reported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct EventModel {
+    pub endpoint: u16,
+    pub cluster: u32,
+    pub event: u32,
+    pub cluster_name: Option<String>,
+    pub name: Option<String>,
+    /// Event numbers count up, also across the device's reboots.
+    pub number: u64,
+    pub priority: EventPriority,
+    /// When it happened: in UTC (ms since 1970), or else since the device
+    /// started (ms).
+    pub utc_ms: Option<u64>,
+    pub uptime_ms: Option<u64>,
+    /// Its fields, as JSON.
+    pub fields: Option<String>,
+    /// Why they could not be read.
+    pub error: Option<String>,
+}
+
+/// How much an event matters; a device keeps the more important longer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum EventPriority {
+    Debug,
+    Info,
+    Critical,
+}
+
+/// An event a cluster may report: its fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct EventTypeModel {
+    pub id: u32,
+    pub name: String,
+    pub priority: EventPriority,
+    pub fields: Vec<FieldType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,6 +272,9 @@ pub struct ClusterModel {
     pub attributes: Vec<AttributeModel>,
     /// The commands it accepts.
     pub commands: Vec<CommandModel>,
+    /// The events it may report.
+    #[serde(default)]
+    pub events: Vec<EventTypeModel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

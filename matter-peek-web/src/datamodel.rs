@@ -1,7 +1,7 @@
 //! A device's data model, in a popup: its endpoints and their clusters, the
 //! clusters' attributes (written in place where writable) and commands
-//! (invoked with a form of their fields). It follows the device's
-//! subscription, as the backs of the device cards do.
+//! (invoked with a form of their fields), and the events it reported. It
+//! follows the device's subscription, as the backs of the device cards do.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -10,7 +10,7 @@ use yew::prelude::*;
 
 use matter_peek_core::api::{
     display, wire, AttributeModel, ClusterModel, CommandModel, DeviceModel, EndpointModel,
-    FieldType, TypeInfo, ValueKind, ValueType,
+    EventModel, EventPriority, FieldType, TypeInfo, ValueKind, ValueType,
 };
 
 use crate::icons::{device_type_icon, icon, Icon};
@@ -32,6 +32,12 @@ const CLUSTER_REVISION: u32 = 0xFFFD;
 /// The device type of the root endpoint.
 const ROOT_NODE: u32 = 0x0016;
 
+/// The events kept of a device, the latest.
+const EVENTS_KEPT: usize = 500;
+
+/// The events shown at most, the latest.
+const EVENTS_SHOWN: usize = 200;
+
 /// How long what changed shows so (ms).
 const RECENT_MS: f64 = 2500.0;
 
@@ -45,9 +51,9 @@ const CATEGORIES: &[(&str, &str)] = &[
 
 /// The clusters that keep a node running, rather than doing what it is for.
 const UTILITY: &[u32] = &[
-    0x0003, 0x0004, 0x0005, 0x001D, 0x001E, 0x001F, 0x0025, 0x0028, 0x0029, 0x002A, 0x002B,
-    0x002C, 0x002D, 0x002E, 0x0030, 0x0031, 0x0038, 0x0039, 0x003C, 0x003E, 0x003F, 0x0040,
-    0x0041, 0x0046, 0x0062, 0x0801, 0x0802,
+    0x0003, 0x0004, 0x0005, 0x001D, 0x001E, 0x001F, 0x0025, 0x0028, 0x0029, 0x002A, 0x002B, 0x002C,
+    0x002D, 0x002E, 0x0030, 0x0031, 0x0038, 0x0039, 0x003C, 0x003E, 0x003F, 0x0040, 0x0041, 0x0046,
+    0x0062, 0x0801, 0x0802,
 ];
 
 /// The diagnostics clusters.
@@ -65,6 +71,8 @@ pub struct ModelView {
     pub selected: Option<(u16, u32)>,
     /// The endpoint whose controls are shown instead.
     pub controls: Option<u16>,
+    /// The device's events are shown instead.
+    pub timeline: bool,
     /// The attribute being edited, and the value typed so far.
     pub editing: Option<(u32, String)>,
     /// The command whose form is open, and its fields typed so far.
@@ -83,6 +91,8 @@ pub struct ModelView {
     pub changed: HashMap<(u16, u32, u32), f64>,
     /// When an attribute of each cluster last changed (ms).
     pub changed_clusters: HashMap<(u16, u32), f64>,
+    /// When each event came, by its number (ms).
+    pub new_events: HashMap<u64, f64>,
 }
 
 /// What happens in the data model popup.
@@ -92,6 +102,7 @@ pub enum ModelMsg {
     Close,
     Select(u16, u32),
     SelectControls(u16),
+    SelectEvents,
     Act(Action),
     Edit(u32),
     Draft(String),
@@ -136,6 +147,7 @@ impl App {
                 error: None,
                 selected: None,
                 controls: None,
+                timeline: false,
                 editing: None,
                 command: None,
                 busy: false,
@@ -145,6 +157,7 @@ impl App {
                 json: false,
                 changed: HashMap::new(),
                 changed_clusters: HashMap::new(),
+                new_events: HashMap::new(),
             };
             // What its card shows, until the whole model is reported.
             if let Some(model) = self.card_models.get(&node_id) {
@@ -187,12 +200,14 @@ impl App {
             ModelMsg::Select(endpoint, cluster) => {
                 view.selected = Some((endpoint, cluster));
                 view.controls = None;
+                view.timeline = false;
                 view.editing = None;
                 view.command = None;
                 view.outcome = None;
             }
             ModelMsg::SelectControls(endpoint) => {
                 view.controls = Some(endpoint);
+                view.timeline = false;
                 view.editing = None;
                 view.command = None;
                 view.outcome = None;
@@ -279,6 +294,12 @@ impl App {
                     }
                     Err(e) => view.outcome = Some(Err(e)),
                 }
+            }
+            ModelMsg::SelectEvents => {
+                view.timeline = true;
+                view.editing = None;
+                view.command = None;
+                view.outcome = None;
             }
             ModelMsg::Filter(filter) => view.filter = filter,
             ModelMsg::Fold(endpoint) => {
@@ -398,6 +419,7 @@ impl App {
                                 <div class="dm-layout">
                                     { view_tree(view, model, link, now) }
                                     { match view.controls.and_then(|ep| model.endpoints.iter().find(|e| e.id == ep)) {
+                                        _ if view.timeline => view_timeline(view, model, now),
                                         Some(endpoint) => view_controls(view, model, endpoint, link),
                                         None => view_cluster(view, model, link, now),
                                     } }
@@ -419,9 +441,17 @@ impl ModelView {
         let first = match self.model.as_mut() {
             Some(shown) => {
                 let now = js_sys::Date::now();
+                let before = shown.events.last().map(|e| e.number);
                 for (endpoint, cluster, attr) in absorb(shown, model) {
                     self.changed.insert((endpoint, cluster, attr), now);
                     self.changed_clusters.insert((endpoint, cluster), now);
+                }
+                for e in shown
+                    .events
+                    .iter()
+                    .filter(|e| before.is_none_or(|before| e.number > before))
+                {
+                    self.new_events.insert(e.number, now);
                 }
                 false
             }
@@ -492,6 +522,15 @@ fn view_tree(view: &ModelView, model: &DeviceModel, link: &Scope<App>, now: f64)
                 <span><b>{ clusters }</b>{ " clusters" }</span>
                 <span><b>{ attributes }</b>{ " attributes" }</span>
             </p>
+            <button class={classes!("dm-tree-events", view.timeline.then_some("is-selected"))}
+                onclick={link.callback(|_| model_msg(ModelMsg::SelectEvents))}>
+                { icon(Icon::Bolt, 15) }
+                <span class="dm-cluster-name">{ "Events" }</span>
+                if let Some(t) = model.events.last().and_then(|e| view.new_events.get(&e.number)).filter(|t| now - **t < RECENT_MS) {
+                    <span class="dm-pulse" key={t.to_string()} title="Just reported"></span>
+                }
+                <span class="dm-count">{ model.events.len() }</span>
+            </button>
             { for model.endpoints.iter().map(|e| view_endpoint(view, e, &filter, link, now)) }
             <p class="dm-legend">
                 { for CATEGORIES.iter().map(|(class, label)| html! {
@@ -667,6 +706,13 @@ fn view_cluster(view: &ModelView, model: &DeviceModel, link: &Scope<App>, now: f
         .unwrap_or_else(|| display::hex_u32(cluster.id));
     let writable = own.iter().filter(|a| a.writable).count();
     let json = cluster_json(cluster);
+    let events: Vec<&EventModel> = model
+        .events
+        .iter()
+        .rev()
+        .filter(|e| e.endpoint == endpoint && e.cluster == cluster.id)
+        .take(EVENTS_SHOWN)
+        .collect();
 
     html! {
         <div class="dm-cluster-view">
@@ -758,6 +804,114 @@ fn view_cluster(view: &ModelView, model: &DeviceModel, link: &Scope<App>, now: f
                     { for cluster.commands.iter().map(|c| view_command(view, model, endpoint, cluster.id, c, link)) }
                 </div>
             }
+            if !cluster.events.is_empty() || !events.is_empty() {
+                <h4 class="dm-subtitle">
+                    { "Events" }
+                    <span class="dm-count">{ events.len() }</span>
+                </h4>
+                if !cluster.events.is_empty() {
+                    <p class="dm-event-types">
+                        { for cluster.events.iter().map(|t| html! {
+                            <span class={classes!("dm-chip", priority_class(t.priority))}
+                                title={format!("Event 0x{:02X}, {} priority", t.id, priority_name(t.priority))}>
+                                <span class="dm-priority-dot"></span>{ t.name.clone() }
+                            </span>
+                        }) }
+                    </p>
+                }
+                if events.is_empty() {
+                    <p class="dm-events-none">{ "None reported since we follow it." }</p>
+                } else {
+                    <div class="dm-card dm-events">
+                        { for events.iter().map(|e| view_event(view, model, e, false, now)) }
+                    </div>
+                }
+            }
+        </div>
+    }
+}
+
+/// The device's events, the latest first.
+fn view_timeline(view: &ModelView, model: &DeviceModel, now: f64) -> Html {
+    let count = |priority| {
+        model
+            .events
+            .iter()
+            .filter(|e| e.priority == priority)
+            .count()
+    };
+
+    html! {
+        <div class="dm-cluster-view">
+            <header class="dm-hero is-events">
+                <div class="dm-hero-text">
+                    <p class="dm-kicker">{ "The whole device" }</p>
+                    <h3 class="dm-hero-title">{ "Events" }</h3>
+                    <p class="dm-hero-note">
+                        { "What it kept when we started following it, then each event as it comes." }
+                    </p>
+                </div>
+                <div class="dm-hero-stats">
+                    { stat(count(EventPriority::Critical), "critical") }
+                    { stat(count(EventPriority::Info), "info") }
+                    { stat(count(EventPriority::Debug), "debug") }
+                </div>
+            </header>
+            if model.events.is_empty() {
+                <p class="dm-events-none">{ "None reported." }</p>
+            } else {
+                <div class="dm-card dm-events">
+                    { for model.events.iter().rev().take(EVENTS_SHOWN).map(|e| view_event(view, model, e, true, now)) }
+                </div>
+            }
+        </div>
+    }
+}
+
+/// An event: when, how important, what (`whole`: also where), and its fields.
+fn view_event(
+    view: &ModelView,
+    model: &DeviceModel,
+    e: &EventModel,
+    whole: bool,
+    now: f64,
+) -> Html {
+    let fresh = view
+        .new_events
+        .get(&e.number)
+        .is_some_and(|t| now - t < RECENT_MS);
+    let fields = event_fields(model, e);
+    let cluster = e
+        .cluster_name
+        .clone()
+        .unwrap_or_else(|| display::hex_u32(e.cluster));
+
+    html! {
+        <div class={classes!("dm-event", priority_class(e.priority), fresh.then_some("is-changed"))} key={e.number.to_string()}>
+            <div class="dm-event-when">
+                <span class="dm-event-time" title={e.utc_ms.map(display::utc_label)}>{ event_time(e) }</span>
+                <span class="dm-event-number">{ format!("#{}", e.number) }</span>
+            </div>
+            <span class="dm-priority" title={format!("{} priority", priority_name(e.priority))}>
+                { priority_name(e.priority) }
+            </span>
+            <div class="dm-event-what">
+                <p class="dm-event-title">
+                    if whole {
+                        <span class="dm-event-where">{ format!("EP {} · {cluster}", e.endpoint) }</span>
+                    }
+                    <span class="dm-event-name">{ e.name.clone().unwrap_or_else(|| display::hex_u32(e.event)) }</span>
+                </p>
+                { match (&e.fields, &e.error) {
+                    (Some(json), _) => match serde_json::from_str::<serde_json::Value>(json) {
+                        Ok(serde_json::Value::Object(o)) if o.is_empty() => html! {},
+                        Ok(v) => html! { <div class="dm-event-fields">{ value::fields(&v, fields, model) }</div> },
+                        Err(_) => html! { <span class="v-text">{ json.clone() }</span> },
+                    },
+                    (None, Some(error)) => html! { <span class="v-error">{ icon(Icon::Alert, 14) }{ error.clone() }</span> },
+                    (None, None) => html! {},
+                } }
+            </div>
         </div>
     }
 }
@@ -804,7 +958,9 @@ fn view_attribute(
 
     let value = match (&a.value, &a.error) {
         (Some(v), _) => value::attribute(model, cluster, a.id, a.value_type.as_ref(), v),
-        (None, Some(e)) => html! { <span class="v-error">{ icon(Icon::Alert, 14) }{ e.clone() }</span> },
+        (None, Some(e)) => {
+            html! { <span class="v-error">{ icon(Icon::Alert, 14) }{ e.clone() }</span> }
+        }
         (None, None) => html! { <span class="v-none">{ "—" }</span> },
     };
 
@@ -1174,7 +1330,10 @@ fn type_label(ty: &ValueType, model: &DeviceModel) -> String {
 pub(crate) fn absorb(shown: &mut DeviceModel, update: DeviceModel) -> Vec<(u16, u32, u32)> {
     let mut changed = Vec::new();
     let DeviceModel {
-        endpoints, types, ..
+        endpoints,
+        types,
+        events,
+        ..
     } = shown;
     let mut remap = Remap {
         from: &update.types,
@@ -1215,11 +1374,22 @@ pub(crate) fn absorb(shown: &mut DeviceModel, update: DeviceModel) -> Vec<(u16, 
                             name: c.name.clone(),
                             attributes: Vec::new(),
                             commands: Vec::new(),
+                            events: Vec::new(),
                         },
                     );
                     &mut endpoint.clusters[i]
                 }
             };
+            if !c.events.is_empty() {
+                cluster.events = c
+                    .events
+                    .into_iter()
+                    .map(|mut event| {
+                        event.fields = remap.fields(event.fields);
+                        event
+                    })
+                    .collect();
+            }
             // Its commands are as its accepted command list says.
             if c.attributes.iter().any(|a| a.id == ACCEPTED_COMMAND_LIST) {
                 cluster.commands = c
@@ -1245,6 +1415,16 @@ pub(crate) fn absorb(shown: &mut DeviceModel, update: DeviceModel) -> Vec<(u16, 
             }
         }
     }
+
+    let last = events.last().map(|e| e.number);
+    events.extend(
+        update
+            .events
+            .into_iter()
+            .filter(|e| last.is_none_or(|last| e.number > last)),
+    );
+    let excess = events.len().saturating_sub(EVENTS_KEPT);
+    events.drain(..excess);
 
     changed
 }
@@ -1326,6 +1506,88 @@ pub(crate) fn request(node_id: u64, action: Action) -> wire::Request {
             command: command.to_string(),
             fields,
         },
+    }
+}
+
+/// The types of the fields of event `e`, as its cluster has them.
+fn event_fields<'m>(model: &'m DeviceModel, e: &EventModel) -> Option<&'m [FieldType]> {
+    let event = model
+        .endpoints
+        .iter()
+        .flat_map(|endpoint| &endpoint.clusters)
+        .filter(|c| c.id == e.cluster)
+        .flat_map(|c| &c.events)
+        .find(|t| t.id == e.event)?;
+    Some(event.fields.as_slice())
+}
+
+/// When an event happened: in our local time (only the time, today), or
+/// since the device started.
+pub(crate) fn event_time(e: &EventModel) -> String {
+    match (e.utc_ms, e.uptime_ms) {
+        (Some(ms), _) => {
+            let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms as f64));
+            let today = js_sys::Date::new_0().to_date_string() == date.to_date_string();
+            let time = String::from(date.to_locale_time_string("en-GB"));
+            if today {
+                time
+            } else {
+                format!(
+                    "{} {time}",
+                    String::from(
+                        date.to_locale_date_string("en-GB", &wasm_bindgen::JsValue::UNDEFINED)
+                    )
+                )
+            }
+        }
+        (None, Some(ms)) => format!("+{}", display::duration(ms / 1000)),
+        (None, None) => "—".into(),
+    }
+}
+
+/// An event in a few words: its name, and its fields' values.
+pub(crate) fn event_brief(e: &EventModel) -> String {
+    let name = e.name.clone().unwrap_or_else(|| display::hex_u32(e.event));
+    let fields: Vec<String> = e
+        .fields
+        .as_deref()
+        .and_then(|f| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(f).ok())
+        .into_iter()
+        .flatten()
+        .map(|(k, v)| match v {
+            serde_json::Value::String(s) => format!("{k} {s}"),
+            serde_json::Value::Array(items) if items.is_empty() => format!("{k} none"),
+            serde_json::Value::Array(items) => {
+                let items: Vec<String> = items
+                    .iter()
+                    .map(|i| i.as_str().map_or_else(|| i.to_string(), str::to_string))
+                    .collect();
+                format!("{k} {}", items.join(", "))
+            }
+            other => format!("{k} {other}"),
+        })
+        .collect();
+
+    if fields.is_empty() {
+        name
+    } else {
+        format!("{name} · {}", fields.join(", "))
+    }
+}
+
+fn priority_class(priority: EventPriority) -> &'static str {
+    match priority {
+        EventPriority::Debug => "is-debug",
+        EventPriority::Info => "is-info",
+        EventPriority::Critical => "is-critical",
+    }
+}
+
+fn priority_name(priority: EventPriority) -> &'static str {
+    match priority {
+        EventPriority::Debug => "debug",
+        EventPriority::Info => "info",
+        EventPriority::Critical => "critical",
     }
 }
 

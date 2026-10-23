@@ -17,8 +17,8 @@ mod schema {
     use std::path::PathBuf;
 
     use rs_matter_codegen::ast::{
-        ApiMaturity, Bitmap, Cluster, DataType, Entities, Enum, Idl, Struct, StructField,
-        StructType,
+        ApiMaturity, Bitmap, Cluster, DataType, Entities, Enum, EventPriority, Idl, Struct,
+        StructField, StructType,
     };
 
     /// The response of a command that answers with a status only.
@@ -26,6 +26,18 @@ mod schema {
 
     /// The global attribute holding a cluster's features.
     const FEATURE_MAP: u64 = 0xFFFC;
+
+    /// Fields the IDL leaves a plain `enum8` / `enum16`, and the enum of the
+    /// cluster they hold the values of: the states and errors of the
+    /// operational state clusters, which add to those of the base cluster,
+    /// and the tags of the mode clusters, which add to the common ones.
+    const PLAIN_ENUMS: &[(&str, &str)] = &[
+        ("operationalState", "OperationalStateEnum"),
+        ("operationalStateID", "OperationalStateEnum"),
+        ("errorStateID", "ErrorStateEnum"),
+        ("completionErrorCode", "ErrorStateEnum"),
+        ("value", "ModeTag"),
+    ];
 
     pub fn generate() {
         let idl = rs_matter_codegen::parse_idl();
@@ -120,8 +132,29 @@ mod schema {
         .unwrap();
         }
 
+        let mut events = String::new();
+        for e in c
+            .events
+            .iter()
+            .filter(|e| e.maturity != ApiMaturity::Internal)
+        {
+            let priority = match e.priority {
+                EventPriority::Debug => "Debug",
+                EventPriority::Info => "Info",
+                EventPriority::Critical => "Critical",
+            };
+            writeln!(
+                events,
+                "EventSchema {{ id: {}, name: {:?}, priority: Priority::{priority}, fields: {} }},",
+                e.code,
+                e.id,
+                fields(&e.fields, scope, types),
+            )
+            .unwrap();
+        }
+
         format!(
-        "ClusterSchema {{ id: {}, name: {:?}, attributes: &[\n{attributes}], commands: &[\n{commands}] }},\n",
+        "ClusterSchema {{ id: {}, name: {:?}, attributes: &[\n{attributes}], commands: &[\n{commands}], events: &[\n{events}] }},\n",
         c.code, c.id
     )
     }
@@ -144,14 +177,17 @@ mod schema {
 
     fn value(f: &StructField, scope: &Scope, types: &mut Types) -> String {
         let dt = &f.field.data_type;
+        let ty = match plain_enum(&f.field.id, dt, scope) {
+            Some(e) => format!(
+                "TypeRef::Enum(&{})",
+                types.enumeration(e, scope.owner(false))
+            ),
+            None => type_ref(dt, scope, types),
+        };
 
         format!(
-            "ValueSchema {{ ty: {}, idl: {:?}, list: {}, nullable: {}, optional: {} }}",
-            type_ref(dt, scope, types),
-            dt.name,
-            dt.is_list,
-            f.is_nullable,
-            f.is_optional
+            "ValueSchema {{ ty: {ty}, idl: {:?}, list: {}, nullable: {}, optional: {} }}",
+            dt.name, dt.is_list, f.is_nullable, f.is_optional
         )
     }
 
@@ -172,7 +208,9 @@ mod schema {
             return format!("TypeRef::Bitmap(&{})", types.bitmap(b, scope.owner(shared)));
         }
         if let Some((s, shared)) = scope.structure_shared(&dt.name) {
-            let name = types.structure_name(s, scope.owner(shared));
+            // A struct shared by clusters whose fields hold one cluster's
+            // enum is that cluster's.
+            let name = types.structure_name(s, scope.owner(shared && !typed(s, scope)));
             if types.declared.insert(name.clone()) {
                 let fields = fields(&s.fields, scope, types);
                 writeln!(
@@ -186,6 +224,34 @@ mod schema {
         }
 
         panic!("{}: no type {}", scope.cluster.id, dt.name)
+    }
+
+    /// The enum of the cluster that field `name`, a plain enum, holds the
+    /// values of, if any.
+    fn plain_enum<'a>(name: &str, dt: &DataType, scope: &Scope<'a>) -> Option<&'a Enum> {
+        if !matches!(dt.name.as_str(), "enum8" | "enum16") {
+            return None;
+        }
+        let (_, enumeration) = PLAIN_ENUMS.iter().find(|(field, _)| *field == name)?;
+
+        scope
+            .cluster
+            .entities
+            .enums
+            .iter()
+            .find(|e| e.id == *enumeration)
+    }
+
+    /// Whether a field of `s`, or of a struct in it, holds an enum of the
+    /// cluster.
+    fn typed(s: &Struct, scope: &Scope) -> bool {
+        s.fields.iter().any(|f| {
+            let dt = &f.field.data_type;
+            plain_enum(&f.field.id, dt, scope).is_some()
+                || scope
+                    .structure(&dt.name)
+                    .is_some_and(|inner| inner.id != s.id && typed(inner, scope))
+        })
     }
 
     /// The built-in types, by their IDL names.

@@ -106,6 +106,24 @@ impl MatterPeek {
         .await
     }
 
+    /// Read the events a listed device keeps, oldest first: their names,
+    /// numbers, priorities, times and fields. Only those of `endpoint` and
+    /// `cluster` (an ID, decimal or `0x` hex, or a name), if given.
+    pub async fn read_events(
+        &self,
+        node_id: u64,
+        endpoint: Option<u16>,
+        cluster: Option<String>,
+    ) -> Result<Vec<EventModel>, PeekError> {
+        self.call(|reply| Op::ReadEvents {
+            node_id,
+            endpoint,
+            cluster,
+            reply,
+        })
+        .await
+    }
+
     /// Write `value` (JSON) to an attribute (an ID or a name) of `cluster` on
     /// `endpoint` of a listed device; answers with that cluster read afresh.
     pub async fn write_attribute(
@@ -690,6 +708,12 @@ pub(crate) enum Op {
         endpoint: Option<u16>,
         cluster: Option<String>,
         reply: Reply<DeviceModel>,
+    },
+    ReadEvents {
+        node_id: u64,
+        endpoint: Option<u16>,
+        cluster: Option<String>,
+        reply: Reply<Vec<EventModel>>,
     },
     WriteAttribute {
         node_id: u64,

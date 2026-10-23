@@ -108,7 +108,7 @@ periodically, like the server), so to share the store with the web UI, run
 
 | Tools | Access |
 |-------|--------|
-| `discover`, `advertised_devices`, `list_devices`, `list_fabrics`, `peek_device`, `read_model`, `read_network`, `thread_mesh`, `thread_findings`, `retrieve_logs`, `read_qr_image`, `ota_images`, `ota_updates`, `commissioning_window`, `device_time` | read-only |
+| `discover`, `advertised_devices`, `list_devices`, `list_fabrics`, `peek_device`, `read_model`, `read_events`, `read_network`, `thread_mesh`, `thread_findings`, `retrieve_logs`, `read_qr_image`, `ota_images`, `ota_updates`, `commissioning_window`, `device_time` | read-only |
 | `identify` | acts on the device (it blinks); not read-only, so agents ask first |
 | `commission`, `decommission`, `remember`, `set_tags`, `sync`, `add_network`, `remove_network`, `connect_network`, `reorder_network`, `ota_upload`, `ota_delete`, `ota_update`, `open_commissioning_window`, `close_commissioning_window`, `set_device_time`, `remove_device_fabric`, `create_fabric`, `rename_fabric`, `set_default_fabric`, `delete_fabric`, `write_attribute`, `invoke_command` | **mutating** |
 
@@ -217,10 +217,17 @@ model <node> [--endpoint N] [--cluster C] [--live]`, `matter-peek write` /
 `invoke_command`. Any cluster in rs-matter's IDL works, with no code per
 cluster.
 
+Its events too (switch presses, alarms, faults, boots, state changes), with
+their fields by name: the popup's Events timeline and each cluster's events,
+`matter-peek events <node> [--endpoint N] [--cluster C] [--live]`, and the
+MCP tool `read_events`.
+
 A device card turns over to the controls of its application endpoints
-(switches, sliders, choices, buttons and readings); the Controls button on
-the Devices page turns all the cards shown. The controls and the Model popup
-follow the device live, through the same subscription as its health.
+(switches, sliders, choices, buttons and readings, with colour pickers for
+lights, lock and charger switches, remotes for TVs) and their latest event;
+the Health | Controls switch on the Devices page turns all the cards shown.
+The controls, the events and the Model popup follow the device live, through
+the same subscription as its health.
 
 ### The assistant (an AI agent)
 

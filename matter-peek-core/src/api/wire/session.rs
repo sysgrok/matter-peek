@@ -122,6 +122,14 @@ impl WireSession {
                 .read_model(node_id, endpoint, cluster)
                 .await
                 .map(|model| Response::Model { model }),
+            Request::ReadEvents {
+                node_id,
+                endpoint,
+                cluster,
+            } => peek
+                .read_events(node_id, endpoint, cluster)
+                .await
+                .map(|events| Response::Events { events }),
             Request::WriteAttribute {
                 node_id,
                 endpoint,
