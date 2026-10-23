@@ -19,10 +19,15 @@ impl App {
     /// The devices on our fabric.
     pub(crate) fn view_devices_tab(&self, link: &Scope<Self>) -> Html {
         let visible = self.visible_devices();
-        let all_flipped = !visible.is_empty()
-            && visible
-                .iter()
-                .all(|d| self.flipped.contains(&d.handle.node_id));
+        let flipped = visible
+            .iter()
+            .filter(|d| self.flipped.contains(&d.handle.node_id))
+            .count();
+        let face = match flipped {
+            0 => Some(false),
+            n if n == visible.len() => Some(true),
+            _ => None,
+        };
 
         let count = self.stored.len();
         let live = self
@@ -61,16 +66,8 @@ impl App {
                         <span class="icon is-left">{ icon(Icon::Search, 18) }</span>
                     </div>
                 }
-                if count > 0 {
-                    if all_flipped {
-                        { ui::icon_button(Icon::Gauge, "Health", classes!("is-soft"), false,
-                            Some("Turn the cards back to their health"),
-                            link.callback(|_| Msg::FlipAll)) }
-                    } else {
-                        { ui::icon_button(Icon::Sliders, "Controls", classes!("is-soft"), false,
-                            Some("Turn the cards over to their controls"),
-                            link.callback(|_| Msg::FlipAll)) }
-                    }
+                if !visible.is_empty() {
+                    { ui::face_switch(face, false, link.callback(Msg::FlipAll)) }
                 }
                 <button
                     class={classes!("button", "is-icon",
@@ -265,10 +262,7 @@ impl App {
                             onclick={link.callback(move |_| Msg::Refresh(node_id))}>
                             { icon(Icon::Refresh, 18) }
                         </button>
-                        <button class="icon-action" title="Turn the card over to its controls"
-                            onclick={link.callback(move |_| Msg::Flip(node_id))}>
-                            { icon(Icon::Sliders, 18) }
-                        </button>
+                        { ui::face_switch(Some(false), true, link.callback(move |c| Msg::Flip(node_id, c))) }
                     </div>
                 </header>
 
@@ -409,10 +403,7 @@ impl App {
                     </div>
                     <div class="device-head-end">
                         { pill }
-                        <button class="icon-action" title="Turn the card back to its health"
-                            onclick={link.callback(move |_| Msg::Flip(node_id))}>
-                            { icon(Icon::Gauge, 18) }
-                        </button>
+                        { ui::face_switch(Some(true), true, link.callback(move |c| Msg::Flip(node_id, c))) }
                     </div>
                 </header>
                 <div class="card-controls">

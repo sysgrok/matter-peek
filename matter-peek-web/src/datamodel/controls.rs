@@ -515,28 +515,16 @@ fn view_control(
         Kind::Switch { attr, on, off } => {
             let state = is_on(attribute(cluster, *attr));
             let cmd = if state { *off } else { *on };
-            html! {
-                <button class={classes!("button", "is-small", if state { "is-success" } else { "is-soft" })}
-                    disabled={busy}
-                    onclick={on_act.reform(move |_| Action::Invoke {
-                        endpoint, cluster: cluster_id, command: cmd, fields: "{}".into(),
-                    })}>
-                    { if state { "On" } else { "Off" } }
-                </button>
-            }
+            switch(state, ("On", "Off"), busy, on_act.reform(move |_| Action::Invoke {
+                endpoint, cluster: cluster_id, command: cmd, fields: "{}".into(),
+            }))
         }
         Kind::Toggle { attr } => {
             let state = is_on(attribute(cluster, *attr));
             let attr = *attr;
-            html! {
-                <button class={classes!("button", "is-small", if state { "is-success" } else { "is-soft" })}
-                    disabled={busy}
-                    onclick={on_act.reform(move |_| Action::Write {
-                        endpoint, cluster: cluster_id, attribute: attr, value: (!state).to_string(),
-                    })}>
-                    { if state { "Yes" } else { "No" } }
-                </button>
-            }
+            switch(state, ("Yes", "No"), busy, on_act.reform(move |_| Action::Write {
+                endpoint, cluster: cluster_id, attribute: attr, value: (!state).to_string(),
+            }))
         }
         Kind::Slider {
             attr,
@@ -652,6 +640,18 @@ fn view_control(
         Kind::Reading { attr, unit } => html! {
             <span class="dm-control-value is-reading">{ reading(cluster, *attr, *unit) }</span>
         },
+    }
+}
+
+/// A two-state switch showing `state` (`labels`: when on, when off); a click
+/// turns it over.
+fn switch(state: bool, labels: (&str, &str), busy: bool, onclick: Callback<MouseEvent>) -> Html {
+    html! {
+        <button class={classes!("dm-switch", state.then_some("is-on"))} role="switch"
+            aria-checked={state.to_string()} disabled={busy} {onclick}>
+            <span class="dm-switch-track"><span class="dm-switch-knob"></span></span>
+            <span class="dm-switch-label">{ if state { labels.0 } else { labels.1 } }</span>
+        </button>
     }
 }
 

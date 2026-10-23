@@ -24,6 +24,9 @@ mod schema {
     /// The response of a command that answers with a status only.
     const NO_RESPONSE: &str = "DefaultSuccess";
 
+    /// The global attribute holding a cluster's features.
+    const FEATURE_MAP: u64 = 0xFFFC;
+
     pub fn generate() {
         let idl = rs_matter_codegen::parse_idl();
         let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("schema.rs");
@@ -64,12 +67,26 @@ mod schema {
         let mut attributes = String::new();
         for a in &c.attributes {
             let f = &a.field.field;
+            // The feature map reads as the bits of the cluster's `Feature`.
+            let features = c
+                .entities
+                .bitmaps
+                .iter()
+                .find(|b| b.id == "Feature")
+                .filter(|_| f.code == FEATURE_MAP);
+            let value = match features {
+                Some(b) => format!(
+                    "ValueSchema {{ ty: TypeRef::Bitmap(&{}), idl: {:?}, list: false, nullable: false, optional: false }}",
+                    types.bitmap(b, scope.owner(false)),
+                    f.data_type.name,
+                ),
+                None => value(&a.field, scope, types),
+            };
             writeln!(
                 attributes,
-                "AttrSchema {{ id: {}, name: {:?}, value: {}, writable: {}, timed: {} }},",
+                "AttrSchema {{ id: {}, name: {:?}, value: {value}, writable: {}, timed: {} }},",
                 f.code,
                 pascal(&f.id),
-                value(&a.field, scope, types),
                 !a.is_read_only,
                 a.is_timed_write,
             )

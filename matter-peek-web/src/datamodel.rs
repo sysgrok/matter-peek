@@ -3,7 +3,7 @@
 //! (invoked with a form of their fields). It follows the device's
 //! subscription, as the backs of the device cards do.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use yew::html::Scope;
 use yew::prelude::*;
@@ -13,16 +13,45 @@ use matter_peek_core::api::{
     FieldType, TypeInfo, ValueKind, ValueType,
 };
 
-use crate::icons::{icon, Icon};
-use crate::{field_value, request_loop, select_value, ui, App, Msg, SubConn};
+use crate::icons::{device_type_icon, icon, Icon};
+use crate::{field_value, input_value, request_loop, select_value, ui, App, Msg, SubConn};
 
 pub(crate) mod controls;
+mod value;
 
 /// The global attributes (attribute lists, revision, …) start here.
 const FIRST_GLOBAL_ATTRIBUTE: u32 = 0xFFF8;
 
 /// The global attribute listing the commands a cluster accepts.
 const ACCEPTED_COMMAND_LIST: u32 = 0xFFF9;
+
+/// The global attributes of a cluster's features and revision.
+const FEATURE_MAP: u32 = 0xFFFC;
+const CLUSTER_REVISION: u32 = 0xFFFD;
+
+/// The device type of the root endpoint.
+const ROOT_NODE: u32 = 0x0016;
+
+/// How long what changed shows so (ms).
+const RECENT_MS: f64 = 2500.0;
+
+/// The kinds of clusters, as the tree colours them: their classes and names.
+const CATEGORIES: &[(&str, &str)] = &[
+    ("is-application", "Application"),
+    ("is-utility", "Utility"),
+    ("is-diagnostics", "Diagnostics"),
+    ("is-vendor", "Vendor-specific"),
+];
+
+/// The clusters that keep a node running, rather than doing what it is for.
+const UTILITY: &[u32] = &[
+    0x0003, 0x0004, 0x0005, 0x001D, 0x001E, 0x001F, 0x0025, 0x0028, 0x0029, 0x002A, 0x002B,
+    0x002C, 0x002D, 0x002E, 0x0030, 0x0031, 0x0038, 0x0039, 0x003C, 0x003E, 0x003F, 0x0040,
+    0x0041, 0x0046, 0x0062, 0x0801, 0x0802,
+];
+
+/// The diagnostics clusters.
+const DIAGNOSTICS: core::ops::RangeInclusive<u32> = 0x0032..=0x0037;
 
 /// The data model popup of one device.
 pub struct ModelView {
@@ -44,6 +73,16 @@ pub struct ModelView {
     pub busy: bool,
     /// What the last write or invoke ended with.
     pub outcome: Option<Result<String, String>>,
+    /// The tree shows the clusters whose name or ID has this.
+    pub filter: String,
+    /// The endpoints folded in the tree.
+    pub folded: HashSet<u16>,
+    /// The cluster shows as JSON.
+    pub json: bool,
+    /// When each attribute last changed (ms).
+    pub changed: HashMap<(u16, u32, u32), f64>,
+    /// When an attribute of each cluster last changed (ms).
+    pub changed_clusters: HashMap<(u16, u32), f64>,
 }
 
 /// What happens in the data model popup.
@@ -62,6 +101,9 @@ pub enum ModelMsg {
     CloseCommand,
     FieldDraft(String, String),
     Invoke,
+    Filter(String),
+    Fold(u16),
+    ShowJson(bool),
     Loaded(wire::Response),
     Failed(String),
 }
@@ -98,6 +140,11 @@ impl App {
                 command: None,
                 busy: false,
                 outcome: None,
+                filter: String::new(),
+                folded: HashSet::new(),
+                json: false,
+                changed: HashMap::new(),
+                changed_clusters: HashMap::new(),
             };
             // What its card shows, until the whole model is reported.
             if let Some(model) = self.card_models.get(&node_id) {
@@ -233,6 +280,13 @@ impl App {
                     Err(e) => view.outcome = Some(Err(e)),
                 }
             }
+            ModelMsg::Filter(filter) => view.filter = filter,
+            ModelMsg::Fold(endpoint) => {
+                if !view.folded.remove(&endpoint) {
+                    view.folded.insert(endpoint);
+                }
+            }
+            ModelMsg::ShowJson(json) => view.json = json,
             ModelMsg::Loaded(wire::Response::Model { model }) => {
                 if view.busy {
                     view.busy = false;
@@ -276,7 +330,9 @@ impl App {
         }
         if self.flipped.contains(&node_id) {
             match self.card_models.get_mut(&node_id) {
-                Some(card) => absorb(card, model),
+                Some(card) => {
+                    absorb(card, model);
+                }
                 None => {
                     self.card_models.insert(node_id, model);
                 }
@@ -301,6 +357,7 @@ impl App {
             self.subs.get(&view.node_id).map(|sub| sub.conn),
             Some(SubConn::Offline)
         );
+        let now = js_sys::Date::now();
 
         html! {
             <div class="modal is-active">
@@ -339,10 +396,10 @@ impl App {
                             },
                             Some(model) => html! {
                                 <div class="dm-layout">
-                                    { view_tree(view, model, link) }
+                                    { view_tree(view, model, link, now) }
                                     { match view.controls.and_then(|ep| model.endpoints.iter().find(|e| e.id == ep)) {
                                         Some(endpoint) => view_controls(view, model, endpoint, link),
-                                        None => view_cluster(view, model, link),
+                                        None => view_cluster(view, model, link, now),
                                     } }
                                 </div>
                             },
@@ -361,7 +418,11 @@ impl ModelView {
         self.error = None;
         let first = match self.model.as_mut() {
             Some(shown) => {
-                absorb(shown, model);
+                let now = js_sys::Date::now();
+                for (endpoint, cluster, attr) in absorb(shown, model) {
+                    self.changed.insert((endpoint, cluster, attr), now);
+                    self.changed_clusters.insert((endpoint, cluster), now);
+                }
                 false
             }
             None => {
@@ -406,45 +467,125 @@ impl ModelView {
     }
 }
 
-/// The endpoints, each with its device types and clusters.
-fn view_tree(view: &ModelView, model: &DeviceModel, link: &Scope<App>) -> Html {
+/// The endpoints, each with its device types and clusters; how many there
+/// are, and a search through the clusters.
+fn view_tree(view: &ModelView, model: &DeviceModel, link: &Scope<App>, now: f64) -> Html {
+    let filter = view.filter.trim().to_lowercase();
+    let clusters: usize = model.endpoints.iter().map(|e| e.clusters.len()).sum();
+    let attributes: usize = model
+        .endpoints
+        .iter()
+        .flat_map(|e| &e.clusters)
+        .map(|c| c.attributes.len())
+        .sum();
+
     html! {
         <nav class="dm-tree">
-            { for model.endpoints.iter().map(|e| {
-                let types: Vec<String> = e.device_types.iter()
-                    .map(|t| display::device_type_name(t.id).unwrap_or_else(|| display::hex_u32(t.id)))
-                    .collect();
-                html! {
-                    <div class="dm-endpoint">
-                        <p class="dm-endpoint-title">{ format!("Endpoint {}", e.id) }</p>
-                        <p class="dm-endpoint-types">{ types.join(", ") }</p>
-                        <ul>
-                            if controls::any(e, false) {
-                                <li>
-                                    <button class={classes!("dm-cluster", "is-controls", (view.controls == Some(e.id)).then_some("is-selected"))}
-                                        onclick={link.callback({ let id = e.id; move |_| model_msg(ModelMsg::SelectControls(id)) })}>
-                                        <span>{ "Controls" }</span>
-                                    </button>
-                                </li>
-                            }
-                            { for e.clusters.iter().map(|c| {
-                                let (endpoint, id) = (e.id, c.id);
-                                let selected = view.controls.is_none() && view.selected == Some((endpoint, id));
-                                html! {
-                                    <li>
-                                        <button class={classes!("dm-cluster", selected.then_some("is-selected"))}
-                                            onclick={link.callback(move |_| model_msg(ModelMsg::Select(endpoint, id)))}>
-                                            <span>{ c.name.clone().unwrap_or_else(|| display::hex_u32(c.id)) }</span>
-                                            <span class="dm-id">{ cluster_id(c.id) }</span>
-                                        </button>
-                                    </li>
-                                }
-                            }) }
-                        </ul>
-                    </div>
-                }
-            }) }
+            <div class="control has-icons-left dm-search">
+                <input class="input is-small" type="search" placeholder="Find a cluster by name or ID"
+                    value={view.filter.clone()}
+                    oninput={link.callback(|e: InputEvent| model_msg(ModelMsg::Filter(input_value(e))))} />
+                <span class="icon is-left">{ icon(Icon::Search, 16) }</span>
+            </div>
+            <p class="dm-stats">
+                <span><b>{ model.endpoints.len() }</b>{ " endpoints" }</span>
+                <span><b>{ clusters }</b>{ " clusters" }</span>
+                <span><b>{ attributes }</b>{ " attributes" }</span>
+            </p>
+            { for model.endpoints.iter().map(|e| view_endpoint(view, e, &filter, link, now)) }
+            <p class="dm-legend">
+                { for CATEGORIES.iter().map(|(class, label)| html! {
+                    <span><span class={classes!("dm-dot", *class)}></span>{ *label }</span>
+                }) }
+            </p>
         </nav>
+    }
+}
+
+/// An endpoint in the tree: its device types, then its clusters, those
+/// `filter` finds (lowercase), unless folded.
+fn view_endpoint(
+    view: &ModelView,
+    e: &EndpointModel,
+    filter: &str,
+    link: &Scope<App>,
+    now: f64,
+) -> Html {
+    let shown: Vec<&ClusterModel> = e
+        .clusters
+        .iter()
+        .filter(|c| filter.is_empty() || finds(c, filter))
+        .collect();
+    if !filter.is_empty() && shown.is_empty() {
+        return html! {};
+    }
+    let folded = filter.is_empty() && view.folded.contains(&e.id);
+
+    // What it is for first; on the root, the root node.
+    let mut types = e.device_types.clone();
+    types.sort_by_key(|t| (display::is_utility_device_type(t.id), t.id != ROOT_NODE));
+    let mut names = types
+        .iter()
+        .map(|t| display::device_type_name(t.id).unwrap_or_else(|| display::hex_u32(t.id)));
+    let name = names.next().unwrap_or_else(|| format!("Endpoint {}", e.id));
+    let mut meta: Vec<String> = names.collect();
+    meta.push(format!(
+        "{} cluster{}",
+        e.clusters.len(),
+        if e.clusters.len() == 1 { "" } else { "s" }
+    ));
+    let glyph = types
+        .first()
+        .filter(|t| !display::is_utility_device_type(t.id))
+        .and_then(|t| device_type_icon(Some(t.id)))
+        .unwrap_or(Icon::Chip);
+    let id = e.id;
+
+    html! {
+        <section class={classes!("dm-endpoint", folded.then_some("is-folded"))}>
+            <button class="dm-endpoint-head" title={if folded { "Unfold" } else { "Fold" }}
+                onclick={link.callback(move |_| model_msg(ModelMsg::Fold(id)))}>
+                <span class="dm-ep-badge" title={format!("Endpoint {id}")}>{ id }</span>
+                <span class="dm-endpoint-text">
+                    <span class="dm-endpoint-name">{ icon(glyph, 14) }<span>{ name }</span></span>
+                    <span class="dm-endpoint-meta">{ meta.join(" · ") }</span>
+                </span>
+                <span class="dm-chevron">{ icon(Icon::ChevronDown, 16) }</span>
+            </button>
+            if !folded {
+                <ul class="dm-clusters">
+                    if filter.is_empty() && controls::any(e, false) {
+                        <li>
+                            <button class={classes!("dm-cluster", "is-controls", (view.controls == Some(id)).then_some("is-selected"))}
+                                onclick={link.callback(move |_| model_msg(ModelMsg::SelectControls(id)))}>
+                                { icon(Icon::Sliders, 14) }
+                                <span class="dm-cluster-name">{ "Controls" }</span>
+                            </button>
+                        </li>
+                    }
+                    { for shown.into_iter().map(|c| {
+                        let cluster = c.id;
+                        let selected = view.controls.is_none() && view.selected == Some((id, cluster));
+                        let (class, kind) = category(cluster);
+                        let pulse = view.changed_clusters.get(&(id, cluster)).filter(|t| now - **t < RECENT_MS);
+                        html! {
+                            <li>
+                                <button class={classes!("dm-cluster", selected.then_some("is-selected"))}
+                                    title={kind}
+                                    onclick={link.callback(move |_| model_msg(ModelMsg::Select(id, cluster)))}>
+                                    <span class={classes!("dm-dot", class)}></span>
+                                    <span class="dm-cluster-name">{ c.name.clone().unwrap_or_else(|| display::hex_u32(cluster)) }</span>
+                                    if let Some(t) = pulse {
+                                        <span class="dm-pulse" key={t.to_string()} title="Just changed"></span>
+                                    }
+                                    <span class="dm-id">{ cluster_id(cluster) }</span>
+                                </button>
+                            </li>
+                        }
+                    }) }
+                </ul>
+            }
+        </section>
     }
 }
 
@@ -463,51 +604,170 @@ fn view_controls(
 
     html! {
         <div class="dm-cluster-view">
-            <h3 class="dm-title">
-                { types.join(", ") }
-                <span class="dm-id">{ format!("endpoint {}", endpoint.id) }</span>
-            </h3>
+            <header class="dm-hero is-controls">
+                <div class="dm-hero-text">
+                    <p class="dm-kicker">{ format!("Endpoint {} · Controls", endpoint.id) }</p>
+                    <h3 class="dm-hero-title">{ types.join(", ") }</h3>
+                    <p class="dm-hero-note">{ "What people act on, from its clusters; what changes comes live." }</p>
+                </div>
+            </header>
             if let Some(outcome) = view.outcome.as_ref().filter(|o| o.is_err()) {
                 <p class="dm-outcome is-error">{ match outcome { Ok(text) | Err(text) => text.clone() } }</p>
             }
-            { controls::view(model, endpoint, false, view.busy,
-                &link.callback(|action| model_msg(ModelMsg::Act(action)))) }
+            <div class="dm-card dm-controls-card">
+                { controls::view(model, endpoint, false, view.busy,
+                    &link.callback(|action| model_msg(ModelMsg::Act(action)))) }
+            </div>
         </div>
     }
 }
 
-/// The cluster shown: its attributes, then its commands.
-fn view_cluster(view: &ModelView, model: &DeviceModel, link: &Scope<App>) -> Html {
-    let Some(cluster) = view.cluster() else {
+/// The cluster shown: what it is, its attributes, then its commands.
+fn view_cluster(view: &ModelView, model: &DeviceModel, link: &Scope<App>, now: f64) -> Html {
+    let (Some(cluster), Some((endpoint, _))) = (view.cluster(), view.selected) else {
         return html! { <div class="dm-cluster-view"></div> };
     };
     let (own, global): (Vec<_>, Vec<_>) = cluster
         .attributes
         .iter()
         .partition(|a| a.id < FIRST_GLOBAL_ATTRIBUTE);
+    let (class, kind) = category(cluster.id);
+    let value_of = |id: u32| {
+        cluster
+            .attributes
+            .iter()
+            .find(|a| a.id == id)
+            .and_then(|a| serde_json::from_str::<serde_json::Value>(a.value.as_deref()?).ok())
+    };
+    let revision = value_of(CLUSTER_REVISION).and_then(|v| v.as_u64());
+    let features: Vec<String> = match value_of(FEATURE_MAP) {
+        Some(serde_json::Value::Array(names)) => names
+            .iter()
+            .map(|n| n.as_str().map_or_else(|| n.to_string(), str::to_string))
+            .collect(),
+        Some(serde_json::Value::Number(n)) if n.as_u64() != Some(0) => {
+            vec![format!("features 0x{:X}", n.as_u64().unwrap_or_default())]
+        }
+        _ => Vec::new(),
+    };
+    let ep_types: Vec<String> = model
+        .endpoints
+        .iter()
+        .find(|e| e.id == endpoint)
+        .map(|e| {
+            e.device_types
+                .iter()
+                .filter_map(|t| display::device_type_name(t.id))
+                .collect()
+        })
+        .unwrap_or_default();
+    let name = cluster
+        .name
+        .clone()
+        .unwrap_or_else(|| display::hex_u32(cluster.id));
+    let writable = own.iter().filter(|a| a.writable).count();
+    let json = cluster_json(cluster);
 
     html! {
         <div class="dm-cluster-view">
-            <h3 class="dm-title">
-                { cluster.name.clone().unwrap_or_else(|| display::hex_u32(cluster.id)) }
-                <span class="dm-id">{ cluster_id(cluster.id) }</span>
-            </h3>
+            <header class={classes!("dm-hero", class)}>
+                <div class="dm-hero-text">
+                    <p class="dm-kicker">
+                        { format!("Endpoint {endpoint}") }
+                        if !ep_types.is_empty() {
+                            { format!(" · {}", ep_types.join(", ")) }
+                        }
+                    </p>
+                    <h3 class="dm-hero-title">{ name }</h3>
+                    <div class="dm-chips">
+                        <button class="dm-chip is-mono" title="Copy its ID" onclick={copy(cluster_id(cluster.id))}>
+                            { cluster_id(cluster.id) }
+                        </button>
+                        if let Some(revision) = revision {
+                            <span class="dm-chip">{ format!("Revision {revision}") }</span>
+                        }
+                        <span class={classes!("dm-chip", "is-category", class)}>{ kind }</span>
+                        { for features.iter().map(|f| html! {
+                            <span class="dm-chip is-feature" title="A feature it has">{ f.clone() }</span>
+                        }) }
+                    </div>
+                </div>
+                <div class="dm-hero-stats">
+                    { stat(own.len(), "attributes") }
+                    { stat(writable, "writable") }
+                    { stat(cluster.commands.len(), "commands") }
+                </div>
+            </header>
+            <div class="dm-toolbar">
+                { ui::two_way((Icon::Table, "Table", "Its attributes as a table"),
+                    (Icon::Braces, "JSON", "Its attributes as JSON"),
+                    Some(view.json), false, link.callback(|json| model_msg(ModelMsg::ShowJson(json)))) }
+                <button class="button is-small is-soft" title="Copy its attributes as JSON"
+                    onclick={copy(value::json_text(&json))}>
+                    <span class="icon is-small">{ icon(Icon::Copy, 15) }</span>
+                    <span>{ "Copy JSON" }</span>
+                </button>
+            </div>
             if let Some(outcome) = &view.outcome {
                 <p class={classes!("dm-outcome", outcome.is_err().then_some("is-error"))}>
                     { match outcome { Ok(text) | Err(text) => text.clone() } }
                 </p>
             }
-            <table class="table is-fullwidth is-narrow dm-attrs">
-                <tbody>
-                    { for own.iter().chain(global.iter()).map(|a| view_attribute(view, model, a, link)) }
-                </tbody>
-            </table>
+            if view.json {
+                <div class="dm-card">{ value::json(&json) }</div>
+            } else {
+                <div class="dm-card">
+                    <table class="dm-attrs">
+                        <thead>
+                            <tr>
+                                <th>{ "ID" }</th>
+                                <th>{ "Attribute" }</th>
+                                <th>{ "Type" }</th>
+                                <th>{ "Value" }</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            { for own.iter().map(|a| view_attribute(view, model, endpoint, cluster, a, link, now)) }
+                        </tbody>
+                    </table>
+                </div>
+                if !global.is_empty() {
+                    <details class="dm-globals">
+                        <summary>
+                            { icon(Icon::ChevronRight, 14) }
+                            { "Global attributes" }
+                            <span class="dm-count">{ global.len() }</span>
+                        </summary>
+                        <div class="dm-card">
+                            <table class="dm-attrs">
+                                <tbody>
+                                    { for global.iter().map(|a| view_attribute(view, model, endpoint, cluster, a, link, now)) }
+                                </tbody>
+                            </table>
+                        </div>
+                    </details>
+                }
+            }
             if !cluster.commands.is_empty() {
-                <h4 class="dm-subtitle">{ "Commands" }</h4>
+                <h4 class="dm-subtitle">
+                    { "Commands" }
+                    <span class="dm-count">{ cluster.commands.len() }</span>
+                </h4>
                 <div class="dm-commands">
-                    { for cluster.commands.iter().map(|c| view_command(view, model, c, link)) }
+                    { for cluster.commands.iter().map(|c| view_command(view, model, endpoint, cluster.id, c, link)) }
                 </div>
             }
+        </div>
+    }
+}
+
+/// A count in a cluster's header.
+fn stat(n: usize, what: &str) -> Html {
+    html! {
+        <div class="dm-stat">
+            <span class="dm-stat-n">{ n }</span>
+            <span class="dm-stat-what">{ what.to_string() }</span>
         </div>
     }
 }
@@ -515,8 +775,11 @@ fn view_cluster(view: &ModelView, model: &DeviceModel, link: &Scope<App>) -> Htm
 fn view_attribute(
     view: &ModelView,
     model: &DeviceModel,
+    endpoint: u16,
+    cluster: &ClusterModel,
     a: &AttributeModel,
     link: &Scope<App>,
+    now: f64,
 ) -> Html {
     let id = a.id;
     let editing = view
@@ -524,39 +787,76 @@ fn view_attribute(
         .as_ref()
         .filter(|(attr, _)| *attr == id)
         .map(|(_, draft)| draft);
+    let path = format!(
+        "{endpoint}/{}/{}",
+        cluster_id(cluster.id),
+        display::hex_u16(a.id as u16)
+    );
+    let changed = view.changed.get(&(endpoint, cluster.id, a.id)).copied();
+    // A fresh element for each change, so that it flashes once.
+    let key = match (editing, changed) {
+        (Some(_), _) => "editing".to_string(),
+        (None, Some(t)) => t.to_string(),
+        (None, None) => String::new(),
+    };
+    let flash = editing.is_none() && changed.is_some_and(|t| now - t < RECENT_MS);
+    let nullable = a.value_type.as_ref().is_some_and(|t| t.nullable);
 
     let value = match (&a.value, &a.error) {
-        (Some(value), _) => html! { { value_text(a.value_type.as_ref(), value) } },
-        (None, Some(e)) => html! { <span class="dm-error">{ e.clone() }</span> },
-        (None, None) => html! {},
+        (Some(v), _) => value::attribute(model, cluster, a.id, a.value_type.as_ref(), v),
+        (None, Some(e)) => html! { <span class="v-error">{ icon(Icon::Alert, 14) }{ e.clone() }</span> },
+        (None, None) => html! { <span class="v-none">{ "—" }</span> },
     };
 
     html! {
-        <tr class={classes!((a.id >= FIRST_GLOBAL_ATTRIBUTE).then_some("dm-global"))}>
-            <td class="dm-name">
-                { a.name.clone().unwrap_or_else(|| display::hex_u32(a.id)) }
-                <span class="dm-id">{ format!(" {}", display::hex_u16(a.id as u16)) }</span>
+        <tr class={classes!("dm-attr", editing.is_some().then_some("is-editing"))}>
+            <td class="dm-attr-id">
+                <button class="dm-id-button" title={format!("Copy its path, {path}")} onclick={copy(path.clone())}>
+                    { display::hex_u16(a.id as u16) }
+                </button>
             </td>
-            <td class="dm-value">
-                { match (editing, a.value_type.as_ref()) {
-                    (Some(draft), Some(ty)) => html! {
-                        <div class="dm-edit">
-                            { editor(ty, model, draft, link.callback(|v| model_msg(ModelMsg::Draft(v)))) }
-                            <button class={classes!("button", "is-small", "is-link", view.busy.then_some("is-loading"))}
-                                disabled={view.busy}
-                                onclick={link.callback(|_| model_msg(ModelMsg::Save))}>{ "Write" }</button>
-                            <button class="button is-small" disabled={view.busy}
-                                onclick={link.callback(|_| model_msg(ModelMsg::CancelEdit))}>{ "Cancel" }</button>
-                        </div>
-                    },
-                    _ => value,
-                } }
+            <td class="dm-attr-name">
+                <span>{ a.name.clone().unwrap_or_else(|| display::hex_u32(a.id)) }</span>
+                <span class="dm-flags">
+                    if a.writable {
+                        <span class="dm-flag is-writable" title="Writable">{ "W" }</span>
+                    }
+                    if a.timed {
+                        <span class="dm-flag is-timed" title="Written with a timed interaction">{ "T" }</span>
+                    }
+                    if nullable {
+                        <span class="dm-flag" title="Nullable">{ "N" }</span>
+                    }
+                </span>
             </td>
-            <td class="dm-actions">
+            <td class="dm-attr-type">{ type_badge(a.value_type.as_ref(), model) }</td>
+            <td class="dm-attr-value">
+                <div class={classes!("dm-value", flash.then_some("is-changed"))} {key}>
+                    { match (editing, a.value_type.as_ref()) {
+                        (Some(draft), Some(ty)) => html! {
+                            <div class="dm-edit">
+                                { editor(ty, model, draft, link.callback(|v| model_msg(ModelMsg::Draft(v)))) }
+                                <button class={classes!("button", "is-small", "is-link", view.busy.then_some("is-loading"))}
+                                    disabled={view.busy}
+                                    onclick={link.callback(|_| model_msg(ModelMsg::Save))}>{ "Write" }</button>
+                                <button class="button is-small" disabled={view.busy}
+                                    onclick={link.callback(|_| model_msg(ModelMsg::CancelEdit))}>{ "Cancel" }</button>
+                            </div>
+                        },
+                        _ => value,
+                    } }
+                </div>
+            </td>
+            <td class="dm-attr-actions">
+                if let Some(json) = &a.value {
+                    <button class="icon-action" title="Copy its value (JSON)" onclick={copy(json.clone())}>
+                        { icon(Icon::Copy, 15) }
+                    </button>
+                }
                 if a.writable && editing.is_none() {
                     <button class="icon-action" title="Write it"
                         onclick={link.callback(move |_| model_msg(ModelMsg::Edit(id)))}>
-                        { icon(Icon::Edit, 16) }
+                        { icon(Icon::Edit, 15) }
                     </button>
                 }
             </td>
@@ -564,9 +864,38 @@ fn view_attribute(
     }
 }
 
+/// A value's type, shortly, coloured by its kind.
+fn type_badge(ty: Option<&ValueType>, model: &DeviceModel) -> Html {
+    let Some(ty) = ty else {
+        return html! { <span class="dm-type is-unknown">{ "?" }</span> };
+    };
+    let base = match ty.schema.and_then(|i| model.types.get(i as usize)) {
+        Some(info) => info.name.clone(),
+        None => ty.idl.clone(),
+    };
+    let class = match ty.kind {
+        ValueKind::Bool => "is-bool",
+        ValueKind::UInt | ValueKind::Int | ValueKind::Float => "is-number",
+        ValueKind::Text => "is-text",
+        ValueKind::Octets => "is-octets",
+        ValueKind::Enum => "is-enum",
+        ValueKind::Bitmap => "is-bitmap",
+        ValueKind::Struct => "is-struct",
+        ValueKind::Unknown => "is-unknown",
+    };
+
+    html! {
+        <span class={classes!("dm-type", class)} title={type_label(ty, model)}>
+            { if ty.list { format!("{base}[]") } else { base } }
+        </span>
+    }
+}
+
 fn view_command(
     view: &ModelView,
     model: &DeviceModel,
+    endpoint: u16,
+    cluster: u32,
     c: &CommandModel,
     link: &Scope<App>,
 ) -> Html {
@@ -579,19 +908,46 @@ fn view_command(
     let name = c.name.clone().unwrap_or_else(|| display::hex_u32(c.id));
 
     html! {
-        <div class="dm-command">
+        <div class={classes!("dm-command", open.is_some().then_some("is-open"))}>
             <div class="dm-command-head">
-                <span class="dm-name">{ name }</span>
+                <span class="dm-command-id">{ format!("0x{:02X}", c.id) }</span>
+                <span class="dm-command-name">{ name.clone() }</span>
                 if c.timed {
-                    { ui::pill("Timed", None, Some("Invoked with a timed interaction".into())) }
+                    <span class="dm-flag is-timed" title="Invoked with a timed interaction">{ "T" }</span>
                 }
                 if open.is_none() {
-                    <button class="button is-small is-soft"
-                        onclick={link.callback(move |_| model_msg(ModelMsg::OpenCommand(id)))}>
-                        { if c.fields.is_empty() { "Invoke…" } else { "Fill in…" } }
-                    </button>
+                    if c.fields.is_empty() {
+                        <button class="button is-small is-link is-light" disabled={view.busy}
+                            onclick={link.callback(move |_| model_msg(ModelMsg::Act(Action::Invoke {
+                                endpoint, cluster, command: id, fields: "{}".into(),
+                            })))}>
+                            <span class="icon is-small">{ icon(Icon::Play, 14) }</span>
+                            <span>{ "Invoke" }</span>
+                        </button>
+                    } else {
+                        <button class="button is-small is-soft"
+                            onclick={link.callback(move |_| model_msg(ModelMsg::OpenCommand(id)))}>
+                            { "Fill in…" }
+                        </button>
+                    }
                 }
             </div>
+            <p class="dm-signature">
+                <span class="sig-name">{ name }</span>{ "(" }
+                { for c.fields.iter().enumerate().map(|(i, f)| html! {
+                    <>
+                        if i > 0 { { ", " } }
+                        <span class="sig-param">{ f.name.clone() }{ if f.value_type.optional { "?" } else { "" } }</span>
+                        { ": " }
+                        <span class="sig-type">{ short_type(&f.value_type, model) }</span>
+                    </>
+                }) }
+                { ")" }
+                if let Some(response) = &c.response {
+                    <span class="sig-arrow">{ " → " }</span>
+                    <span class="sig-type">{ response.clone() }</span>
+                }
+            </p>
             if let Some(drafts) = open {
                 <div class="dm-form">
                     { for c.fields.iter().map(|f| {
@@ -698,37 +1054,6 @@ fn select(options: &[&str], draft: &str, nullable: bool, on: Callback<String>) -
                 }) }
             </select>
         </div>
-    }
-}
-
-/// What to show for a value: a string or a name as is, a list joined, a
-/// temperature or a percentage also in its unit.
-fn value_text(ty: Option<&ValueType>, json: &str) -> String {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
-        return json.to_string();
-    };
-    let unit = |v: f64| match ty.map(|t| t.idl.as_str()) {
-        Some("temperature") => Some(format!("{:.2} °C", v / 100.0)),
-        Some("percent") => Some(format!("{v} %")),
-        Some("percent100ths") => Some(format!("{:.2} %", v / 100.0)),
-        _ => None,
-    };
-
-    match &value {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Number(n) => match n.as_f64().and_then(unit) {
-            Some(text) => format!("{text} ({n})"),
-            None => n.to_string(),
-        },
-        serde_json::Value::Array(items) if items.iter().all(|i| !i.is_object()) => items
-            .iter()
-            .map(|i| match i {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
-        other => other.to_string(),
     }
 }
 
@@ -844,8 +1169,10 @@ fn type_label(ty: &ValueType, model: &DeviceModel) -> String {
 }
 
 /// Take what `update` says into `shown`: the values of its attributes, and
-/// the endpoints, clusters, attributes and commands `shown` lacks.
-pub(crate) fn absorb(shown: &mut DeviceModel, update: DeviceModel) {
+/// the endpoints, clusters, attributes and commands `shown` lacks. Returns
+/// the attributes whose values changed.
+pub(crate) fn absorb(shown: &mut DeviceModel, update: DeviceModel) -> Vec<(u16, u32, u32)> {
+    let mut changed = Vec::new();
     let DeviceModel {
         endpoints, types, ..
     } = shown;
@@ -907,12 +1234,19 @@ pub(crate) fn absorb(shown: &mut DeviceModel, update: DeviceModel) {
             for mut a in c.attributes {
                 a.value_type = a.value_type.map(|ty| remap.value_type(ty));
                 match cluster.attributes.iter_mut().find(|s| s.id == a.id) {
-                    Some(attr) => *attr = a,
+                    Some(attr) => {
+                        if attr.value != a.value || attr.error != a.error {
+                            changed.push((e.id, c.id, a.id));
+                        }
+                        *attr = a;
+                    }
                     None => cluster.attributes.push(a),
                 }
             }
         }
     }
+
+    changed
 }
 
 /// The types of an update, as indices into those of the model taking it.
@@ -993,6 +1327,72 @@ pub(crate) fn request(node_id: u64, action: Action) -> wire::Request {
             fields,
         },
     }
+}
+
+/// What a field takes, in a command's signature.
+fn short_type(ty: &ValueType, model: &DeviceModel) -> String {
+    let base = match ty.schema.and_then(|i| model.types.get(i as usize)) {
+        Some(info) => info.name.clone(),
+        None => ty.idl.clone(),
+    };
+    let mut label = if ty.list { format!("{base}[]") } else { base };
+    if ty.nullable {
+        label.push_str(" | null");
+    }
+    label
+}
+
+/// A cluster's attributes as the fields of one JSON object, by name, in
+/// the order of their IDs.
+fn cluster_json(cluster: &ClusterModel) -> Vec<(String, serde_json::Value)> {
+    let mut attributes: Vec<&AttributeModel> = cluster.attributes.iter().collect();
+    attributes.sort_by_key(|a| a.id);
+
+    attributes
+        .into_iter()
+        .map(|a| {
+            let name = a.name.clone().unwrap_or_else(|| display::hex_u32(a.id));
+            let value = match (&a.value, &a.error) {
+                (Some(v), _) => serde_json::from_str(v).unwrap_or(serde_json::Value::Null),
+                (None, Some(e)) => serde_json::json!({ "error": e }),
+                (None, None) => serde_json::Value::Null,
+            };
+            (name, value)
+        })
+        .collect()
+}
+
+/// The kind of cluster `id` is: its class and name.
+fn category(id: u32) -> (&'static str, &'static str) {
+    let i = if id > 0xFFFF || id >= 0xFC00 {
+        3
+    } else if DIAGNOSTICS.contains(&id) {
+        2
+    } else if UTILITY.contains(&id) {
+        1
+    } else {
+        0
+    };
+
+    CATEGORIES[i]
+}
+
+/// Whether `filter` (lowercase) finds `cluster`: in its name or its ID.
+fn finds(cluster: &ClusterModel, filter: &str) -> bool {
+    cluster
+        .name
+        .as_deref()
+        .is_some_and(|n| n.to_lowercase().contains(filter))
+        || cluster_id(cluster.id).to_lowercase().contains(filter)
+}
+
+/// Copy `text` to the clipboard.
+fn copy(text: String) -> Callback<MouseEvent> {
+    Callback::from(move |_| {
+        if let Some(window) = web_sys::window() {
+            let _ = window.navigator().clipboard().write_text(&text);
+        }
+    })
 }
 
 /// The first application cluster, else the first one.

@@ -287,11 +287,10 @@ enum Msg {
     /// Attributes a device's (node_id) subscription reported, for its card and
     /// the data model popup.
     ModelEvent(u64, api::DeviceModel),
-    /// Turn a device's (node_id) card over: its controls, or its health.
-    Flip(u64),
-    /// Turn the cards shown over: all to their controls, or back if they all
-    /// show them.
-    FlipAll,
+    /// Turn a device's (node_id) card to its controls (`true`), or its health.
+    Flip(u64, bool),
+    /// Turn the cards shown to their controls (`true`), or their health.
+    FlipAll(bool),
     /// A control on the back of a device's (node_id) card.
     CardAct(u64, datamodel::Action),
     /// What a device (node_id) answered a control on its card with.
@@ -1321,23 +1320,27 @@ impl Component for App {
                 false
             }
             Msg::ModelEvent(node_id, model) => self.model_event(node_id, model),
-            Msg::Flip(node_id) => {
-                if !self.flipped.remove(&node_id) {
+            Msg::Flip(node_id, controls) => {
+                if controls {
                     self.flipped.insert(node_id);
+                } else {
+                    self.flipped.remove(&node_id);
                 }
                 self.sync_model_scopes(ctx);
                 true
             }
-            Msg::FlipAll => {
+            Msg::FlipAll(controls) => {
                 let shown: Vec<u64> = self
                     .visible_devices()
                     .iter()
                     .map(|d| d.handle.node_id)
                     .collect();
-                if shown.iter().all(|node_id| self.flipped.contains(node_id)) {
-                    self.flipped.clear();
-                } else {
-                    self.flipped.extend(shown);
+                for node_id in shown {
+                    if controls {
+                        self.flipped.insert(node_id);
+                    } else {
+                        self.flipped.remove(&node_id);
+                    }
                 }
                 self.sync_model_scopes(ctx);
                 true

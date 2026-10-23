@@ -74,10 +74,26 @@ pub enum Icon {
     Thermometer,
     Fan,
     Blinds,
+    Table,
+    Braces,
+    Play,
 }
 
 pub fn icon(glyph: Icon, size: u32) -> Html {
     let shape = match glyph {
+        Icon::Table => html! {
+            <>
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <path d="M3 9h18M3 15h18M9 3v18" />
+            </>
+        },
+        Icon::Braces => html! {
+            <>
+                <path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1" />
+                <path d="M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1" />
+            </>
+        },
+        Icon::Play => html! { <path d="M6 4l14 8-14 8z" /> },
         Icon::Wifi => html! {
             <>
                 <path d="M2 8.5a15 15 0 0 1 20 0" />

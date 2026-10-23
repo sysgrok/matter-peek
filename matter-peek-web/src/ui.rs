@@ -24,6 +24,54 @@ pub fn pill(text: &str, class: Option<&'static str>, title: Option<String>) -> H
     }
 }
 
+/// A two-way switch between `left` and `right` (icon, label, title), its
+/// thumb on the one `right` says (`None`: on neither); `compact` with icons
+/// only. `on` gets the one picked: `true` for `right`.
+pub fn two_way(
+    left: (Icon, &'static str, &'static str),
+    right: (Icon, &'static str, &'static str),
+    right_on: Option<bool>,
+    compact: bool,
+    on: Callback<bool>,
+) -> Html {
+    let option = |to_right: bool, (glyph, label, title): (Icon, &'static str, &'static str)| {
+        let checked = right_on == Some(to_right);
+        html! {
+            <button class="two-way-option" role="radio" aria-checked={checked.to_string()}
+                {title} onclick={on.reform(move |_| to_right)}>
+                { icon(glyph, 16) }
+                if !compact {
+                    <span>{ label }</span>
+                }
+            </button>
+        }
+    };
+
+    html! {
+        <div class={classes!("two-way", compact.then_some("is-compact"), match right_on {
+            Some(true) => Some("is-right"),
+            Some(false) => Some("is-left"),
+            None => None,
+        })} role="radiogroup">
+            <span class="two-way-thumb"></span>
+            { option(false, left) }
+            { option(true, right) }
+        </div>
+    }
+}
+
+/// Which side the device cards show: their health, or their controls
+/// (`true`; `None` when some show one, some the other).
+pub fn face_switch(controls: Option<bool>, compact: bool, on: Callback<bool>) -> Html {
+    two_way(
+        (Icon::Gauge, "Health", "Show the health"),
+        (Icon::Sliders, "Controls", "Show the controls"),
+        controls,
+        compact,
+        on,
+    )
+}
+
 /// What a page shows while it has nothing to show.
 pub fn empty_state(glyph: Icon, title: &str, text: &str, action: Html) -> Html {
     html! {

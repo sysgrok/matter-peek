@@ -223,7 +223,8 @@ of it is private to `core`.
 - The data model works on any cluster with no code per cluster: `build.rs`
   generates a schema from the Matter IDL rs-matter's clusters come from
   (`rs_matter_codegen::parse_idl`): every cluster's attributes and commands,
-  their names and types, and the enums, bitmaps and structs they use. One
+  their names and types, and the enums, bitmaps and structs they use (a
+  cluster's `FeatureMap` as the bits of its `Feature` bitmap). One
   converter reads TLV into JSON and writes JSON as TLV by that schema (enums by
   name, bitmaps as bit names, structs as objects by field name); rs-matter's
   untyped `read_with` / `write_with` / `invoke_with` carry it. The web UI
