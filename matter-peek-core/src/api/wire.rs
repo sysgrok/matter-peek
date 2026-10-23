@@ -164,6 +164,13 @@ pub enum Request {
     /// Stop following a device on this connection. Answered with
     /// [`Response::Ok`], also for a device not followed.
     Unsubscribe { node_id: u64 },
+    /// Follow the data model of a device on this connection (see
+    /// `MatterPeek::subscribe_model`), as [`Event::Model`]s; again with
+    /// another scope replaces it. Answered with [`Response::Subscribed`].
+    SubscribeModel { node_id: u64, scope: ModelScope },
+    /// Stop following a device's data model on this connection. Answered with
+    /// [`Response::Ok`].
+    UnsubscribeModel { node_id: u64 },
     /// See `MatterPeek::decommission`. Answered with [`Response::Devices`].
     Decommission { node_id: u64, force: bool },
     /// See `MatterPeek::sync`. Answered with [`Response::Devices`].
@@ -411,6 +418,9 @@ pub enum Event {
         node_id: u64,
         state: SubscriptionState,
     },
+    /// Attributes of a device whose data model this connection follows (see
+    /// `ModelListener::on_model`).
+    Model { node_id: u64, model: DeviceModel },
     /// How an update started on this connection goes.
     OtaProgress { node_id: u64, progress: OtaProgress },
     /// What the assistant does in chat `chat_id`, asked on this connection.

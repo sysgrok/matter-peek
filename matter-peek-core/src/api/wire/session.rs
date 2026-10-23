@@ -12,7 +12,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 
 use crate::api::peek::{
-    CommissionListener, HealthListener, MatterPeek, OtaListener, OtaUpload, Subscription,
+    CommissionListener, HealthListener, MatterPeek, ModelListener, OtaListener, OtaUpload,
+    Subscription,
 };
 use crate::api::types::*;
 
@@ -28,6 +29,7 @@ pub struct WireSession {
     peek: Arc<MatterPeek>,
     out: async_channel::Sender<ServerMsg>,
     subscriptions: RefCell<BTreeMap<u64, Arc<Subscription>>>,
+    model_subscriptions: RefCell<BTreeMap<u64, (ModelScope, Arc<Subscription>)>>,
     uploads: RefCell<BTreeMap<u32, Arc<OtaUpload>>>,
 }
 
@@ -38,6 +40,7 @@ impl WireSession {
             peek,
             out,
             subscriptions: RefCell::new(BTreeMap::new()),
+            model_subscriptions: RefCell::new(BTreeMap::new()),
             uploads: RefCell::new(BTreeMap::new()),
         }
     }
@@ -212,6 +215,13 @@ impl WireSession {
                 self.subscriptions.borrow_mut().remove(&node_id);
                 Ok(Response::Ok)
             }
+            Request::SubscribeModel { node_id, scope } => {
+                self.subscribe_model(node_id, scope).await
+            }
+            Request::UnsubscribeModel { node_id } => {
+                self.model_subscriptions.borrow_mut().remove(&node_id);
+                Ok(Response::Ok)
+            }
             Request::Decommission { node_id, force } => {
                 peek.decommission(node_id, force).await.map(devices)
             }
@@ -307,6 +317,38 @@ impl WireSession {
         })
     }
 
+    async fn subscribe_model(
+        &self,
+        node_id: u64,
+        scope: ModelScope,
+    ) -> Result<Response, PeekError> {
+        let already = self
+            .model_subscriptions
+            .borrow()
+            .get(&node_id)
+            .is_some_and(|(followed, _)| *followed == scope);
+        if already {
+            return Ok(Response::Subscribed {
+                node_id,
+                already: true,
+            });
+        }
+
+        let listener = Arc::new(Reports {
+            out: self.out.clone(),
+        });
+        let subscription = self.peek.subscribe_model(node_id, scope, listener).await?;
+        // Replaced once the new one runs, so that the coverage never dips.
+        self.model_subscriptions
+            .borrow_mut()
+            .insert(node_id, (scope, subscription));
+
+        Ok(Response::Subscribed {
+            node_id,
+            already: false,
+        })
+    }
+
     async fn upload_chunk(
         &self,
         upload_id: u32,
@@ -382,6 +424,14 @@ impl CommissionListener for Steps {
 /// A subscription's reports, as events.
 struct Reports {
     out: async_channel::Sender<ServerMsg>,
+}
+
+impl ModelListener for Reports {
+    fn on_model(&self, node_id: u64, model: DeviceModel) {
+        let _ = self.out.try_send(ServerMsg::Event {
+            event: Event::Model { node_id, model },
+        });
+    }
 }
 
 impl HealthListener for Reports {

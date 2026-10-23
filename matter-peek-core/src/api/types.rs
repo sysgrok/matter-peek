@@ -313,6 +313,17 @@ pub struct FieldType {
     pub value_type: ValueType,
 }
 
+/// How much of a device's data model a subscription follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum ModelScope {
+    /// The application endpoints: what a device's controls show.
+    Application,
+    /// Every endpoint, the root's too.
+    All,
+}
+
 /// What a command answered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]

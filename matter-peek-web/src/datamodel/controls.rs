@@ -6,13 +6,12 @@
 //! operational states, measurements, filters and tanks); for any other cluster
 //! of an application endpoint, ones derived from its schema.
 
-use yew::html::Scope;
 use yew::prelude::*;
 
 use matter_peek_core::api::{AttributeModel, ClusterModel, DeviceModel, EndpointModel, ValueKind};
 
-use super::{model_msg, Action, ModelMsg, ModelView};
-use crate::{field_value, select_value, App, Msg};
+use super::Action;
+use crate::{field_value, select_value};
 
 const IDENTIFY: u32 = 0x0003;
 const GROUPS: u32 = 0x0004;
@@ -149,8 +148,9 @@ enum Unit {
 }
 
 /// The controls of `endpoint`, cluster by cluster: the curated and shaped
-/// ones first, then those derived from the schema.
-pub(super) fn of(endpoint: &EndpointModel) -> Vec<Group<'_>> {
+/// ones first, then those derived from the schema (with `brief`, only where
+/// it has no others).
+pub(super) fn of(endpoint: &EndpointModel, brief: bool) -> Vec<Group<'_>> {
     let mut groups: Vec<Group<'_>> = endpoint
         .clusters
         .iter()
@@ -173,22 +173,32 @@ pub(super) fn of(endpoint: &EndpointModel) -> Vec<Group<'_>> {
         })
         .collect();
     groups.sort_by_key(|group| group.title.is_some());
+    if brief && groups.first().is_some_and(|group| group.title.is_none()) {
+        groups.retain(|group| group.title.is_none());
+    }
 
     groups
 }
 
-/// The controls of `endpoint`.
-pub(super) fn view(
-    view: &ModelView,
+/// Whether `endpoint` has controls (`brief`: as [`of`] says).
+pub(crate) fn any(endpoint: &EndpointModel, brief: bool) -> bool {
+    !of(endpoint, brief).is_empty()
+}
+
+/// The controls of `endpoint` (`brief`: as [`of`] says), disabled while
+/// `busy`; what they do goes to `on_act`.
+pub(crate) fn view(
     model: &DeviceModel,
     endpoint: &EndpointModel,
-    link: &Scope<App>,
+    brief: bool,
+    busy: bool,
+    on_act: &Callback<Action>,
 ) -> Html {
     let ep = endpoint.id;
 
     html! {
         <div class="dm-controls">
-            { for of(endpoint).into_iter().map(|group| html! {
+            { for of(endpoint, brief).into_iter().map(|group| html! {
                 <>
                     if let Some(title) = &group.title {
                         <p class="dm-control-group">{ title.clone() }</p>
@@ -196,7 +206,7 @@ pub(super) fn view(
                     { for group.controls.iter().map(|control| html! {
                         <div class="dm-control">
                             <span class="dm-control-label">{ control.label.clone() }</span>
-                            { view_control(view, model, ep, control, group.cluster, link) }
+                            { view_control(model, ep, control, group.cluster, busy, on_act) }
                         </div>
                     }) }
                 </>
@@ -492,14 +502,13 @@ fn derived(cluster: &ClusterModel) -> Vec<Control> {
 }
 
 fn view_control(
-    view: &ModelView,
     model: &DeviceModel,
     endpoint: u16,
     control: &Control,
     cluster: &ClusterModel,
-    link: &Scope<App>,
+    busy: bool,
+    on_act: &Callback<Action>,
 ) -> Html {
-    let busy = view.busy;
     let cluster_id = cluster.id;
 
     match &control.kind {
@@ -509,9 +518,9 @@ fn view_control(
             html! {
                 <button class={classes!("button", "is-small", if state { "is-success" } else { "is-soft" })}
                     disabled={busy}
-                    onclick={link.callback(move |_| act(Action::Invoke {
-                        endpoint, cluster: cluster_id, command: cmd, fields: "{}".into(), refresh: true,
-                    }))}>
+                    onclick={on_act.reform(move |_| Action::Invoke {
+                        endpoint, cluster: cluster_id, command: cmd, fields: "{}".into(),
+                    })}>
                     { if state { "On" } else { "Off" } }
                 </button>
             }
@@ -522,9 +531,9 @@ fn view_control(
             html! {
                 <button class={classes!("button", "is-small", if state { "is-success" } else { "is-soft" })}
                     disabled={busy}
-                    onclick={link.callback(move |_| act(Action::Write {
+                    onclick={on_act.reform(move |_| Action::Write {
                         endpoint, cluster: cluster_id, attribute: attr, value: (!state).to_string(),
-                    }))}>
+                    })}>
                     { if state { "Yes" } else { "No" } }
                 </button>
             }
@@ -550,16 +559,16 @@ fn view_control(
                     <input class="dm-slider" type="range" disabled={busy}
                         min={min.to_string()} max={max.to_string()} step={step.to_string()}
                         value={value.unwrap_or(min).to_string()}
-                        onchange={link.callback(move |e: Event| {
+                        onchange={on_act.reform(move |e: Event| {
                             let v = field_value(&e);
-                            act(match set {
+                            match set {
                                 None => Action::Write { endpoint, cluster: cluster_id, attribute: attr, value: v },
                                 Some((cmd, field, others)) => {
                                     let mut fields: serde_json::Value = serde_json::from_str(others).unwrap_or_default();
                                     fields[field] = serde_json::from_str(&v).unwrap_or_default();
-                                    Action::Invoke { endpoint, cluster: cluster_id, command: cmd, fields: fields.to_string(), refresh: true }
+                                    Action::Invoke { endpoint, cluster: cluster_id, command: cmd, fields: fields.to_string() }
                                 }
-                            })
+                            }
                         })} />
                     <span class="dm-control-value">{ shown }</span>
                 </>
@@ -574,9 +583,9 @@ fn view_control(
             html! {
                 <input class="input is-small dm-number" type="text" disabled={busy}
                     value={value}
-                    onchange={link.callback(move |e: Event| act(Action::Write {
+                    onchange={on_act.reform(move |e: Event| Action::Write {
                         endpoint, cluster: cluster_id, attribute: attr, value: field_value(&e),
-                    }))} />
+                    })} />
             }
         }
         Kind::Choice { attr } => {
@@ -592,10 +601,10 @@ fn view_control(
             html! {
                 <div class="select is-small">
                     <select disabled={busy || !writable}
-                        onchange={link.callback(move |e: Event| act(Action::Write {
+                        onchange={on_act.reform(move |e: Event| Action::Write {
                             endpoint, cluster: cluster_id, attribute: attr,
                             value: serde_json::Value::String(select_value(e)).to_string(),
-                        }))}>
+                        })}>
                         { for names.iter().map(|n| html! {
                             <option value={n.clone()} selected={*n == current}>{ n.clone() }</option>
                         }) }
@@ -614,11 +623,10 @@ fn view_control(
             html! {
                 <div class="select is-small">
                     <select disabled={busy || modes.is_empty()}
-                        onchange={link.callback(move |e: Event| act(Action::Invoke {
+                        onchange={on_act.reform(move |e: Event| Action::Invoke {
                             endpoint, cluster: cluster_id, command: change,
                             fields: serde_json::json!({ "NewMode": select_value(e).parse::<u64>().unwrap_or_default() }).to_string(),
-                            refresh: true,
-                        }))}>
+                        })}>
                         { for modes.iter().map(|(mode, label)| html! {
                             <option value={mode.to_string()} selected={Some(*mode) == current}>{ label.clone() }</option>
                         }) }
@@ -632,9 +640,9 @@ fn view_control(
                     let cmd = *cmd;
                     html! {
                         <button class="button is-small is-soft" disabled={busy}
-                            onclick={link.callback(move |_| act(Action::Invoke {
-                                endpoint, cluster: cluster_id, command: cmd, fields: "{}".into(), refresh: true,
-                            }))}>
+                            onclick={on_act.reform(move |_| Action::Invoke {
+                                endpoint, cluster: cluster_id, command: cmd, fields: "{}".into(),
+                            })}>
                             { name.clone() }
                         </button>
                     }
@@ -745,10 +753,6 @@ fn control(label: &str, kind: Kind) -> Control {
         label: label.to_string(),
         kind,
     }
-}
-
-fn act(action: Action) -> Msg {
-    model_msg(ModelMsg::Act(action))
 }
 
 /// A spec name in words: `OccupiedCoolingSetpoint` → `Occupied cooling

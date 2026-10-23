@@ -1,11 +1,13 @@
 //! The Devices page: the devices on our fabric, each with its live health,
-//! tags, update and actions; and the logs popup.
+//! tags, update and actions, and on the back of its card its controls; and
+//! the logs popup.
 
 use yew::html::Scope;
 use yew::prelude::*;
 
 use matter_peek_core::api::{self, display};
 
+use crate::datamodel::controls;
 use crate::icons::{device_type_icon, icon, kind_class, kind_icon, Icon};
 use crate::ui;
 use crate::{
@@ -16,14 +18,11 @@ use crate::{
 impl App {
     /// The devices on our fabric.
     pub(crate) fn view_devices_tab(&self, link: &Scope<Self>) -> Html {
-        let filter = self.tag_filter.trim().to_lowercase();
-        let visible = self
-            .stored
-            .iter()
-            .filter(|d| {
-                filter.is_empty() || d.tags.iter().any(|t| t.to_lowercase().contains(&filter))
-            })
-            .collect::<Vec<_>>();
+        let visible = self.visible_devices();
+        let all_flipped = !visible.is_empty()
+            && visible
+                .iter()
+                .all(|d| self.flipped.contains(&d.handle.node_id));
 
         let count = self.stored.len();
         let live = self
@@ -61,6 +60,17 @@ impl App {
                             oninput={link.callback(|e: InputEvent| Msg::TagFilter(input_value(e)))} />
                         <span class="icon is-left">{ icon(Icon::Search, 18) }</span>
                     </div>
+                }
+                if count > 0 {
+                    if all_flipped {
+                        { ui::icon_button(Icon::Gauge, "Health", classes!("is-soft"), false,
+                            Some("Turn the cards back to their health"),
+                            link.callback(|_| Msg::FlipAll)) }
+                    } else {
+                        { ui::icon_button(Icon::Sliders, "Controls", classes!("is-soft"), false,
+                            Some("Turn the cards over to their controls"),
+                            link.callback(|_| Msg::FlipAll)) }
+                    }
                 }
                 <button
                     class={classes!("button", "is-icon",
@@ -131,6 +141,18 @@ impl App {
                 { body }
             </>
         }
+    }
+
+    /// The devices shown: those tagged as the filter says.
+    pub(crate) fn visible_devices(&self) -> Vec<&api::DeviceInfo> {
+        let filter = self.tag_filter.trim().to_lowercase();
+
+        self.stored
+            .iter()
+            .filter(|d| {
+                filter.is_empty() || d.tags.iter().any(|t| t.to_lowercase().contains(&filter))
+            })
+            .collect()
     }
 
     /// The devices the network advertises on other controllers' fabrics
@@ -210,9 +232,14 @@ impl App {
         let hardware = d.hardware_version().unwrap_or_else(|| "—".into());
         let software = d.software_version().unwrap_or_else(|| "—".into());
         let refreshing = self.refreshing(node_id);
+        let flipped = self.flipped.contains(&node_id);
+        let pill = ui::pill(state, class, Some(why));
 
         html! {
-            <article class={classes!("device-card", offline.then_some("is-offline"))}>
+            <div class={classes!("flip-card", flipped.then_some("is-flipped"))}>
+            <div class="flip-inner">
+            <article class={classes!("device-card", "flip-front", offline.then_some("is-offline"))}
+                inert={flipped.then_some("")}>
                 <header class="device-head">
                     <span class={classes!("tile-icon", kind_class(d.network))}
                         title={d.network.map(|kind| kind.label())}>
@@ -232,11 +259,15 @@ impl App {
                         </p>
                     </div>
                     <div class="device-head-end">
-                        { ui::pill(state, class, Some(why)) }
+                        { pill.clone() }
                         <button class={classes!("icon-action", refreshing.then_some("is-loading"))}
                             title="Read its health now" disabled={busy}
                             onclick={link.callback(move |_| Msg::Refresh(node_id))}>
                             { icon(Icon::Refresh, 18) }
+                        </button>
+                        <button class="icon-action" title="Turn the card over to its controls"
+                            onclick={link.callback(move |_| Msg::Flip(node_id))}>
+                            { icon(Icon::Sliders, 18) }
                         </button>
                     </div>
                 </header>
@@ -303,6 +334,98 @@ impl App {
                             onclick={link.callback(move |_| Msg::Ask(Ask::Decommission(node_id)))}>
                             { icon(Icon::Trash, 18) }
                         </button>
+                    </div>
+                </footer>
+            </article>
+            { self.view_device_back(d, flipped, offline, pill, link) }
+            </div>
+            </div>
+        }
+    }
+
+    /// The back of a device's card: the controls of its application
+    /// endpoints, while `flipped`.
+    fn view_device_back(
+        &self,
+        d: &api::DeviceInfo,
+        flipped: bool,
+        offline: bool,
+        pill: Html,
+        link: &Scope<Self>,
+    ) -> Html {
+        let node_id = d.handle.node_id;
+        let busy = self.device_busy(node_id);
+        let model = self.card_models.get(&node_id).filter(|_| flipped);
+        let endpoints: Vec<_> = model
+            .map(|model| {
+                model
+                    .endpoints
+                    .iter()
+                    .filter(|e| e.id != 0 && controls::any(e, true))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let on_act = link.callback(move |action| Msg::CardAct(node_id, action));
+
+        let body = match model {
+            _ if !flipped => html! {},
+            None => html! {
+                <div class="card-controls-state">
+                    <span class="loader"></span>
+                    <span>{ if offline { "Not answering; trying again…" } else { "Reading its controls…" } }</span>
+                </div>
+            },
+            Some(_) if endpoints.is_empty() => html! {
+                <p class="card-controls-state">{ "Nothing to control here; its data model has the rest." }</p>
+            },
+            Some(model) => html! {
+                { for endpoints.iter().map(|e| html! {
+                    <section class="card-controls-endpoint">
+                        if endpoints.len() > 1 {
+                            <p class="card-controls-title">
+                                { e.device_types.iter()
+                                    .filter_map(|t| display::device_type_name(t.id))
+                                    .collect::<Vec<_>>()
+                                    .join(", ") }
+                                <span class="dm-id">{ format!("endpoint {}", e.id) }</span>
+                            </p>
+                        }
+                        { controls::view(model, e, true, busy || offline, &on_act) }
+                    </section>
+                }) }
+            },
+        };
+
+        html! {
+            <article class={classes!("device-card", "flip-back", offline.then_some("is-offline"))}
+                inert={(!flipped).then_some("")}>
+                <header class="device-head">
+                    <span class={classes!("tile-icon", kind_class(d.network))}>
+                        { icon(device_type_icon(d.device_type()).or(kind_icon(d.network)).unwrap_or(Icon::Chip), 22) }
+                    </span>
+                    <div class="device-title">
+                        <h2>{ d.title() }</h2>
+                        <p>{ "Controls" }</p>
+                    </div>
+                    <div class="device-head-end">
+                        { pill }
+                        <button class="icon-action" title="Turn the card back to its health"
+                            onclick={link.callback(move |_| Msg::Flip(node_id))}>
+                            { icon(Icon::Gauge, 18) }
+                        </button>
+                    </div>
+                </header>
+                <div class="card-controls">
+                    { body }
+                    if let Some(error) = self.card_errors.get(&node_id) {
+                        <p class="dm-outcome is-error">{ error.clone() }</p>
+                    }
+                </div>
+                <footer class="device-actions">
+                    <div class="device-actions-main">
+                        { ui::icon_button(Icon::Model, "Model", classes!("is-small", "is-soft"), offline,
+                            Some("Its endpoints, clusters, attributes and commands"),
+                            link.callback(move |_| Msg::Model(crate::datamodel::ModelMsg::Open(node_id)))) }
                     </div>
                 </footer>
             </article>

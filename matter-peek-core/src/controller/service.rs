@@ -37,7 +37,7 @@ use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::{NetworkReceive, NetworkSend, NoNetwork};
 use rs_matter::Matter;
 
-use crate::api::{BorderRouter, FabricRef, Op, PeekConfig, PeekError, Service};
+use crate::api::{BorderRouter, FabricRef, ModelScope, Op, PeekConfig, PeekError, Service};
 use crate::fabrics::OurFabrics;
 use crate::matter::Controller;
 use crate::mdns::Mdns;
@@ -45,7 +45,7 @@ use crate::model::StoredDevice;
 use crate::node;
 use crate::ota::{OtaEvent, OtaImageStore, OtaProvider};
 use crate::persist::{ControllerStore, KvBuf};
-use crate::subscribe::Reports;
+use crate::subscribe::{Coverage, Gate, Reports};
 
 use locks::{Key, Locks, Mode};
 use ota::{OtaFollower, TrackedUpdate, Upload};
@@ -74,6 +74,9 @@ const FIRST_DEVICE_NODE_ID: u64 = 112234;
 const FIRST_SYNC_DELAY_SECS: u64 = 5;
 /// How often the device list is synced with our fabric.
 const SYNC_PERIOD_SECS: u64 = 300;
+
+/// How many devices on Thread prime a data model subscription at once.
+const MODEL_PRIMINGS_OVER_THREAD: usize = 2;
 
 /// What the service runs on, provided by the host.
 pub struct Platform<'a, C, S, O, N, M> {
@@ -120,6 +123,8 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     sub_jobs: async_channel::Sender<SubJob>,
     /// Routes the reports of the live subscriptions to them.
     reports: Reports,
+    /// Lets a few subscriptions over Thread at a time prime a data model.
+    model_gate: Gate,
     /// Our OTA Provider.
     ota: OtaProvider<O, Box<dyn Fn(OtaEvent)>>,
     /// What it tells of the updates, and what the service finds out itself.
@@ -274,6 +279,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             | Op::RetrieveLogs { node_id, .. }
             | Op::Identify { node_id, .. }
             | Op::Watch { node_id, .. }
+            | Op::WatchModel { node_id, .. }
             | Op::Window { node_id, .. }
             | Op::DeviceTime { node_id, .. } => self.device_keys(*node_id, Mode::Read),
             Op::Decommission { node_id, .. }
@@ -490,6 +496,20 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             } => {
                 let _ = reply.send(self.watch(node_id, listener).await).await;
             }
+            Op::WatchModel {
+                node_id,
+                scope,
+                listener,
+                reply,
+            } => {
+                let coverage = match scope {
+                    ModelScope::Application => Coverage::Application,
+                    ModelScope::All => Coverage::All,
+                };
+                let _ = reply
+                    .send(self.watch_model(node_id, coverage, listener).await)
+                    .await;
+            }
             Op::Unwatch { node_id, watcher } => self.unwatch(node_id, watcher),
             Op::OtaImages(reply) => {
                 let _ = reply.send(Ok(self.ota_images())).await;
@@ -685,6 +705,7 @@ async fn run<'a, C, S, O, N, M>(
         next_watcher: Cell::new(1),
         sub_jobs,
         reports: Reports::new(),
+        model_gate: Gate::new(MODEL_PRIMINGS_OVER_THREAD),
         ota,
         ota_followers,
         ota_updates,
@@ -791,7 +812,7 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             }
             Op::RetrieveLogs { reply, .. } => refuse(reply, error).await,
             Op::Identify { reply, .. } | Op::OtaUpdate { reply, .. } => refuse(reply, error).await,
-            Op::Watch { reply, .. } => refuse(reply, error).await,
+            Op::Watch { reply, .. } | Op::WatchModel { reply, .. } => refuse(reply, error).await,
             Op::OtaImages(reply) | Op::OtaUploadEnd { reply, .. } | Op::OtaDelete { reply, .. } => {
                 refuse(reply, error).await
             }

@@ -206,6 +206,22 @@ this machine to a network's prefix (Linux). It reads the devices one after
 another, so it takes a few seconds; only the links our devices report are
 known.
 
+### The data model
+
+Every endpoint, cluster, attribute and command of a device, by name, with
+values as JSON (enums by name, bitmaps as bit names, structs by field name):
+the card's Model button (a tree of endpoints and clusters; writable attributes
+edited in place, commands invoked with a form of their fields), `matter-peek
+model <node> [--endpoint N] [--cluster C] [--live]`, `matter-peek write` /
+`invoke`, and the MCP tools `read_model` / `write_attribute` /
+`invoke_command`. Any cluster in rs-matter's IDL works, with no code per
+cluster.
+
+A device card turns over to the controls of its application endpoints
+(switches, sliders, choices, buttons and readings); the Controls button on
+the Devices page turns all the cards shown. The controls and the Model popup
+follow the device live, through the same subscription as its health.
+
 ### The assistant (an AI agent)
 
 The assistant answers questions about the devices: its model looks into them

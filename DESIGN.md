@@ -83,7 +83,7 @@ controller serves the CLI, the MCP server and mobile apps.
 | Health | `peek_device` (one-shot: also its heap, and the threads (tasks) of its software and their stacks, where it reports them), `subscribe` (live: General Diagnostics (uptime, reboots, operating hours) and the fabrics the device is on; returns a `Subscription`, which stops when dropped) |
 | Thread | `read_thread_mesh`: networks, nodes, links and findings, from our Thread devices' tables and the LAN's MeshCoP / Matter adverts |
 | Device | `read_network` (interfaces, known networks, Wi-Fi / Thread / Ethernet diagnostics), `change_network` (add or update, remove, connect, reorder a known network), `retrieve_logs`, `identify` |
-| Data model | `read_model` (endpoints, device types, clusters, attribute values, accepted commands, with names and types), `write_attribute`, `invoke_command`: any cluster, values as JSON |
+| Data model | `read_model` (endpoints, device types, clusters, attribute values, accepted commands, with names and types), `subscribe_model` (live: the application endpoints, or everything), `write_attribute`, `invoke_command`: any cluster, values as JSON |
 | OTA | `ota_images`, `ota_upload` (returns an `OtaUpload` to write chunks to), `ota_delete`, `ota_update` (a progress listener) |
 | Assistant | `assistant`, `set_assistant` (a key stays only for the same API address), `clear_assistant`: its model, kept in the store; never its key, which only `assistant_model` (Rust, for an agent in the same process) returns |
 
@@ -228,7 +228,10 @@ of it is private to `core`.
   name, bitmaps as bit names, structs as objects by field name); rs-matter's
   untyped `read_with` / `write_with` / `invoke_with` carry it. The web UI
   builds its editors and command forms from the same types, and adds quick
-  controls (switches, sliders, choices, readings) declared per cluster.
+  controls (switches, sliders, choices, readings): curated for the clusters
+  people act on most, one per shape for the clusters sharing one (modes,
+  operational states, measurements, filters), derived from the schema for the
+  rest. A device card turns over to its controls; one button turns them all.
 - `advertised_devices` browses `_matter._tcp` across all fabrics, resolves each
   node and groups the nodes sharing an address into one device. A foreign
   fabric is named (its controller's vendor, its label) when a device of ours is
@@ -247,6 +250,14 @@ of it is private to `core`.
   in pieces is merged piece by piece.
 - We ask for at most 20 s between reports; devices may choose longer (sleepy
   devices pick their idle duration).
+- The same subscription carries the data model while a listener wants it
+  (`subscribe_model`): a device with one application endpoint takes that
+  endpoint (a wildcard) in place of `SupportedFabrics`, any other everything
+  (`*/*/*`, one path). It is re-established when the wanted scope
+  widens, and narrows 3 minutes after the last listener of the wider one
+  leaves. Its priming comes to the listeners at once, then what changes; no
+  report comes sooner than 2 s after the last. Over Thread, 2 devices at a
+  time take a data model priming.
 - A device is **offline** when no report arrived within the max interval plus
   two MRP round trips of a report. Re-establishing is retried with a 2–60 s
   backoff; a successful `peek_device` retries at once.
@@ -439,17 +450,17 @@ inventory with remember, tags and sync; one-shot and live health; diagnostic
 logs; identify; OTA Provider and updates; decommission; a device's networking
 and changes to its networks; the Thread mesh; several fabrics of our own; a
 device's fabrics, and removing another controller's; the devices on other
-controllers' fabrics; sharing a device through
+controllers' fabrics; the data model (device types, any attribute read,
+written or followed live, any command), with controls on the back of each
+card; sharing a device through
 an enhanced commissioning window; a time source for our devices, and their
 clocks read and set; web UI, CLI and MCP on one API, in one executable; the API in `core` (`MatterPeek`), exported over UniFFI.
 
 **Next**
 - Migrating devices to a new Wi-Fi, and other changes to the networks of many
   devices at once.
-- Device types (and card icons) and a data-model browser: endpoints, clusters,
-  attributes, commands; reading and writing any attribute, invoking any
-  command. Needs id → name tables from rs-matter's codegen, and subscriptions
-  per set of paths rather than one fixed set.
+- Curated controls for the irregular clusters (Color Control, Door Lock,
+  Closures, Valves, Pumps, EVSE, media), and names for the RVC states.
 - Filtering devices by what we know of them (Wi-Fi / Thread / Ethernet, device
   types, clusters, fabrics), next to the user's tags; the same filters select
   devices for bulk changes.

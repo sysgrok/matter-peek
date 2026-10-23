@@ -1,6 +1,7 @@
 //! A device's data model, in a popup: its endpoints and their clusters, the
 //! clusters' attributes (written in place where writable) and commands
-//! (invoked with a form of their fields).
+//! (invoked with a form of their fields). It follows the device's
+//! subscription, as the backs of the device cards do.
 
 use std::collections::BTreeMap;
 
@@ -8,30 +9,33 @@ use yew::html::Scope;
 use yew::prelude::*;
 
 use matter_peek_core::api::{
-    display, wire, AttributeModel, ClusterModel, CommandModel, DeviceModel, ValueKind, ValueType,
+    display, wire, AttributeModel, ClusterModel, CommandModel, DeviceModel, EndpointModel,
+    FieldType, TypeInfo, ValueKind, ValueType,
 };
 
 use crate::icons::{icon, Icon};
-use crate::{field_value, request_loop, select_value, ui, App, Msg};
+use crate::{field_value, request_loop, select_value, ui, App, Msg, SubConn};
 
-mod controls;
+pub(crate) mod controls;
 
 /// The global attributes (attribute lists, revision, …) start here.
 const FIRST_GLOBAL_ATTRIBUTE: u32 = 0xFFF8;
 
+/// The global attribute listing the commands a cluster accepts.
+const ACCEPTED_COMMAND_LIST: u32 = 0xFFF9;
+
 /// The data model popup of one device.
 pub struct ModelView {
     pub node_id: u64,
+    /// A read under way.
     pub loading: bool,
-    /// As last read; `None` before the first read.
+    /// As reported so far; `None` until the first report.
     pub model: Option<DeviceModel>,
     pub error: Option<String>,
     /// The cluster shown: its endpoint and ID.
     pub selected: Option<(u16, u32)>,
     /// The endpoint whose controls are shown instead.
     pub controls: Option<u16>,
-    /// The cluster to read again once a command is answered.
-    pub refresh_after: Option<(u16, u32)>,
     /// The attribute being edited, and the value typed so far.
     pub editing: Option<(u32, String)>,
     /// The command whose form is open, and its fields typed so far.
@@ -62,7 +66,7 @@ pub enum ModelMsg {
     Failed(String),
 }
 
-/// What a control does.
+/// What a control does. What changes comes with the subscription.
 pub enum Action {
     Write {
         endpoint: u16,
@@ -75,8 +79,6 @@ pub enum Action {
         cluster: u32,
         command: u32,
         fields: String,
-        /// Read the cluster again once answered.
-        refresh: bool,
     },
 }
 
@@ -85,27 +87,24 @@ impl App {
         let link = ctx.link();
 
         if let ModelMsg::Open(node_id) = msg {
-            self.model_view = Some(ModelView {
+            let mut view = ModelView {
                 node_id,
-                loading: true,
+                loading: false,
                 model: None,
                 error: None,
                 selected: None,
                 controls: None,
-                refresh_after: None,
                 editing: None,
                 command: None,
                 busy: false,
                 outcome: None,
-            });
-            send(
-                link,
-                wire::Request::ReadModel {
-                    node_id,
-                    endpoint: None,
-                    cluster: None,
-                },
-            );
+            };
+            // What its card shows, until the whole model is reported.
+            if let Some(model) = self.card_models.get(&node_id) {
+                view.show(model.clone());
+            }
+            self.model_view = Some(view);
+            self.sync_model_scopes(ctx);
             return true;
         }
 
@@ -134,7 +133,10 @@ impl App {
                     },
                 );
             }
-            ModelMsg::Close => self.model_view = None,
+            ModelMsg::Close => {
+                self.model_view = None;
+                self.sync_model_scopes(ctx);
+            }
             ModelMsg::Select(endpoint, cluster) => {
                 view.selected = Some((endpoint, cluster));
                 view.controls = None;
@@ -151,40 +153,7 @@ impl App {
             ModelMsg::Act(action) => {
                 view.busy = true;
                 view.outcome = None;
-                let node_id = view.node_id;
-                send(
-                    link,
-                    match action {
-                        Action::Write {
-                            endpoint,
-                            cluster,
-                            attribute,
-                            value,
-                        } => wire::Request::WriteAttribute {
-                            node_id,
-                            endpoint,
-                            cluster: cluster.to_string(),
-                            attribute: attribute.to_string(),
-                            value,
-                        },
-                        Action::Invoke {
-                            endpoint,
-                            cluster,
-                            command,
-                            fields,
-                            refresh,
-                        } => {
-                            view.refresh_after = refresh.then_some((endpoint, cluster));
-                            wire::Request::InvokeCommand {
-                                node_id,
-                                endpoint,
-                                cluster: cluster.to_string(),
-                                command: command.to_string(),
-                                fields,
-                            }
-                        }
-                    },
-                );
+                send(link, request(view.node_id, action));
             }
             ModelMsg::Edit(attr) => {
                 let draft = view
@@ -265,39 +234,17 @@ impl App {
                 }
             }
             ModelMsg::Loaded(wire::Response::Model { model }) => {
-                view.loading = false;
                 if view.busy {
                     view.busy = false;
                     view.editing = None;
                     view.outcome = Some(Ok("Written.".into()));
+                } else {
+                    view.loading = false;
                 }
-                match view.model.as_mut() {
-                    Some(shown) if model.node_id == shown.node_id => merge(shown, &model),
-                    _ => {
-                        view.selected = view.selected.or_else(|| first_cluster(&model));
-                        // An application endpoint's controls, if it has any.
-                        view.controls = model
-                            .endpoints
-                            .iter()
-                            .find(|e| e.id != 0 && !controls::of(e).is_empty())
-                            .map(|e| e.id);
-                        view.model = Some(model);
-                    }
-                }
+                view.show(model);
             }
             ModelMsg::Loaded(wire::Response::CommandOutcome { outcome }) => {
                 view.busy = false;
-                if let Some((endpoint, cluster)) = view.refresh_after.take() {
-                    view.loading = true;
-                    send(
-                        link,
-                        wire::Request::ReadModel {
-                            node_id: view.node_id,
-                            endpoint: Some(endpoint),
-                            cluster: Some(cluster.to_string()),
-                        },
-                    );
-                }
                 view.outcome = Some(Ok(match (outcome.response, outcome.fields) {
                     (Some(response), Some(fields)) => format!("{response}: {fields}"),
                     _ => "Done.".into(),
@@ -318,18 +265,52 @@ impl App {
         true
     }
 
+    /// Attributes the subscription of `node_id` reported: into its card's
+    /// model, and the popup's.
+    pub(crate) fn model_event(&mut self, node_id: u64, model: DeviceModel) -> bool {
+        let mut shown = false;
+
+        if let Some(view) = self.model_view.as_mut().filter(|v| v.node_id == node_id) {
+            view.show(model.clone());
+            shown = true;
+        }
+        if self.flipped.contains(&node_id) {
+            match self.card_models.get_mut(&node_id) {
+                Some(card) => absorb(card, model),
+                None => {
+                    self.card_models.insert(node_id, model);
+                }
+            }
+            shown = true;
+        }
+
+        shown
+    }
+
     /// Full-screen popup with a device's data model.
     pub(crate) fn view_model_modal(&self, link: &Scope<Self>) -> Html {
         let Some(view) = &self.model_view else {
             return html! {};
         };
         let title = self.device_title(view.node_id);
+        let live = matches!(
+            self.subs.get(&view.node_id).map(|sub| sub.conn),
+            Some(SubConn::Live { .. })
+        );
+        let offline = matches!(
+            self.subs.get(&view.node_id).map(|sub| sub.conn),
+            Some(SubConn::Offline)
+        );
 
         html! {
             <div class="modal is-active">
                 <div class="modal-background"></div>
                 <div class="modal-card is-fullscreen">
                     { ui::modal_head("Data model", &title, html! {
+                        <>
+                        if live {
+                            { ui::pill("Live", Some("is-up"), Some("It reports what changes".into())) }
+                        }
                         <button
                             class={classes!("button", "is-small", view.loading.then_some("is-loading"))}
                             title="Read the cluster again"
@@ -338,19 +319,24 @@ impl App {
                             <span class="icon is-small">{ icon(Icon::Refresh, 16) }</span>
                             <span>{ "Refresh" }</span>
                         </button>
+                        </>
                     }, link.callback(|_| model_msg(ModelMsg::Close))) }
                     <section class="modal-card-body">
                         if let Some(error) = &view.error {
                             <p class="tasks-error">{ icon(Icon::Alert, 16) }<span>{ error.clone() }</span></p>
                         }
                         { match &view.model {
-                            None if view.loading => html! {
+                            None if view.error.is_some() => html! {},
+                            None => html! {
                                 <div class="empty-state">
                                     <span class="loader is-large"></span>
-                                    <p class="empty-state-text">{ "Reading its data model…" }</p>
+                                    <p class="empty-state-text">{ if offline {
+                                        "It is not answering; trying again…"
+                                    } else {
+                                        "Reading its data model…"
+                                    } }</p>
                                 </div>
                             },
-                            None => html! {},
                             Some(model) => html! {
                                 <div class="dm-layout">
                                     { view_tree(view, model, link) }
@@ -369,6 +355,34 @@ impl App {
 }
 
 impl ModelView {
+    /// Take `model` in; on the first, show its first application cluster, or
+    /// the controls of an application endpoint having any.
+    fn show(&mut self, model: DeviceModel) {
+        self.error = None;
+        let first = match self.model.as_mut() {
+            Some(shown) => {
+                absorb(shown, model);
+                false
+            }
+            None => {
+                self.model = Some(model);
+                true
+            }
+        };
+
+        let model = self.model.as_ref().expect("just set");
+        if self.selected.is_none() {
+            self.selected = first_cluster(model);
+        }
+        if first {
+            self.controls = model
+                .endpoints
+                .iter()
+                .find(|e| e.id != 0 && controls::any(e, false))
+                .map(|e| e.id);
+        }
+    }
+
     fn cluster(&self) -> Option<&ClusterModel> {
         let (endpoint, cluster) = self.selected?;
         self.model
@@ -405,7 +419,7 @@ fn view_tree(view: &ModelView, model: &DeviceModel, link: &Scope<App>) -> Html {
                         <p class="dm-endpoint-title">{ format!("Endpoint {}", e.id) }</p>
                         <p class="dm-endpoint-types">{ types.join(", ") }</p>
                         <ul>
-                            if !controls::of(e).is_empty() {
+                            if controls::any(e, false) {
                                 <li>
                                     <button class={classes!("dm-cluster", "is-controls", (view.controls == Some(e.id)).then_some("is-selected"))}
                                         onclick={link.callback({ let id = e.id; move |_| model_msg(ModelMsg::SelectControls(id)) })}>
@@ -438,7 +452,7 @@ fn view_tree(view: &ModelView, model: &DeviceModel, link: &Scope<App>) -> Html {
 fn view_controls(
     view: &ModelView,
     model: &DeviceModel,
-    endpoint: &matter_peek_core::api::EndpointModel,
+    endpoint: &EndpointModel,
     link: &Scope<App>,
 ) -> Html {
     let types: Vec<String> = endpoint
@@ -456,7 +470,8 @@ fn view_controls(
             if let Some(outcome) = view.outcome.as_ref().filter(|o| o.is_err()) {
                 <p class="dm-outcome is-error">{ match outcome { Ok(text) | Err(text) => text.clone() } }</p>
             }
-            { controls::view(view, model, endpoint, link) }
+            { controls::view(model, endpoint, false, view.busy,
+                &link.callback(|action| model_msg(ModelMsg::Act(action)))) }
         </div>
     }
 }
@@ -828,23 +843,155 @@ fn type_label(ty: &ValueType, model: &DeviceModel) -> String {
     label
 }
 
-/// Copy the values `partial` read into `shown`.
-fn merge(shown: &mut DeviceModel, partial: &DeviceModel) {
-    for e in &partial.endpoints {
-        let Some(endpoint) = shown.endpoints.iter_mut().find(|s| s.id == e.id) else {
-            continue;
+/// Take what `update` says into `shown`: the values of its attributes, and
+/// the endpoints, clusters, attributes and commands `shown` lacks.
+pub(crate) fn absorb(shown: &mut DeviceModel, update: DeviceModel) {
+    let DeviceModel {
+        endpoints, types, ..
+    } = shown;
+    let mut remap = Remap {
+        from: &update.types,
+        to: vec![None; update.types.len()],
+        into: types,
+    };
+
+    for e in update.endpoints {
+        let endpoint = match endpoints.iter().position(|s| s.id == e.id) {
+            Some(i) => &mut endpoints[i],
+            None => {
+                let i = endpoints.partition_point(|s| s.id < e.id);
+                endpoints.insert(
+                    i,
+                    EndpointModel {
+                        id: e.id,
+                        device_types: Vec::new(),
+                        clusters: Vec::new(),
+                    },
+                );
+                &mut endpoints[i]
+            }
         };
-        for c in &e.clusters {
-            let Some(cluster) = endpoint.clusters.iter_mut().find(|s| s.id == c.id) else {
-                continue;
+        // Unless its Descriptor was reported, it has none.
+        if !e.device_types.is_empty() {
+            endpoint.device_types = e.device_types;
+        }
+
+        for c in e.clusters {
+            let cluster = match endpoint.clusters.iter().position(|s| s.id == c.id) {
+                Some(i) => &mut endpoint.clusters[i],
+                None => {
+                    let i = endpoint.clusters.partition_point(|s| s.id < c.id);
+                    endpoint.clusters.insert(
+                        i,
+                        ClusterModel {
+                            id: c.id,
+                            name: c.name.clone(),
+                            attributes: Vec::new(),
+                            commands: Vec::new(),
+                        },
+                    );
+                    &mut endpoint.clusters[i]
+                }
             };
-            for a in &c.attributes {
-                if let Some(attr) = cluster.attributes.iter_mut().find(|s| s.id == a.id) {
-                    attr.value = a.value.clone();
-                    attr.error = a.error.clone();
+            // Its commands are as its accepted command list says.
+            if c.attributes.iter().any(|a| a.id == ACCEPTED_COMMAND_LIST) {
+                cluster.commands = c
+                    .commands
+                    .into_iter()
+                    .map(|mut cmd| {
+                        cmd.fields = remap.fields(cmd.fields);
+                        cmd
+                    })
+                    .collect();
+            }
+            for mut a in c.attributes {
+                a.value_type = a.value_type.map(|ty| remap.value_type(ty));
+                match cluster.attributes.iter_mut().find(|s| s.id == a.id) {
+                    Some(attr) => *attr = a,
+                    None => cluster.attributes.push(a),
                 }
             }
         }
+    }
+}
+
+/// The types of an update, as indices into those of the model taking it.
+struct Remap<'a> {
+    from: &'a [TypeInfo],
+    /// Each one's index in `into`, once known.
+    to: Vec<Option<u32>>,
+    into: &'a mut Vec<TypeInfo>,
+}
+
+impl Remap<'_> {
+    fn value_type(&mut self, mut ty: ValueType) -> ValueType {
+        ty.schema = ty.schema.map(|i| self.index(i));
+        ty
+    }
+
+    fn fields(&mut self, fields: Vec<FieldType>) -> Vec<FieldType> {
+        fields
+            .into_iter()
+            .map(|mut field| {
+                field.value_type = self.value_type(field.value_type);
+                field
+            })
+            .collect()
+    }
+
+    /// The index in `into` of type `i`: of the same type there, else of it
+    /// added.
+    fn index(&mut self, i: u32) -> u32 {
+        if let Some(Some(j)) = self.to.get(i as usize) {
+            return *j;
+        }
+        let Some(info) = self.from.get(i as usize) else {
+            return i;
+        };
+        let info = TypeInfo {
+            name: info.name.clone(),
+            values: info.values.clone(),
+            fields: self.fields(info.fields.clone()),
+        };
+        let j = match self.into.iter().position(|t| *t == info) {
+            Some(j) => j,
+            None => {
+                self.into.push(info);
+                self.into.len() - 1
+            }
+        } as u32;
+        self.to[i as usize] = Some(j);
+        j
+    }
+}
+
+/// The request doing `action` on device `node_id`.
+pub(crate) fn request(node_id: u64, action: Action) -> wire::Request {
+    match action {
+        Action::Write {
+            endpoint,
+            cluster,
+            attribute,
+            value,
+        } => wire::Request::WriteAttribute {
+            node_id,
+            endpoint,
+            cluster: cluster.to_string(),
+            attribute: attribute.to_string(),
+            value,
+        },
+        Action::Invoke {
+            endpoint,
+            cluster,
+            command,
+            fields,
+        } => wire::Request::InvokeCommand {
+            node_id,
+            endpoint,
+            cluster: cluster.to_string(),
+            command: command.to_string(),
+            fields,
+        },
     }
 }
 

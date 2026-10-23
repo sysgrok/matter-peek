@@ -36,6 +36,14 @@ pub struct AttrReport {
     pub value: Result<Value, String>,
 }
 
+/// An attribute report, decoded.
+#[derive(Debug, Clone)]
+pub struct Decoded {
+    pub report: AttrReport,
+    /// One item to add to the attribute's list, rather than its value.
+    pub item: bool,
+}
+
 /// Why a write or an invoke failed.
 #[derive(Debug)]
 pub enum ModelError {
@@ -86,7 +94,9 @@ pub async fn read<C: Crypto>(
         {
             let resp = chunk.response()?;
             for report in resp.attr_reports.iter().flat_map(|r| r.iter()) {
-                note(&mut reports, report?);
+                if let Some(decoded) = decode(report?) {
+                    note(&mut reports, decoded);
+                }
             }
         }
 
@@ -193,58 +203,76 @@ pub async fn invoke<C: Crypto>(
     Ok(answer)
 }
 
-/// Note `report` in `reports`: a list item adds to the list reported before.
-fn note(reports: &mut Vec<AttrReport>, report: AttrResp<'_>) {
+/// `report`, decoded by the schema; `None` if its path is not concrete.
+pub fn decode(report: AttrResp<'_>) -> Option<Decoded> {
     match report {
         AttrResp::Data(data) => {
             let p = &data.path;
-            let (Some(endpoint), Some(cluster), Some(attribute)) = (p.endpoint, p.cluster, p.attr)
-            else {
-                return;
-            };
-            let schema = schema::cluster(cluster).and_then(|c| c.attribute(attribute));
-
-            if p.list_index.is_some() {
-                let item =
-                    values::item_to_json(&data.data, schema.map(|s| &s.value)).map_err(describe);
-                let list = reports.iter_mut().rev().find(|r| {
-                    (r.endpoint, r.cluster, r.attribute) == (endpoint, cluster, attribute)
-                });
-                if let (
-                    Some(AttrReport {
-                        value: Ok(Value::Array(items)),
-                        ..
-                    }),
-                    Ok(item),
-                ) = (list, item)
-                {
-                    items.push(item);
-                }
-                return;
+            let (endpoint, cluster, attribute) = (p.endpoint?, p.cluster?, p.attr?);
+            let schema = schema::cluster(cluster)
+                .and_then(|c| c.attribute(attribute))
+                .map(|a| &a.value);
+            let item = p.list_index.is_some();
+            let value = if item {
+                values::item_to_json(&data.data, schema)
+            } else {
+                values::to_json(&data.data, schema)
             }
+            .map_err(describe);
 
-            let value = values::to_json(&data.data, schema.map(|s| &s.value)).map_err(describe);
-            reports.push(AttrReport {
-                endpoint,
-                cluster,
-                attribute,
-                value,
-            });
-        }
-        AttrResp::Status(status) => {
-            let p = &status.path;
-            if let (Some(endpoint), Some(cluster), Some(attribute)) =
-                (p.endpoint, p.cluster, p.attr)
-            {
-                reports.push(AttrReport {
+            Some(Decoded {
+                report: AttrReport {
                     endpoint,
                     cluster,
                     attribute,
+                    value,
+                },
+                item,
+            })
+        }
+        AttrResp::Status(status) => {
+            let p = &status.path;
+            Some(Decoded {
+                report: AttrReport {
+                    endpoint: p.endpoint?,
+                    cluster: p.cluster?,
+                    attribute: p.attr?,
                     value: Err(format!("{:?}", status.status.status)),
-                });
-            }
+                },
+                item: false,
+            })
         }
     }
+}
+
+/// Note `decoded` in `reports`: it replaces the attribute's earlier value, or
+/// adds to its list. Answers the attribute's path.
+pub fn note(reports: &mut Vec<AttrReport>, decoded: Decoded) -> (u16, u32, u32) {
+    let r = &decoded.report;
+    let path = (r.endpoint, r.cluster, r.attribute);
+    let earlier = reports
+        .iter_mut()
+        .find(|r| (r.endpoint, r.cluster, r.attribute) == path);
+
+    match (decoded.item, earlier) {
+        (
+            true,
+            Some(AttrReport {
+                value: Ok(Value::Array(items)),
+                ..
+            }),
+        ) => {
+            if let Ok(item) = decoded.report.value {
+                items.push(item);
+            }
+        }
+        // An item of a list not reported whole.
+        (true, _) => {}
+        (false, Some(earlier)) => *earlier = decoded.report,
+        (false, None) => reports.push(decoded.report),
+    }
+
+    path
 }
 
 /// Encode with `f` into a scratch buffer: the value's errors before anything

@@ -433,39 +433,35 @@ impl<'a, C: Crypto> Controller<'a, C> {
         .await
     }
 
-    /// Subscribe to a device's diagnostic attributes and stream live
-    /// [`DeviceHealth`](crate::model::DeviceHealth) updates to `on_update` — the
-    /// health-board primitive (vs. the one-shot [`Self::read_health`]).
-    ///
-    /// - `on_update` receives the priming snapshot first, then deltas.
-    /// - `on_state` receives [`SubState`](crate::subscribe::SubState) lifecycle
-    ///   transitions (`Live { max_int }` / `Offline`), so the caller can show
-    ///   connection health.
-    /// - `retry` cuts the wait before the next re-establishing attempt short.
-    ///
-    /// Runs **indefinitely**, self-healing across session drops (a stale
-    /// subscription is re-established with a fresh device-side id), until the
-    /// returned future is dropped (the cancel). The transport pump and the
-    /// controller node ([`crate::node::run`], with the same `reports`) must run in
-    /// sibling tasks.
-    pub async fn subscribe_health(
+    /// Follow `dev`'s health, and as much of its data model as `scope` says,
+    /// over a subscription that re-establishes itself; see
+    /// [`crate::subscribe::subscribe`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn subscribe(
         &self,
         reports: &crate::subscribe::Reports,
+        gate: &crate::subscribe::Gate,
         dev: DeviceHandle,
+        thread: bool,
         which: DiagSet,
+        scope: &crate::subscribe::Scope,
         retry: &Notification,
         on_update: impl FnMut(DeviceHealth),
+        on_model: impl FnMut(Vec<crate::datamodel::Decoded>, bool),
         on_state: impl FnMut(crate::subscribe::SubState),
     ) -> Result<(), Error> {
-        crate::subscribe::subscribe_health(
+        crate::subscribe::subscribe(
             self.matter,
             self.crypto,
             reports,
-            dev.fabric_index,
-            dev.node_id,
+            gate,
+            dev,
+            thread,
             which,
+            scope,
             retry,
             on_update,
+            on_model,
             on_state,
         )
         .await

@@ -398,6 +398,33 @@ impl MatterPeek {
         }))
     }
 
+    /// Follow the data model of a listed device live, as much of it as
+    /// `scope` says, until the returned subscription is stopped or dropped.
+    /// The device's one subscription covers it meanwhile, and for a few
+    /// minutes after.
+    pub async fn subscribe_model(
+        &self,
+        node_id: u64,
+        scope: ModelScope,
+        listener: Arc<dyn ModelListener>,
+    ) -> Result<Arc<Subscription>, PeekError> {
+        let watcher = self
+            .call(|reply| Op::WatchModel {
+                node_id,
+                scope,
+                listener,
+                reply,
+            })
+            .await?;
+
+        Ok(Arc::new(Subscription {
+            node_id,
+            watcher,
+            ops: self.ops.clone(),
+            stopped: AtomicBool::new(false),
+        }))
+    }
+
     /// The stored OTA images.
     pub async fn ota_images(&self) -> Result<Vec<OtaImageInfo>, PeekError> {
         self.call(Op::OtaImages).await
@@ -616,6 +643,15 @@ pub trait HealthListener: Send + Sync {
     fn on_state(&self, node_id: u64, state: SubscriptionState);
 }
 
+/// Follows a device's data model; see [`MatterPeek::subscribe_model`]. Called
+/// on the controller's thread: return quickly.
+#[cfg_attr(feature = "uniffi", uniffi::export(with_foreign))]
+pub trait ModelListener: Send + Sync {
+    /// Attributes reported: first those known so far, then those that
+    /// changed, with their values as they are now (merge them in).
+    fn on_model(&self, node_id: u64, model: DeviceModel);
+}
+
 /// Follows a commission; see [`MatterPeek::commission`]. Called on the
 /// controller's thread: return quickly.
 #[cfg_attr(feature = "uniffi", uniffi::export(with_foreign))]
@@ -752,6 +788,12 @@ pub(crate) enum Op {
     Watch {
         node_id: u64,
         listener: Arc<dyn HealthListener>,
+        reply: Reply<u64>,
+    },
+    WatchModel {
+        node_id: u64,
+        scope: ModelScope,
+        listener: Arc<dyn ModelListener>,
         reply: Reply<u64>,
     },
     /// Remove a listener; the device subscription stops with its last one.

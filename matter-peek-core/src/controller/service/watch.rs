@@ -13,9 +13,14 @@ use rs_matter::crypto::Crypto;
 use rs_matter::persist::KvBlobStore;
 use rs_matter::utils::sync::Notification;
 
-use crate::api::{DeviceFabric, DeviceHealth, HealthListener, PeekError, SubscriptionState};
+use crate::api::{
+    DeviceFabric, DeviceHealth, HealthListener, ModelListener, NetworkKind, PeekError,
+    SubscriptionState,
+};
+use crate::datamodel::{self, AttrReport, Decoded};
 use crate::model::{DeviceHandle, DiagSet};
 use crate::ota::OtaImageStore;
+use crate::subscribe::{Coverage, Scope};
 
 use super::{convert, Ctx};
 
@@ -27,6 +32,12 @@ pub(super) struct Watch {
     pub(super) retry: Rc<Notification>,
     /// The listeners, by ID.
     listeners: Vec<(u64, Arc<dyn HealthListener>)>,
+    /// The listeners of the data model, by ID, with what each wants covered.
+    model_listeners: Vec<(u64, Coverage, Arc<dyn ModelListener>)>,
+    /// What the subscription covers.
+    scope: Rc<Scope>,
+    /// The attributes reported beyond the health, as they are now.
+    model: Vec<AttrReport>,
     /// The state, and the health merged from the reports, so far: what a
     /// listener joining now gets first.
     pub(super) state: Option<SubscriptionState>,
@@ -35,6 +46,75 @@ pub(super) struct Watch {
 }
 
 impl Watch {
+    fn new(stop: async_channel::Sender<()>, retry: Rc<Notification>) -> Self {
+        Self {
+            stop,
+            retry,
+            listeners: Vec::new(),
+            model_listeners: Vec::new(),
+            scope: Rc::new(Scope::new()),
+            model: Vec::new(),
+            state: None,
+            health: DeviceHealth::default(),
+            reports: 0,
+        }
+    }
+
+    /// What the listeners of the data model want covered.
+    fn wanted(&self) -> Coverage {
+        self.model_listeners
+            .iter()
+            .map(|(_, coverage, _)| *coverage)
+            .max()
+            .unwrap_or(Coverage::Health)
+    }
+
+    /// Note the attributes reported (`fresh`: a priming, replacing what was
+    /// known), and hand the listeners those that changed.
+    fn model_report(&mut self, node_id: u64, decoded: Vec<Decoded>, fresh: bool) {
+        if fresh {
+            self.model.clear();
+        }
+
+        let mut changed = Vec::new();
+        for decoded in decoded {
+            let path = datamodel::note(&mut self.model, decoded);
+            if !changed.contains(&path) {
+                changed.push(path);
+            }
+        }
+        if changed.is_empty() || self.model_listeners.is_empty() {
+            return;
+        }
+
+        let changed: Vec<AttrReport> = self
+            .model
+            .iter()
+            .filter(|r| changed.contains(&(r.endpoint, r.cluster, r.attribute)))
+            .cloned()
+            .collect();
+        let model = super::datamodel::model(node_id, &changed);
+        for (_, _, listener) in &self.model_listeners {
+            listener.on_model(node_id, model.clone());
+        }
+    }
+
+    /// Add a listener of the data model, telling it the model so far.
+    fn join_model(
+        &mut self,
+        node_id: u64,
+        id: u64,
+        coverage: Coverage,
+        listener: Arc<dyn ModelListener>,
+    ) {
+        if !self.model.is_empty() {
+            listener.on_model(node_id, super::datamodel::model(node_id, &self.model));
+        }
+
+        self.model_listeners.push((id, coverage, listener));
+        self.scope.want(self.wanted());
+    }
+
     /// The fabrics the device reported being on, so far.
     pub(super) fn fabrics(&self) -> &[DeviceFabric] {
         self.health.fabrics.as_deref().unwrap_or_default()
@@ -84,6 +164,9 @@ pub(super) struct SubJob {
     /// watch is still this subscription's.
     my_stop: async_channel::Sender<()>,
     retry: Rc<Notification>,
+    scope: Rc<Scope>,
+    /// Whether the device is on Thread.
+    thread: bool,
 }
 
 impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
@@ -94,44 +177,66 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         node_id: u64,
         listener: Arc<dyn HealthListener>,
     ) -> Result<u64, PeekError> {
-        let dev = self.lookup_device(node_id)?;
+        self.ensure_watch(node_id).await?;
 
         let id = self.next_watcher.get();
         self.next_watcher.set(id + 1);
 
         if let Some(watch) = self.subs.borrow_mut().get_mut(&node_id) {
             watch.join(node_id, id, listener);
-            return Ok(id);
+        }
+
+        Ok(id)
+    }
+
+    /// Add `listener` of the data model of a listed device, as much of it as
+    /// `coverage` says; the device's subscription covers that from then on.
+    /// Answers the listener's ID.
+    pub(super) async fn watch_model(
+        &self,
+        node_id: u64,
+        coverage: Coverage,
+        listener: Arc<dyn ModelListener>,
+    ) -> Result<u64, PeekError> {
+        self.ensure_watch(node_id).await?;
+
+        let id = self.next_watcher.get();
+        self.next_watcher.set(id + 1);
+
+        if let Some(watch) = self.subs.borrow_mut().get_mut(&node_id) {
+            watch.join_model(node_id, id, coverage, listener);
+        }
+
+        Ok(id)
+    }
+
+    /// Start the subscription of a listed device, unless it runs.
+    async fn ensure_watch(&self, node_id: u64) -> Result<(), PeekError> {
+        let dev = self.lookup_device(node_id)?;
+
+        if self.subs.borrow().contains_key(&node_id) {
+            return Ok(());
         }
 
         let (stop, stop_rx) = async_channel::bounded(1);
-        let retry = Rc::new(Notification::new());
-
-        self.subs.borrow_mut().insert(
-            node_id,
-            Watch {
-                stop: stop.clone(),
-                retry: retry.clone(),
-                listeners: alloc::vec![(id, listener)],
-                state: None,
-                health: DeviceHealth::default(),
-                reports: 0,
-            },
-        );
-
+        let watch = Watch::new(stop.clone(), Rc::new(Notification::new()));
         let job = SubJob {
             node_id,
             handle: dev.handle,
             stop_rx,
             my_stop: stop,
-            retry,
+            retry: watch.retry.clone(),
+            scope: watch.scope.clone(),
+            thread: dev.network == Some(NetworkKind::Thread),
         };
+        self.subs.borrow_mut().insert(node_id, watch);
+
         if self.sub_jobs.send(job).await.is_err() {
             self.subs.borrow_mut().remove(&node_id);
             return Err(PeekError::failed("the subscriptions are not running"));
         }
 
-        Ok(id)
+        Ok(())
     }
 
     /// Remove listener `id` of a device; its subscription stops with the last.
@@ -143,8 +248,12 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         };
 
         watch.listeners.retain(|(listener, _)| *listener != id);
+        watch
+            .model_listeners
+            .retain(|(listener, _, _)| *listener != id);
+        watch.scope.want(watch.wanted());
 
-        if watch.listeners.is_empty() {
+        if watch.listeners.is_empty() && watch.model_listeners.is_empty() {
             if let Some(watch) = subs.remove(&node_id) {
                 let _ = watch.stop.try_send(());
             }
@@ -194,6 +303,8 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             stop_rx,
             my_stop,
             retry,
+            scope,
+            thread,
         } = job;
 
         // The device's watch, unless it was replaced or removed.
@@ -208,14 +319,25 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             }
         };
 
-        let subscription = self.controller.subscribe_health(
+        let subscription = self.controller.subscribe(
             &self.reports,
+            &self.model_gate,
             handle,
+            thread,
             DiagSet::LIVE,
+            &scope,
             &retry,
             |mut health| {
                 self.mark_our_fabric(node_id, &mut health);
                 with_watch(&mut |watch| watch.report(node_id, health.clone()))
+            },
+            |decoded, fresh| {
+                let mut decoded = Some(decoded);
+                with_watch(&mut |watch| {
+                    if let Some(decoded) = decoded.take() {
+                        watch.model_report(node_id, decoded, fresh);
+                    }
+                })
             },
             |state| {
                 let state = convert::sub_state(state);

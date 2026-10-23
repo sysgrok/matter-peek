@@ -146,6 +146,10 @@ enum Command {
         /// Only this cluster: its ID or name.
         #[arg(long)]
         cluster: Option<String>,
+        /// Then follow it live, printing the attributes reported, until
+        /// interrupted.
+        #[arg(long)]
+        live: bool,
     },
     /// Write an attribute of a device: a JSON value (an enum by name, a
     /// bitmap as the names of its bits, a struct as an object).
@@ -754,19 +758,62 @@ async fn run(cli: Cli) -> io::Result<bool> {
             node,
             endpoint,
             cluster,
+            live,
         } => {
             let request = wire::Request::ReadModel {
                 node_id: node.0,
                 endpoint,
-                cluster,
+                cluster: cluster.clone(),
             };
-            Ok(match call(&conn, &out, request).await? {
+            let read = match call(&conn, &out, request).await? {
                 Some(wire::Response::Model { model }) if !out.json => {
                     print_model(&model);
                     true
                 }
                 response => response.is_some(),
-            })
+            };
+            if !(read && live) {
+                return Ok(read);
+            }
+
+            // The application endpoints cover less, if they cover what is asked.
+            let scope = match endpoint {
+                Some(endpoint) if endpoint != 0 => api::ModelScope::Application,
+                _ => api::ModelScope::All,
+            };
+            let request = wire::Request::SubscribeModel {
+                node_id: node.0,
+                scope,
+            };
+            if call(&conn, &out, request).await?.is_none() {
+                return Ok(false);
+            }
+            // Only what was asked for.
+            let wanted_cluster = cluster.as_deref().map(str::to_lowercase);
+            while let Some(msg) = conn.recv().await {
+                let wire::ServerMsg::Event { mut event } = msg else {
+                    continue;
+                };
+                if let wire::Event::Model { model, .. } = &mut event {
+                    model
+                        .endpoints
+                        .retain(|e| endpoint.is_none_or(|wanted| wanted == e.id));
+                    for e in &mut model.endpoints {
+                        e.clusters.retain(|c| {
+                            wanted_cluster.as_deref().is_none_or(|wanted| {
+                                c.name.as_deref().map(str::to_lowercase).as_deref() == Some(wanted)
+                                    || wanted
+                                        .trim_start_matches("0x")
+                                        .parse::<u32>()
+                                        .is_ok_and(|id| id == c.id)
+                            })
+                        });
+                    }
+                }
+                out.event(&event);
+            }
+
+            Ok(true)
         }
         Command::Write {
             node,
@@ -999,6 +1046,21 @@ impl Out {
             wire::Event::HealthReport { health, .. } => {
                 if health.general.is_some() || health.software.is_some() {
                     println!("{}", health_text(health));
+                }
+            }
+            wire::Event::Model { model, .. } => {
+                for e in &model.endpoints {
+                    for c in &e.clusters {
+                        let cluster = named(c.name.as_deref(), display::hex_u32(c.id));
+                        for a in &c.attributes {
+                            let value = a.value.clone().or(a.error.clone()).unwrap_or_default();
+                            println!(
+                                "{} {cluster} {} = {value}",
+                                e.id,
+                                named(a.name.as_deref(), display::hex_u32(a.id))
+                            );
+                        }
+                    }
                 }
             }
             wire::Event::SubscriptionState { state, .. } => match state {

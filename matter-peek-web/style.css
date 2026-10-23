@@ -195,6 +195,25 @@ html, body { background: var(--bulma-scheme-main-bis); min-height: 100vh; }
   .device-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
+/* A device card turns over to its controls; the back takes the front's height. */
+.flip-card { perspective: 2000px; min-width: 0; }
+.flip-inner { position: relative; height: 100%; transform-style: preserve-3d; transition: transform .55s cubic-bezier(.4, .2, .2, 1); }
+.flip-card.is-flipped .flip-inner { transform: rotateY(180deg); }
+.flip-front, .flip-back { -webkit-backface-visibility: hidden; backface-visibility: hidden; }
+.flip-front { height: 100%; }
+.flip-back { position: absolute; inset: 0; transform: rotateY(180deg); }
+@media (prefers-reduced-motion: reduce) {
+  .flip-inner { transition: none; }
+}
+.card-controls { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 1rem; margin: 0 -1.25rem; padding: 0 1.25rem; }
+.card-controls .dm-controls { grid-template-columns: minmax(5.5rem, 8.5rem) minmax(0, 1fr) auto; gap: .65rem .75rem; font-size: .9rem; max-width: none; }
+.card-controls .dm-control-value { min-width: 3.5rem; }
+.card-controls .dm-control-value.is-reading { font-size: 1rem; }
+.card-controls .dm-outcome { margin-bottom: 0; }
+.card-controls-title { display: flex; align-items: baseline; gap: .5rem; margin-bottom: .5rem; font-size: .8rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--bulma-text-weak); }
+.card-controls-state { display: flex; align-items: center; gap: .6rem; padding: .75rem; border-radius: 12px; background: var(--bulma-scheme-main-bis); font-size: .85rem; color: var(--bulma-text-weak); }
+.flip-back.is-offline .card-controls { opacity: .55; }
+
 /* Logs. */
 .log-viewer { overflow: hidden; border: 1px solid var(--bulma-border-weak); border-radius: 14px; background: var(--bulma-scheme-main); }
 .log-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem; padding: .6rem .85rem; border-bottom: 1px solid var(--bulma-border-weak); }

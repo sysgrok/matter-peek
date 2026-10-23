@@ -1,10 +1,11 @@
-//! Live health via **subscriptions**.
+//! Live health, and data models, via **subscriptions**.
 //!
 //! Where [`diagnostics::read_health`](crate::diagnostics::read_health) takes a
 //! one-shot snapshot, this establishes an IM *subscription* to the diagnostic
 //! attributes and then keeps delivering updated [`DeviceHealth`] snapshots as the
 //! device pushes server-initiated `ReportData` messages — for a live dashboard
-//! instead of manual re-polling.
+//! instead of manual re-polling. While someone looks at a device's data model,
+//! the same subscription covers that too (see [`Scope`]).
 //!
 //! ## How the report side works
 //!
@@ -21,7 +22,7 @@
 //! a NAT/UDP mapping expires) — and a *dead* subscription is indistinguishable
 //! from a *healthy-but-quiet* one from the outside. The device commits to
 //! reporting at least every `max_int` seconds (the negotiated maximum interval),
-//! so [`subscribe_health`] runs a **watchdog**: if no report arrives within
+//! so [`subscribe`] runs a **watchdog**: if no report arrives within
 //! `max_int` plus [`ROUND_TRIPS`] times the time a report may spend being
 //! retransmitted and answered, the device is deemed offline, and the
 //! subscription is torn down and **re-established** — a fresh `SubscribeRequest`
@@ -32,14 +33,14 @@
 //!
 //! ## Concurrency
 //!
-//! [`subscribe_health`] runs until the returned future is dropped (the cancel).
+//! [`subscribe`] runs until the returned future is dropped (the cancel).
 //! The transport pump (`matter.run(...)`) and the controller node
 //! ([`crate::node::run`], with the same [`Reports`]) must run in sibling tasks.
 
 use core::cell::{Cell, RefCell};
 use core::num::NonZeroU8;
 
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_time::{Duration, Instant, Timer};
 
 use log::{debug, info, warn};
@@ -56,8 +57,9 @@ use rs_matter::transport::session::SessionMode;
 use rs_matter::utils::sync::Notification;
 use rs_matter::Matter;
 
+use crate::datamodel::{self, Decoded};
 use crate::diagnostics::{fabric_paths, health_cluster_ids, parse_health, ROOT_ENDPOINT};
-use crate::model::{DeviceHealth, DiagSet};
+use crate::model::{DeviceHandle, DeviceHealth, DiagSet};
 
 extern crate alloc;
 use alloc::rc::Rc;
@@ -70,6 +72,22 @@ use alloc::vec::Vec;
 /// longer interval anyway, so this does not wake them more often.
 const MIN_INTERVAL_FLOOR_SECS: u16 = 0;
 const MAX_INTERVAL_CEIL_SECS: u16 = 20;
+
+/// The reporting-interval floor of a subscription covering a data model: the
+/// changes of its busier attributes come batched.
+const MODEL_MIN_INTERVAL_FLOOR_SECS: u16 = 2;
+
+/// How long a subscription keeps a wider coverage than its listeners want: a
+/// view opened again soon needs no new priming report.
+const NARROW_GRACE: Duration = Duration::from_secs(3 * 60);
+
+/// The Descriptor cluster's list of a node's endpoints, on the root endpoint.
+const DESCRIPTOR: u32 = 0x001D;
+const PARTS_LIST: u32 = 0x0003;
+
+/// Operational Credentials' fabrics.
+const OPERATIONAL_CREDENTIALS: u32 = 0x003E;
+const FABRICS: u32 = 0x0001;
 
 /// Our MRP intervals (ms), which pace the device's retransmissions of a report
 /// to us: the spec defaults, unless configured.
@@ -90,6 +108,113 @@ const ROUND_TRIPS: u32 = 2;
 const REESTABLISH_BACKOFF_MIN: Duration = Duration::from_secs(2);
 const REESTABLISH_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
+/// What a subscription covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Coverage {
+    /// The health.
+    Health,
+    /// The health and the application endpoints' attributes.
+    Application,
+    /// Every attribute.
+    All,
+}
+
+/// The coverage of a subscription: what its listeners want, and what it has,
+/// wider at once and narrower only after [`NARROW_GRACE`].
+pub struct Scope {
+    wanted: Cell<Coverage>,
+    current: Cell<Coverage>,
+    narrow_at: Cell<Option<Instant>>,
+    changed: Notification,
+}
+
+impl Scope {
+    pub const fn new() -> Self {
+        Self {
+            wanted: Cell::new(Coverage::Health),
+            current: Cell::new(Coverage::Health),
+            narrow_at: Cell::new(None),
+            changed: Notification::new(),
+        }
+    }
+
+    /// Want `coverage` from now on.
+    pub fn want(&self, coverage: Coverage) {
+        self.wanted.set(coverage);
+
+        if coverage > self.current.get() {
+            self.current.set(coverage);
+            self.narrow_at.set(None);
+            self.changed.notify();
+        } else if coverage < self.current.get() {
+            if self.narrow_at.get().is_none() {
+                self.narrow_at.set(Some(Instant::now() + NARROW_GRACE));
+                self.changed.notify();
+            }
+        } else {
+            self.narrow_at.set(None);
+        }
+    }
+
+    /// What the subscription covers.
+    pub fn current(&self) -> Coverage {
+        self.current.get()
+    }
+
+    /// Narrow, if that is due; whether the coverage changed.
+    fn settle(&self) -> bool {
+        match self.narrow_at.get() {
+            Some(at) if Instant::now() >= at => {
+                self.narrow_at.set(None);
+                let changed = self.current.get() != self.wanted.get();
+                self.current.set(self.wanted.get());
+                changed
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Lets a few subscriptions over Thread at a time take their priming report
+/// of a data model: those share the mesh.
+pub struct Gate {
+    tickets: async_channel::Sender<()>,
+    free: async_channel::Receiver<()>,
+}
+
+impl Gate {
+    pub fn new(at_once: usize) -> Self {
+        let (tickets, free) = async_channel::bounded(at_once.max(1));
+        for _ in 0..at_once.max(1) {
+            let _ = tickets.try_send(());
+        }
+
+        Self { tickets, free }
+    }
+
+    async fn enter(&self) -> Ticket<'_> {
+        let _ = self.free.recv().await;
+        Ticket { gate: self }
+    }
+}
+
+/// A place in a [`Gate`]; dropping it frees the place.
+struct Ticket<'a> {
+    gate: &'a Gate,
+}
+
+impl Drop for Ticket<'_> {
+    fn drop(&mut self) {
+        let _ = self.gate.tickets.try_send(());
+    }
+}
+
 /// Lifecycle of a live subscription, reported to the caller via `on_state`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubState {
@@ -104,7 +229,7 @@ pub enum SubState {
 }
 
 /// Routes the reports of our health subscriptions to them, by publisher and
-/// subscription ID. Shared by [`subscribe_health`] and the controller node's
+/// subscription ID. Shared by [`subscribe`] and the controller node's
 /// responder ([`crate::node::run`]).
 #[derive(Default)]
 pub struct Reports {
@@ -120,12 +245,14 @@ impl Reports {
 
     /// Take the reports of a subscription to `peer_node_id`, until the returned
     /// registration is dropped.
-    fn register(&self, peer_node_id: u64, which: DiagSet) -> Registration<'_> {
+    fn register(&self, peer_node_id: u64, which: DiagSet, coverage: Coverage) -> Registration<'_> {
         let slot = Rc::new(Slot {
             peer_node_id,
             subscription_id: Cell::new(None),
             which,
+            coverage,
             updates: RefCell::new(Vec::new()),
+            model_updates: RefCell::new(Vec::new()),
             last_report: Cell::new(Instant::now()),
             received: Notification::new(),
         });
@@ -183,6 +310,9 @@ impl ReportDataHandler for Reports {
         // Any report is a liveness signal, even one with nothing we track.
         slot.last_report.set(Instant::now());
         slot.updates.borrow_mut().push(health);
+        if slot.coverage != Coverage::Health {
+            slot.model_updates.borrow_mut().extend(decoded(report));
+        }
         slot.received.notify();
 
         Ok(())
@@ -195,7 +325,10 @@ struct Slot {
     /// `None` while the subscription is being established.
     subscription_id: Cell<Option<u32>>,
     which: DiagSet,
+    coverage: Coverage,
     updates: RefCell<Vec<DeviceHealth>>,
+    /// The attributes reported, for a coverage beyond the health.
+    model_updates: RefCell<Vec<Decoded>>,
     /// When the most recent report arrived: the watchdog's heartbeat.
     last_report: Cell<Instant>,
     received: Notification,
@@ -216,43 +349,57 @@ impl Drop for Registration<'_> {
     }
 }
 
-/// Subscribe to the device's diagnostic attributes (`which`) and stream updated
-/// [`DeviceHealth`] snapshots to `on_update` — **indefinitely**, self-healing
-/// across session drops — until the returned future is dropped (the cancel).
+/// Subscribe to a device's health (`which`), and to as much of its data model
+/// as `scope` says — **indefinitely**, self-healing across session drops —
+/// until the returned future is dropped (the cancel).
 ///
-/// - `on_update` receives the priming snapshot first, then deltas (merge them).
+/// - `on_update` receives the priming [`DeviceHealth`] first, then deltas
+///   (merge them).
+/// - `on_model` receives the attributes reported beyond the health: the whole
+///   priming at once, with `true` (it replaces what was known), then deltas.
 /// - `on_state` receives [`SubState`] transitions: `Live { max_int }` on each
 ///   (re-)establishment, `Offline` when the subscription went stale or could not
 ///   be established. The UI uses these to show "live" vs. "offline".
 /// - `retry` cuts the backoff before the next attempt short, e.g. once the
 ///   device answered something else.
 ///
+/// A change of `scope` re-establishes the subscription with the paths it
+/// needs. Over Thread (`thread`), `gate` lets a few at a time take the priming
+/// report of a data model.
+///
 /// Never returns on its own (short of the caller dropping it): a lost
 /// subscription is re-established rather than surfaced as an error. The transport
 /// pump (`matter.run(...)`) and the controller node, with `reports`, must already
 /// run in sibling tasks.
 #[allow(clippy::too_many_arguments)]
-pub async fn subscribe_health<C, FU, FS>(
+pub async fn subscribe<C, FU, FM, FS>(
     matter: &Matter<'_>,
     crypto: C,
     reports: &Reports,
-    fab_idx: NonZeroU8,
-    node_id: u64,
+    gate: &Gate,
+    dev: DeviceHandle,
+    thread: bool,
     which: DiagSet,
+    scope: &Scope,
     retry: &Notification,
     mut on_update: FU,
+    mut on_model: FM,
     mut on_state: FS,
 ) -> Result<(), Error>
 where
     C: Crypto + Copy,
     FU: FnMut(DeviceHealth),
+    FM: FnMut(Vec<Decoded>, bool),
     FS: FnMut(SubState),
 {
-    let paths = attr_paths(which);
-    if paths.is_empty() {
-        warn!("subscribe_health: no attributes selected; nothing to subscribe to");
+    if attr_paths(which).is_empty() {
+        warn!("subscribe: no attributes selected; nothing to subscribe to");
         return Ok(());
     }
+
+    let node_id = dev.node_id;
+    // The application endpoints, once a coverage needs them.
+    let mut endpoints: Option<Vec<u16>> = None;
 
     // Establish → watch → (on stale/error) tear down + re-establish, forever. A
     // re-subscribe gets a new device-side subscription id, invalidating the old
@@ -265,6 +412,20 @@ where
     // resets the backoff.
     let mut backoff = REESTABLISH_BACKOFF_MIN;
     loop {
+        let coverage = scope.current();
+        if coverage == Coverage::Application && endpoints.is_none() {
+            match app_endpoints(matter, crypto, dev).await {
+                Ok(found) => endpoints = Some(found),
+                Err(e) => {
+                    warn!("subscribe(0x{node_id:016X}): no endpoints: {e:?}");
+                    on_state(SubState::Offline);
+                    backoff = back_off(backoff, retry).await;
+                    continue;
+                }
+            }
+        }
+        let paths = paths_of(which, coverage, endpoints.as_deref().unwrap_or_default());
+
         // Track whether this pass ever went `Live` (so we can reset backoff). We
         // wrap the caller's `on_state` to observe it.
         let established = Cell::new(false);
@@ -279,11 +440,15 @@ where
                 matter,
                 crypto,
                 reports,
-                fab_idx,
-                node_id,
+                gate,
+                dev,
+                thread,
                 which,
+                scope,
+                coverage,
                 &paths,
                 &mut on_update,
+                &mut on_model,
                 &mut on_state_wrapped,
             )
             .await
@@ -296,8 +461,8 @@ where
 
         match outcome {
             Ok(()) => {
-                // Stale re-establish: `on_state(Offline)` already emitted. If the
-                // pass had been healthy, retry promptly; otherwise back off.
+                // Stale or rescoped: re-establish. If the pass had been
+                // healthy, promptly; otherwise back off.
                 if !established.get() {
                     backoff = back_off(backoff, retry).await;
                 }
@@ -307,7 +472,7 @@ where
                 // (capped-exponential) so a cold / unreachable device isn't hammered
                 // (which would exhaust its CASE session table).
                 warn!(
-                    "subscribe_health(0x{node_id:016X}): {e:?}; re-establishing in {}s",
+                    "subscribe(0x{node_id:016X}): {e:?}; re-establishing in {}s",
                     backoff.as_secs()
                 );
                 on_state(SubState::Offline);
@@ -361,31 +526,47 @@ async fn back_off(backoff: Duration, retry: &Notification) -> Duration {
 }
 
 /// One establish-and-watch pass. Returns `Ok(())` when the subscription went
-/// stale (caller should re-establish immediately), or `Err` on an
-/// establishment/transport failure (caller should back off then retry).
+/// stale or its scope changed (caller should re-establish immediately), or
+/// `Err` on an establishment/transport failure (caller should back off then
+/// retry).
 #[allow(clippy::too_many_arguments)]
-async fn run_once<C, FU, FS>(
+async fn run_once<C, FU, FM, FS>(
     matter: &Matter<'_>,
     crypto: C,
     reports: &Reports,
-    fab_idx: NonZeroU8,
-    node_id: u64,
+    gate: &Gate,
+    dev: DeviceHandle,
+    thread: bool,
     which: DiagSet,
+    scope: &Scope,
+    coverage: Coverage,
     paths: &[AttrPath],
     on_update: &mut FU,
+    on_model: &mut FM,
     on_state: &mut FS,
 ) -> Result<(), Error>
 where
     C: Crypto + Copy,
     FU: FnMut(DeviceHealth),
+    FM: FnMut(Vec<Decoded>, bool),
     FS: FnMut(SubState),
 {
+    let (fab_idx, node_id) = (dev.fabric_index, dev.node_id);
+
     // Registered before establishing, so that no early report is refused.
-    let registration = reports.register(node_id, which);
+    let registration = reports.register(node_id, which, coverage);
     let slot = &registration.slot;
 
-    let (subscription_id, max_int) =
-        establish(matter, crypto, fab_idx, node_id, which, paths, on_update).await?;
+    let ticket = if thread && coverage != Coverage::Health {
+        Some(gate.enter().await)
+    } else {
+        None
+    };
+    let (subscription_id, max_int) = establish(
+        matter, crypto, fab_idx, node_id, which, coverage, paths, on_update, on_model,
+    )
+    .await?;
+    drop(ticket);
 
     slot.subscription_id.set(Some(subscription_id));
     slot.last_report.set(Instant::now());
@@ -399,13 +580,17 @@ where
     let window = Duration::from_secs(max_int as u64)
         + report_round_trip(matter, fab_idx, node_id) * ROUND_TRIPS;
     info!(
-        "subscription 0x{node_id:016X}: counted offline after {} ms without a report",
+        "subscription 0x{node_id:016X} ({coverage:?}): counted offline after {} ms without a report",
         window.as_millis()
     );
 
     loop {
         for health in slot.updates.take() {
             on_update(health);
+        }
+        let model = slot.model_updates.take();
+        if !model.is_empty() {
+            on_model(model, false);
         }
 
         // Stale if no report came in the window after the last one.
@@ -420,26 +605,53 @@ where
             return Ok(());
         }
 
-        select(slot.received.wait(), Timer::at(deadline)).await;
+        // A narrowing coming due wakes us too.
+        let wake = scope
+            .narrow_at
+            .get()
+            .map_or(deadline, |at| at.min(deadline));
+        if let Either3::Third(()) =
+            select3(slot.received.wait(), Timer::at(wake), scope.changed.wait()).await
+        {
+            debug!("subscription 0x{node_id:016X}: scope changed");
+        }
+
+        if scope.settle() || scope.current() != coverage {
+            info!(
+                "subscription 0x{node_id:016X}: covering {:?} from now on",
+                scope.current()
+            );
+            return Ok(());
+        }
     }
 }
 
 /// Establish the subscription: send `SubscribeRequest`, feed the priming
 /// `ReportData` chunks to `on_update` as the first [`DeviceHealth`], and await
 /// the `SubscribeResponse`. Returns the subscription ID and `max_int`.
-async fn establish<C, F>(
+#[allow(clippy::too_many_arguments)]
+async fn establish<C, FU, FM>(
     matter: &Matter<'_>,
     crypto: C,
     fab_idx: NonZeroU8,
     node_id: u64,
     which: DiagSet,
+    coverage: Coverage,
     paths: &[AttrPath],
-    on_update: &mut F,
+    on_update: &mut FU,
+    on_model: &mut FM,
 ) -> Result<(u32, u16), Error>
 where
     C: Crypto,
-    F: FnMut(DeviceHealth),
+    FU: FnMut(DeviceHealth),
+    FM: FnMut(Vec<Decoded>, bool),
 {
+    let min_int_floor = if coverage == Coverage::Health {
+        MIN_INTERVAL_FLOOR_SECS
+    } else {
+        MODEL_MIN_INTERVAL_FLOOR_SECS
+    };
+
     let exchange = Exchange::initiate(matter, crypto, fab_idx, node_id).await?;
     let mut sender = exchange.subscribe_sender().await?;
 
@@ -450,7 +662,7 @@ where
                 // which the device may still hold after we gave it up.
                 sender = builder
                     .keep_subs(false)?
-                    .min_int_floor(MIN_INTERVAL_FLOOR_SECS)?
+                    .min_int_floor(min_int_floor)?
                     .max_int_ceil(MAX_INTERVAL_CEIL_SECS)?
                     .attr_requests_from(paths)?
                     .fabric_filtered(false)?
@@ -461,10 +673,14 @@ where
     };
 
     // Each priming chunk carries a slice of the current attribute values.
+    let mut primed = Vec::new();
     let established = loop {
         {
             let resp = chunk.response()?;
             on_update(parse_health(&resp, which));
+            if coverage != Coverage::Health {
+                primed.extend(decoded(&resp));
+            }
         }
         match chunk.complete().await? {
             SubscribeOutcome::NextChunk(next) => chunk = next,
@@ -472,8 +688,11 @@ where
         }
     };
 
+    // What the priming reported replaces what was known.
+    on_model(primed, true);
+
     info!(
-        "health subscription established: sub_id={} max_int={}s (peer 0x{node_id:016X})",
+        "subscription established: sub_id={} max_int={}s {coverage:?} (peer 0x{node_id:016X})",
         established.subscription_id, established.max_int
     );
 
@@ -493,5 +712,73 @@ fn attr_paths(which: DiagSet) -> Vec<AttrPath> {
             AttrPath::from_gp(&GenericPath::new(Some(ROOT_ENDPOINT), Some(cluster), None))
         })
         .chain(fabric_paths(which))
+        .collect()
+}
+
+/// The paths a subscription of `coverage` takes: with a single application
+/// endpoint (`endpoints`), that endpoint and the health's diagnostics and
+/// fabrics, as many paths as any device must take; else every attribute.
+fn paths_of(which: DiagSet, coverage: Coverage, endpoints: &[u16]) -> Vec<AttrPath> {
+    let every = || alloc::vec![AttrPath::from_gp(&GenericPath::new(None, None, None))];
+
+    match (coverage, endpoints) {
+        (Coverage::Health, _) => attr_paths(which),
+        (Coverage::Application, [endpoint]) => {
+            let paths: Vec<AttrPath> =
+                core::iter::once(GenericPath::new(Some(*endpoint), None, None))
+                    .chain(
+                        health_cluster_ids(which).into_iter().map(|cluster| {
+                            GenericPath::new(Some(ROOT_ENDPOINT), Some(cluster), None)
+                        }),
+                    )
+                    .chain(core::iter::once(GenericPath::new(
+                        Some(ROOT_ENDPOINT),
+                        Some(OPERATIONAL_CREDENTIALS),
+                        Some(FABRICS),
+                    )))
+                    .map(|path| AttrPath::from_gp(&path))
+                    .collect();
+            if paths.len() <= 3 {
+                paths
+            } else {
+                every()
+            }
+        }
+        _ => every(),
+    }
+}
+
+/// The endpoints of a device but its root: its Descriptor's parts.
+async fn app_endpoints<C: Crypto>(
+    matter: &Matter<'_>,
+    crypto: C,
+    dev: DeviceHandle,
+) -> Result<Vec<u16>, Error> {
+    let reports = datamodel::read(
+        matter,
+        crypto,
+        dev,
+        Some(ROOT_ENDPOINT),
+        Some(DESCRIPTOR),
+        Some(PARTS_LIST),
+    )
+    .await?;
+
+    Ok(reports
+        .iter()
+        .filter_map(|r| r.value.as_ref().ok()?.as_array())
+        .flatten()
+        .filter_map(|e| e.as_u64().map(|e| e as u16))
+        .collect())
+}
+
+/// The attributes of `report`, decoded.
+fn decoded(report: &ReportDataResp<'_>) -> Vec<Decoded> {
+    report
+        .attr_reports
+        .iter()
+        .flat_map(|reports| reports.iter())
+        .filter_map(Result::ok)
+        .filter_map(datamodel::decode)
         .collect()
 }

@@ -142,7 +142,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
 }
 
 /// The model of what `reports` say, by endpoint and cluster.
-fn model(node_id: u64, reports: &[AttrReport]) -> DeviceModel {
+pub(super) fn model(node_id: u64, reports: &[AttrReport]) -> DeviceModel {
     let mut types = Types::default();
     let mut endpoints: BTreeMap<u16, BTreeMap<u32, Vec<&AttrReport>>> = BTreeMap::new();
 

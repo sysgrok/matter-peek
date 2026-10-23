@@ -284,6 +284,19 @@ enum Msg {
     SubscribeFailed(u64),
     /// Subscribe to a device (node_id) again, unless it is live meanwhile.
     Resubscribe(u64),
+    /// Attributes a device's (node_id) subscription reported, for its card and
+    /// the data model popup.
+    ModelEvent(u64, api::DeviceModel),
+    /// Turn a device's (node_id) card over: its controls, or its health.
+    Flip(u64),
+    /// Turn the cards shown over: all to their controls, or back if they all
+    /// show them.
+    FlipAll,
+    /// A control on the back of a device's (node_id) card.
+    CardAct(u64, datamodel::Action),
+    /// What a device (node_id) answered a control on its card with.
+    CardDone(u64, wire::Response),
+    CardFailed(u64, String),
     /// Edit the tag-input text for a given device (node_id).
     TagsInput(u64, String),
     /// Persist the edited tags for a given device.
@@ -397,6 +410,15 @@ struct App {
     sub_ws_gen: u32,
     /// A subscription WS is being opened.
     sub_ws_opening: bool,
+    /// The devices whose cards show their controls.
+    flipped: HashSet<u64>,
+    /// Their data models, as reported so far.
+    card_models: HashMap<u64, api::DeviceModel>,
+    /// Why the last control on a card failed (node_id → message).
+    card_errors: HashMap<u64, String>,
+    /// How much of each device's data model the subscription WS follows: the
+    /// application endpoints for a flipped card, everything for the popup.
+    model_scopes: HashMap<u64, api::ModelScope>,
     /// A neutral info notice (e.g. cancellation outcome).
     notice: Option<String>,
     /// The address we most recently commissioned successfully (and kept). Used to
@@ -506,6 +528,10 @@ impl Component for App {
             sub_ws: None,
             sub_ws_gen: 0,
             sub_ws_opening: false,
+            flipped: HashSet::new(),
+            card_models: HashMap::new(),
+            card_errors: HashMap::new(),
+            model_scopes: HashMap::new(),
             notice: None,
             last_commissioned_addr: None,
             confirm_recommission: false,
@@ -1247,6 +1273,12 @@ impl Component for App {
                 for node_id in nodes {
                     self.sub_send(&wire::Request::Subscribe { node_id });
                 }
+                for (node_id, scope) in &self.model_scopes {
+                    self.sub_send(&wire::Request::SubscribeModel {
+                        node_id: *node_id,
+                        scope: *scope,
+                    });
+                }
                 true
             }
             Msg::SubWsClosed(gen) => {
@@ -1261,7 +1293,7 @@ impl Component for App {
                 for sub in self.subs.values_mut() {
                     sub.conn = SubConn::Reconnecting;
                 }
-                if !self.subs.is_empty() {
+                if !self.subs.is_empty() || !self.model_scopes.is_empty() {
                     self.open_sub_ws(ctx, SUB_WS_RETRY_MS);
                 }
                 true
@@ -1287,6 +1319,65 @@ impl Component for App {
                     self.sub_send(&wire::Request::Subscribe { node_id });
                 }
                 false
+            }
+            Msg::ModelEvent(node_id, model) => self.model_event(node_id, model),
+            Msg::Flip(node_id) => {
+                if !self.flipped.remove(&node_id) {
+                    self.flipped.insert(node_id);
+                }
+                self.sync_model_scopes(ctx);
+                true
+            }
+            Msg::FlipAll => {
+                let shown: Vec<u64> = self
+                    .visible_devices()
+                    .iter()
+                    .map(|d| d.handle.node_id)
+                    .collect();
+                if shown.iter().all(|node_id| self.flipped.contains(node_id)) {
+                    self.flipped.clear();
+                } else {
+                    self.flipped.extend(shown);
+                }
+                self.sync_model_scopes(ctx);
+                true
+            }
+            Msg::CardAct(node_id, action) => {
+                self.card_errors.remove(&node_id);
+                self.start_device_op(node_id, false);
+                request_loop(
+                    ctx.link().clone(),
+                    datamodel::request(node_id, action),
+                    move |response| Msg::CardDone(node_id, response),
+                    move |e| Msg::CardFailed(node_id, e),
+                );
+                true
+            }
+            Msg::CardDone(node_id, response) => {
+                self.finish(Pending::Device {
+                    node_id,
+                    refresh: false,
+                });
+                match response {
+                    wire::Response::Model { model } => {
+                        if let Some(card) = self.card_models.get_mut(&node_id) {
+                            datamodel::absorb(card, model);
+                        }
+                    }
+                    wire::Response::Error { message } => {
+                        self.card_errors.insert(node_id, message);
+                    }
+                    _ => {}
+                }
+                true
+            }
+            Msg::CardFailed(node_id, e) => {
+                self.finish(Pending::Device {
+                    node_id,
+                    refresh: false,
+                });
+                self.card_errors.insert(node_id, e);
+                true
             }
             Msg::TagsInput(node_id, text) => {
                 self.tag_inputs.insert(node_id, text);
@@ -1657,6 +1748,40 @@ impl App {
         }
     }
 
+    /// Follow the data models the flipped cards and the popup show, and no
+    /// others, over the subscription WS.
+    fn sync_model_scopes(&mut self, ctx: &Context<Self>) {
+        let mut wanted: HashMap<u64, api::ModelScope> = self
+            .flipped
+            .iter()
+            .map(|node_id| (*node_id, api::ModelScope::Application))
+            .collect();
+        if let Some(view) = &self.model_view {
+            wanted.insert(view.node_id, api::ModelScope::All);
+        }
+
+        for (node_id, scope) in &wanted {
+            if self.model_scopes.get(node_id) != Some(scope) {
+                self.sub_send(&wire::Request::SubscribeModel {
+                    node_id: *node_id,
+                    scope: *scope,
+                });
+            }
+        }
+        for node_id in self.model_scopes.keys() {
+            if !wanted.contains_key(node_id) {
+                self.sub_send(&wire::Request::UnsubscribeModel { node_id: *node_id });
+            }
+        }
+        self.card_models.retain(|node_id, _| self.flipped.contains(node_id));
+        self.card_errors.retain(|node_id, _| self.flipped.contains(node_id));
+        self.model_scopes = wanted;
+
+        if !self.model_scopes.is_empty() {
+            self.open_sub_ws(ctx, 0);
+        }
+    }
+
     /// Open the persistent subscription WS after `delay_ms`, unless it is open
     /// or opening, spawning its reader (server frames → `Msg`) and writer (outbound requests) tasks. All
     /// live subscriptions share this one connection; it stays open while any
@@ -1719,6 +1844,9 @@ impl App {
                             wire::Event::OtaProgress { node_id, progress } => {
                                 link.send_message(Msg::OtaProgress(node_id, progress))
                             }
+                            wire::Event::Model { node_id, model } => {
+                                link.send_message(Msg::ModelEvent(node_id, model))
+                            }
                             wire::Event::Step { .. } | wire::Event::Chat { .. } => {}
                         },
                         // A Subscribe refused (its req_id is its device).
@@ -1744,6 +1872,10 @@ impl App {
     /// for a device that's no longer stored. Opens the persistent WS if needed.
     fn sync_subscriptions(&mut self, ctx: &Context<Self>) {
         let stored_ids: Vec<u64> = self.stored.iter().map(|d| d.handle.node_id).collect();
+        if self.flipped.iter().any(|node_id| !stored_ids.contains(node_id)) {
+            self.flipped.retain(|node_id| stored_ids.contains(node_id));
+            self.sync_model_scopes(ctx);
+        }
         if stored_ids.is_empty() {
             return;
         }
@@ -2186,6 +2318,7 @@ fn request_loop(
                     // this one-shot connection — ignore any that land here.
                     wire::Event::HealthReport { .. }
                     | wire::Event::SubscriptionState { .. }
+                    | wire::Event::Model { .. }
                     | wire::Event::OtaProgress { .. } => {}
                     wire::Event::Chat { chat_id, update } => {
                         link.send_message(Msg::Assistant(AssistantMsg::Update(chat_id, update)));
