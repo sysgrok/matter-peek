@@ -105,6 +105,8 @@ enum Pending {
         node_id: u64,
         refresh: bool,
     },
+    /// The devices the network advertises.
+    Advertised,
     /// The network popup of a device.
     Network(u64),
     /// The logs popup of a device.
@@ -228,6 +230,8 @@ enum Msg {
     ListDevices,
     /// Re-sync the device list with the devices on our fabric.
     Sync,
+    /// Look for the commissioned devices the network advertises.
+    LookAdvertised,
     /// Re-read a device's health now (one-shot) and update its card panel.
     Refresh(u64),
     Identify(u64),
@@ -348,6 +352,10 @@ struct App {
     discovered_ble: Vec<api::BleDevice>,
     /// The devices on our fabric.
     stored: Vec<api::DeviceInfo>,
+    /// The commissioned devices the network advertised, when last looked.
+    advertised: Option<Vec<api::AdvertisedDevice>>,
+    /// Looking again.
+    looking: bool,
     /// Per-device tag-input text (node_id → comma-separated edit buffer). Seeded
     /// from the device's current tags when the list arrives.
     tag_inputs: HashMap<u64, String>,
@@ -474,6 +482,8 @@ impl Component for App {
             discovered: Vec::new(),
             discovered_ble: Vec::new(),
             stored: Vec::new(),
+            advertised: None,
+            looking: false,
             tag_inputs: HashMap::new(),
             tag_filter: String::new(),
             steps: Vec::new(),
@@ -686,9 +696,13 @@ impl Component for App {
             }
             Msg::OtaProgress(node_id, progress) => {
                 self.ota_announcing.remove(&node_id);
+                let ended = self.ota_ends(node_id, &progress);
                 self.ota_status
                     .insert(node_id, ota_progress_text(&progress));
                 self.ota_progress.insert(node_id, progress);
+                if ended {
+                    self.relist(ctx);
+                }
                 true
             }
             Msg::OtaAnnounced(node_id, result) => {
@@ -709,6 +723,7 @@ impl Component for App {
                 };
 
                 // The running ones, and those this page shows already.
+                let mut ended = false;
                 for update in &updates {
                     let node_id = update.node_id;
                     if !update.in_progress() && !self.ota_progress.contains_key(&node_id) {
@@ -719,6 +734,7 @@ impl Component for App {
                         .get(&node_id)
                         .is_none_or(|shown| ota_stage(&update.progress) >= ota_stage(shown))
                     {
+                        ended |= self.ota_ends(node_id, &update.progress);
                         self.ota_status
                             .insert(node_id, ota_progress_text(&update.progress));
                         self.ota_progress.insert(node_id, update.progress.clone());
@@ -732,6 +748,9 @@ impl Component for App {
                 if updates.iter().any(api::OtaUpdateInfo::in_progress) {
                     self.ota_polling = true;
                     read_ota_updates(ctx.link().clone(), OTA_UPDATES_POLL_MS);
+                }
+                if ended {
+                    self.relist(ctx);
                 }
                 true
             }
@@ -930,6 +949,16 @@ impl Component for App {
                     wire::Request::ListDevices {
                         fabric: api::FabricRef::All,
                     },
+                );
+                true
+            }
+            Msg::LookAdvertised => {
+                self.looking = true;
+                self.error = None;
+                send_request(
+                    ctx.link().clone(),
+                    Pending::Advertised,
+                    wire::Request::AdvertisedDevices,
                 );
                 true
             }
@@ -1318,6 +1347,9 @@ impl Component for App {
                         // any that vanished).
                         self.set_devices(ctx, devices);
                     }
+                    wire::Response::AdvertisedDevices { devices } => {
+                        self.advertised = Some(devices);
+                    }
                     wire::Response::Peek { node_id, health } => {
                         // A Refresh result: merge the fresh read into the device's
                         // card panel so its values (uptime, heap, …) update in place.
@@ -1490,6 +1522,35 @@ impl Component for App {
 }
 
 impl App {
+    /// Whether `progress` ends the update of the device that this page shows
+    /// running.
+    fn ota_ends(&self, node_id: u64, progress: &api::OtaProgress) -> bool {
+        !progress.in_progress()
+            && !matches!(progress, api::OtaProgress::NotOffered)
+            && self
+                .ota_progress
+                .get(&node_id)
+                .is_some_and(api::OtaProgress::in_progress)
+    }
+
+    /// Read the device list again, unless that is under way: a device's
+    /// record changed.
+    fn relist(&mut self, ctx: &Context<Self>) {
+        if self.busy_stored {
+            return;
+        }
+
+        self.busy_stored = true;
+        self.loading_list = true;
+        send_request(
+            ctx.link().clone(),
+            Pending::List,
+            wire::Request::ListDevices {
+                fabric: api::FabricRef::All,
+            },
+        );
+    }
+
     /// Note an operation on a device, for its request.
     fn start_device_op(&mut self, node_id: u64, refresh: bool) -> Pending {
         self.device_ops.push((node_id, refresh));
@@ -1520,6 +1581,7 @@ impl App {
                 self.loading_list = false;
             }
             Pending::Sync => self.busy_stored = false,
+            Pending::Advertised => self.looking = false,
             Pending::Device { node_id, refresh } => {
                 if let Some(i) = self
                     .device_ops
@@ -2327,9 +2389,12 @@ fn send_ota_update(link: html::Scope<App>, node_id: u64, name: String) {
                 Ok(wire::ServerMsg::Event {
                     event: wire::Event::OtaProgress { node_id, progress },
                 }) => {
-                    let applied = matches!(progress, api::OtaProgress::Applied { .. });
+                    let ended = matches!(
+                        progress,
+                        api::OtaProgress::Applied { .. } | api::OtaProgress::Failed { .. }
+                    );
                     link.send_message(Msg::OtaProgress(node_id, progress));
-                    if applied {
+                    if ended {
                         return;
                     }
                 }
@@ -2361,6 +2426,7 @@ fn ota_progress_text(progress: &api::OtaProgress) -> String {
         api::OtaProgress::Applied { version } => {
             format!("Updated: runs version {}", display::hex_u32(*version))
         }
+        api::OtaProgress::Failed { reason } => format!("Not updated: {reason}"),
     }
 }
 
@@ -2370,7 +2436,9 @@ fn ota_stage(progress: &api::OtaProgress) -> u16 {
         api::OtaProgress::Offered { .. } => 0,
         api::OtaProgress::Downloading { percent } => 1 + *percent as u16,
         api::OtaProgress::Applying { .. } => 200,
-        api::OtaProgress::Applied { .. } | api::OtaProgress::NotOffered => 300,
+        api::OtaProgress::Applied { .. }
+        | api::OtaProgress::NotOffered
+        | api::OtaProgress::Failed { .. } => 300,
     }
 }
 

@@ -263,6 +263,28 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         }
     }
 
+    /// Note a fresh read of a listed device's identity.
+    pub(super) fn refresh_listed(&self, node_id: u64, ident: DeviceIdentity) {
+        if !ident.fingerprint.is_usable() {
+            return;
+        }
+
+        match self.update_record(node_id, |d| refresh_identity(d, ident.clone())) {
+            Ok(true) => {}
+            Ok(false) => {
+                if let Some(device) = self
+                    .transient
+                    .borrow_mut()
+                    .iter_mut()
+                    .find(|d| d.handle.node_id == node_id)
+                {
+                    refresh_identity(device, ident);
+                }
+            }
+            Err(e) => warn!("cannot note the identity of node 0x{node_id:016X}: {e:?}"),
+        }
+    }
+
     /// Apply `f` to the record of `node_id`; `false` if it has none.
     fn update_record(
         &self,

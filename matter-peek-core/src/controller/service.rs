@@ -52,6 +52,7 @@ use ota::{OtaFollower, TrackedUpdate, Upload};
 use watch::{SubJob, Watch};
 use window::OpenedWindow;
 
+mod advertised;
 mod commission;
 mod convert;
 mod devices;
@@ -120,6 +121,8 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     reports: Reports,
     /// Our OTA Provider.
     ota: OtaProvider<O, Box<dyn Fn(OtaEvent)>>,
+    /// What it tells of the updates, and what the service finds out itself.
+    ota_events: Rc<dyn Fn(OtaEvent)>,
     /// Who follows which OTA update.
     ota_followers: Rc<RefCell<Vec<OtaFollower>>>,
     /// The latest OTA update of each device, by node ID.
@@ -257,7 +260,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             | Op::OtaUploadEnd { .. }
             | Op::OtaUploadDiscard { .. }
             | Op::OtaDelete { .. } => return None,
-            Op::Discover { .. } => Vec::new(),
+            Op::Discover { .. } | Op::AdvertisedDevices(_) => Vec::new(),
             Op::Sync { .. } => self.sync_keys(),
             // The fabric must not go meanwhile.
             Op::Commission { fabric, .. }
@@ -327,6 +330,9 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                     .discover(discriminator, setup_code.as_deref(), max)
                     .await;
                 let _ = reply.send(found).await;
+            }
+            Op::AdvertisedDevices(reply) => {
+                let _ = reply.send(self.advertised_devices().await).await;
             }
             Op::ReadQrImage { image, reply } => {
                 let _ = reply.send(read_qr_image(&image)).await;
@@ -617,7 +623,12 @@ async fn run<'a, C, S, O, N, M>(
 
     let ota_followers = Rc::new(RefCell::new(Vec::new()));
     let ota_updates = Rc::new(RefCell::new(BTreeMap::new()));
-    let ota = OtaProvider::new(ota, ota::events(ota_followers.clone(), ota_updates.clone()));
+    let (apply_jobs, apply_jobs_rx) = async_channel::unbounded();
+    let ota_events = ota::events(ota_followers.clone(), ota_updates.clone(), apply_jobs);
+    let ota = OtaProvider::new(ota, {
+        let ota_events = ota_events.clone();
+        Box::new(move |event| ota_events(event)) as Box<dyn Fn(OtaEvent)>
+    });
 
     let (sub_jobs, sub_jobs_rx) = async_channel::unbounded();
 
@@ -638,6 +649,7 @@ async fn run<'a, C, S, O, N, M>(
         ota,
         ota_followers,
         ota_updates,
+        ota_events,
         windows: RefCell::new(BTreeMap::new()),
         uploads: RefCell::new(BTreeMap::new()),
         next_upload_id: Cell::new(1),
@@ -665,6 +677,7 @@ async fn run<'a, C, S, O, N, M>(
     let mut pump = pin!(matter.run(&crypto, send, recv, NoNetwork));
     let mut ops = pin!(ctx.run_ops(service, config.periodic_sync));
     let mut subs = pin!(ctx.run_subscriptions(sub_jobs_rx));
+    let mut applies = pin!(ctx.run_apply_jobs(apply_jobs_rx));
     // Operational resolves (re-addressing a listed device over CASE) need it;
     // without it the rest still works.
     let mut mdns = pin!(async {
@@ -676,10 +689,18 @@ async fn run<'a, C, S, O, N, M>(
     // What devices reach on us: our OTA Provider and the subscription reports.
     let mut node = pin!(ctx.controller.run_node(&ctx.reports, &ctx.ota));
 
-    match select4(&mut pump, &mut ops, &mut subs, select(&mut mdns, &mut node)).await {
+    match select4(
+        &mut pump,
+        &mut ops,
+        select(&mut subs, &mut applies),
+        select(&mut mdns, &mut node),
+    )
+    .await
+    {
         Either4::First(r) => error!("service: transport pump exited: {r:?}"),
         Either4::Second(()) => info!("service: every handle dropped, exiting"),
-        Either4::Third(()) => info!("service: subscription driver exited"),
+        Either4::Third(Either::First(())) => info!("service: subscription driver exited"),
+        Either4::Third(Either::Second(())) => info!("service: OTA apply driver exited"),
         Either4::Fourth(Either::First(())) => {}
         Either4::Fourth(Either::Second(r)) => error!("service: controller node exited: {r:?}"),
     }
@@ -709,6 +730,7 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
 
         match op {
             Op::Discover { reply, .. } => refuse(reply, error).await,
+            Op::AdvertisedDevices(reply) => refuse(reply, error).await,
             Op::ReadQrImage { reply, .. } => refuse(reply, error).await,
             Op::Commission { reply, .. } => refuse(reply, error).await,
             Op::ListDevices { reply, .. } | Op::Sync { reply, .. } => refuse(reply, error).await,

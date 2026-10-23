@@ -384,6 +384,28 @@ impl<'a, C: Crypto> Controller<'a, C> {
         crate::discovery::browse_fabric_with_running_backend(self.matter, fab_idx, None).await
     }
 
+    /// The nodes advertising on any fabric, ours or not: their compressed
+    /// fabric IDs and node IDs.
+    pub async fn browse_operational(&self) -> Result<Vec<(u64, u64)>, Error> {
+        crate::discovery::browse_operational_with_running_backend(self.matter, None, None).await
+    }
+
+    /// The addresses of node `node_id` of the fabric with
+    /// `compressed_fabric_id`, ours or not, best first.
+    pub async fn resolve_operational(
+        &self,
+        compressed_fabric_id: u64,
+        node_id: u64,
+    ) -> Result<Vec<Address>, Error> {
+        let addrs = self
+            .matter
+            .transport()
+            .resolve_operational_addrs(compressed_fabric_id, node_id)
+            .await?;
+
+        Ok(addrs.iter().copied().collect())
+    }
+
     /// Read a device's networking: its interfaces, the networks it knows, and
     /// the diagnostics of its network.
     pub async fn read_network(&self, dev: DeviceHandle) -> Result<crate::api::NetworkInfo, Error> {

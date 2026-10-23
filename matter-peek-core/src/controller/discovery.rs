@@ -1,5 +1,5 @@
 //! Discovering Matter devices on the local network via mDNS: the commissionable
-//! ones, and the ones on our fabric.
+//! ones, and the operational ones, of our fabrics or any.
 //!
 //! rs-matter's controller-side discovery is a rendezvous:
 //! [`Transport::browse`](rs_matter::transport::Transport::browse) places a browse
@@ -17,7 +17,7 @@ use log::{info, warn};
 
 use rs_matter::dm::NodeId;
 use rs_matter::error::Error;
-use rs_matter::transport::network::mdns::{CommissionableFilter, MdnsBrowseQuery};
+use rs_matter::transport::network::mdns::{CommissionableFilter, MdnsBrowseMatch, MdnsBrowseQuery};
 use rs_matter::transport::network::Address;
 use rs_matter::Matter;
 
@@ -48,7 +48,11 @@ pub async fn discover_all_with_running_backend(
     let mut ids = Vec::new();
     if let Err(e) = matter
         .transport()
-        .browse(&query, window_ms, |id| ids.push(id))
+        .browse(&query, window_ms, |found| {
+            if let MdnsBrowseMatch::Commissionable { id } = found {
+                ids.push(id);
+            }
+        })
         .await
     {
         warn!("discovery: browse failed: {e:?}");
@@ -99,6 +103,26 @@ pub async fn browse_fabric_with_running_backend(
         Ok::<_, Error>((fabric.compressed_fabric_id(), fabric.node_id()))
     })?;
 
+    let nodes =
+        browse_operational_with_running_backend(matter, Some(compressed_fabric_id), window_ms)
+            .await?;
+
+    Ok(nodes
+        .into_iter()
+        .map(|(_, node_id)| node_id)
+        .filter(|node_id| *node_id != own_node_id)
+        .collect())
+}
+
+/// The operational nodes advertising on the fabric with
+/// `compressed_fabric_id`, or on every fabric (ours or not) if `None`: their
+/// compressed fabric IDs and node IDs, for a host already running the mDNS
+/// backend.
+pub async fn browse_operational_with_running_backend(
+    matter: &Matter<'_>,
+    compressed_fabric_id: Option<u64>,
+    window_ms: Option<u32>,
+) -> Result<Vec<(u64, NodeId)>, Error> {
     let query = MdnsBrowseQuery::Operational {
         compressed_fabric_id,
     };
@@ -109,9 +133,13 @@ pub async fn browse_fabric_with_running_backend(
         .browse(
             &query,
             window_ms.unwrap_or(DEFAULT_BROWSE_WINDOW_MS),
-            |node_id| {
-                if node_id != own_node_id {
-                    nodes.push(node_id);
+            |found| {
+                if let MdnsBrowseMatch::Operational {
+                    compressed_fabric_id,
+                    node_id,
+                } = found
+                {
+                    nodes.push((compressed_fabric_id, node_id));
                 }
             },
         )

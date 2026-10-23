@@ -156,6 +156,40 @@ pub struct BleDevice {
     pub product_id: u16,
 }
 
+/// A device the local network advertises as commissioned (operational mDNS),
+/// with the fabrics it advertises on. One on no fabric of ours can only be
+/// commissioned by us once its controller opens a commissioning window on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AdvertisedDevice {
+    /// Its IP addresses, best first.
+    pub addresses: Vec<String>,
+    pub fabrics: Vec<AdvertisedFabric>,
+}
+
+impl AdvertisedDevice {
+    /// Whether it is on a fabric of ours.
+    pub fn ours(&self) -> bool {
+        self.fabrics.iter().any(|fabric| fabric.our_name.is_some())
+    }
+}
+
+/// A fabric a device advertises on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AdvertisedFabric {
+    /// The ID its devices advertise it by.
+    pub compressed_fabric_id: u64,
+    /// The device's node ID on it.
+    pub node_id: u64,
+    /// Our name for it, if it is ours.
+    pub our_name: Option<String>,
+    /// The vendor of the controller that put a device of ours on it too, if
+    /// one is, and the fabric's label, as that device has them.
+    pub vendor_id: Option<u16>,
+    pub label: Option<String>,
+}
+
 /// Identifies a commissioned device on our fabric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -491,6 +525,9 @@ pub enum OtaProgress {
     Applying { version: u32 },
     /// The device reports that it runs `version`.
     Applied { version: u32 },
+    /// The device was told to apply an update, but does not run it: `reason`
+    /// says what it did.
+    Failed { reason: String },
 }
 
 /// Whether a device's commissioning window is open, and how.

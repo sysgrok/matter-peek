@@ -81,6 +81,14 @@ enum Command {
         #[arg(long, default_value_t = 16)]
         max: u8,
     },
+    /// List the commissioned devices the network advertises, on our fabrics
+    /// or others'. One on none of ours needs its controller to open a
+    /// commissioning window for us.
+    Advertised {
+        /// Only those on no fabric of ours.
+        #[arg(long)]
+        others: bool,
+    },
     /// Read the setup code from a picture of a device's QR code (PNG or JPEG).
     Qr { image: PathBuf },
     /// Commission a device onto our fabric, over IP (--ip) or Bluetooth (--ble).
@@ -597,6 +605,25 @@ async fn run(cli: Cli) -> io::Result<bool> {
                 }
                 response => response.is_some(),
             })
+        }
+        Command::Advertised { others } => {
+            Ok(
+                match call(&conn, &out, wire::Request::AdvertisedDevices).await? {
+                    Some(wire::Response::AdvertisedDevices { mut devices }) if !out.json => {
+                        devices.retain(|d| !others || !d.ours());
+                        // Those to share with us first.
+                        devices.sort_by_key(api::AdvertisedDevice::ours);
+                        if devices.is_empty() {
+                            println!("No commissioned devices found.");
+                        }
+                        for d in devices {
+                            print_advertised(&d);
+                        }
+                        true
+                    }
+                    response => response.is_some(),
+                },
+            )
         }
         Command::Qr { image } => {
             let request = wire::Request::ReadQrImage {
@@ -1701,7 +1728,9 @@ async fn update(conn: &Connection, out: &Out, node_id: u64, name: String) -> io:
             &event,
             wire::Event::OtaProgress {
                 node_id: id,
-                progress: api::OtaProgress::Applied { .. } | api::OtaProgress::NotOffered,
+                progress: api::OtaProgress::Applied { .. }
+                    | api::OtaProgress::NotOffered
+                    | api::OtaProgress::Failed { .. },
             } if *id == node_id
         );
         out.event(&event);
@@ -2076,6 +2105,37 @@ fn threads_text(threads: &[api::ThreadMetric]) -> String {
     lines.join("\n")
 }
 
+/// A device the network advertises: its addresses, then its fabrics.
+fn print_advertised(d: &api::AdvertisedDevice) {
+    println!(
+        "{}{}",
+        d.addresses.join(", "),
+        if d.ours() {
+            ""
+        } else {
+            "  (not on our fabrics)"
+        }
+    );
+
+    for f in &d.fabrics {
+        let whose = match (&f.our_name, f.vendor_id) {
+            (Some(name), _) => format!("ours: {name}"),
+            (None, Some(vid)) => format!("by {}", display::vendor_label(vid, None)),
+            (None, None) => "unknown controller".to_string(),
+        };
+        let label = f
+            .label
+            .as_ref()
+            .map(|label| format!(", \"{label}\""))
+            .unwrap_or_default();
+        println!(
+            "  fabric {:016X}  node {}  {whose}{label}",
+            f.compressed_fabric_id,
+            display::hex_u64(f.node_id)
+        );
+    }
+}
+
 fn ota_progress_text(progress: &api::OtaProgress) -> String {
     match progress {
         api::OtaProgress::Offered { name } => format!("Offered {name}"),
@@ -2087,6 +2147,7 @@ fn ota_progress_text(progress: &api::OtaProgress) -> String {
         api::OtaProgress::Applied { version } => {
             format!("Updated: runs version {}", display::hex_u32(*version))
         }
+        api::OtaProgress::Failed { reason } => format!("Not updated: {reason}"),
     }
 }
 

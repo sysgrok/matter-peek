@@ -715,3 +715,17 @@ pre.log-text { max-height: 70vh; margin: 0; padding: .75rem 0; overflow: auto; b
   .fabric-switch { max-width: 9.5rem; }
   .fabric-menu { left: auto; right: 0; }
 }
+
+.advertised { margin-top: 2.25rem; }
+.advertised-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: .75rem 1rem; margin-bottom: 1rem; }
+.advertised-intro { flex: 1; min-width: min(100%, 18rem); }
+.advertised-title { font-size: 1.15rem; font-weight: 700; color: var(--bulma-text-strong); }
+.advertised-text { max-width: 42rem; font-size: .88rem; color: var(--bulma-text-weak); }
+.advertised-none { font-size: .9rem; color: var(--bulma-text-weak); }
+.advertised-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: .85rem; }
+.advertised-card { display: flex; align-items: flex-start; gap: .8rem; padding: .9rem 1rem; border: 1px dashed var(--bulma-border); border-radius: var(--radius-card); background: var(--bulma-scheme-main); }
+.advertised-body { flex: 1; min-width: 0; }
+.advertised-who { font-weight: 600; color: var(--bulma-text-strong); }
+.advertised-addr { font-size: .8rem; overflow-wrap: anywhere; }
+.advertised-more { color: var(--bulma-text-weak); }
+.advertised-fabrics { margin-top: .35rem; font-size: .78rem; color: var(--bulma-text-weak); overflow-wrap: anywhere; }

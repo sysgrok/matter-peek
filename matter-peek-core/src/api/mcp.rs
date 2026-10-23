@@ -199,6 +199,20 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
             }),
         ),
         tool(
+            "advertised_devices",
+            "List the commissioned Matter devices the local network advertises \
+             (operational mDNS), on our fabrics or other controllers' (Google, \
+             Apple, Home Assistant, ...), one entry per device: its addresses \
+             and, per fabric, the device's node id on it, our name for the \
+             fabric if it is ours, and the vendor and label of its controller \
+             when a device of ours is on that fabric too. A device with ours \
+             false can be commissioned by us only once its controller opens a \
+             commissioning window on it (in that controller's app: share, or \
+             pair with another app); nothing else can be read from it. Takes a \
+             few seconds.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
             "list_devices",
             "List the devices on a fabric of ours (the default one unless \
              `fabric` names another, or all), with the fabric they are on, \
@@ -815,6 +829,7 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
                 .map(str::to_string),
             max: args.get("max").and_then(Value::as_u64).unwrap_or(16) as u8,
         },
+        "advertised_devices" => wire::Request::AdvertisedDevices,
         "list_devices" => wire::Request::ListDevices {
             fabric: arg_fabric(args),
         },
@@ -1137,6 +1152,18 @@ fn labelled(response: &wire::Response) -> Value {
             for (d, v) in ble_devices.iter().zip(entries(&mut value, "ble_devices")) {
                 v["vendor"] = json!(display::vendor_label(d.vendor_id, None));
                 v["product"] = json!(display::product_label(d.vendor_id, d.product_id, None));
+            }
+        }
+        wire::Response::AdvertisedDevices { devices } => {
+            for (d, v) in devices.iter().zip(entries(&mut value, "devices")) {
+                v["ours"] = json!(d.ours());
+                for (f, v) in d.fabrics.iter().zip(entries(v, "fabrics")) {
+                    v["compressed_fabric_id"] = json!(display::hex_u64(f.compressed_fabric_id));
+                    v["node_id"] = json!(display::hex_u64(f.node_id));
+                    if let Some(vid) = f.vendor_id {
+                        v["vendor"] = json!(display::vendor_label(vid, None));
+                    }
+                }
             }
         }
         wire::Response::Fabrics { fabrics } => {

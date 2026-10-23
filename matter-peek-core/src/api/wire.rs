@@ -87,6 +87,9 @@ pub enum Request {
         setup_code: Option<String>,
         max: u8,
     },
+    /// See `MatterPeek::advertised_devices`. Answered with
+    /// [`Response::AdvertisedDevices`].
+    AdvertisedDevices,
     /// See `MatterPeek::list_devices`. Answered with [`Response::Devices`].
     ListDevices {
         #[serde(default)]
@@ -275,6 +278,9 @@ pub enum Response {
         devices: Vec<DeviceInfo>,
         #[serde(default)]
         notice: Option<String>,
+    },
+    AdvertisedDevices {
+        devices: Vec<AdvertisedDevice>,
     },
     Peek {
         node_id: u64,

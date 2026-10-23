@@ -2,7 +2,6 @@
 
 use core::cell::RefCell;
 
-use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
@@ -10,7 +9,10 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use embassy_time::{Duration, Instant};
+use embassy_futures::select::{select, Either};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
+
+use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use log::{info, warn};
 
@@ -18,13 +20,23 @@ use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::ota_prov::OtaRequestorId;
 use rs_matter::persist::KvBlobStore;
 
-use crate::api::{OtaImageInfo, OtaListener, OtaProgress, OtaUpdateInfo, PeekError};
+use crate::api::{display, OtaImageInfo, OtaListener, OtaProgress, OtaUpdateInfo, PeekError};
+use crate::model::{DeviceHandle, DiagSet};
 use crate::ota::{OtaEvent, OtaImageStore, OtaVerifier};
 
 use super::{convert, failed, Ctx};
 
 /// The largest upload chunk taken.
 const MAX_UPLOAD_CHUNK_LEN: usize = 4 * 1024 * 1024;
+
+/// How long a device told to apply an update may take to restart with it.
+const APPLY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// How often such a device is looked at meanwhile.
+const APPLY_POLL: Duration = Duration::from_secs(15);
+
+/// How long one look may take.
+const APPLY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An OTA image file being uploaded in chunks: written as it arrives, and
 /// checked as it is.
@@ -53,6 +65,13 @@ pub(super) struct TrackedUpdate {
     size: Option<u64>,
     started: Instant,
     last: Instant,
+}
+
+/// A device told to apply `version`, at `since`: see [`Ctx::follow_apply`].
+pub(super) struct ApplyJob {
+    node: OtaRequestorId,
+    version: u32,
+    since: Instant,
 }
 
 impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
@@ -250,15 +269,144 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             .await
             .map_err(|e| failed("cannot announce us to the device", e))
     }
+
+    /// Follow the devices told to apply an update, taking new ones from
+    /// `jobs`, until it closes.
+    pub(super) async fn run_apply_jobs(&self, jobs: async_channel::Receiver<ApplyJob>) {
+        let mut running = FuturesUnordered::new();
+
+        loop {
+            if running.is_empty() {
+                // An empty `FuturesUnordered` is ready at once (with `None`).
+                match jobs.recv().await {
+                    Ok(job) => running.push(self.follow_apply(job)),
+                    Err(_) => return,
+                }
+            } else {
+                match select(jobs.recv(), running.next()).await {
+                    Either::First(Ok(job)) => running.push(self.follow_apply(job)),
+                    Either::First(Err(_)) => return,
+                    Either::Second(_) => {}
+                }
+            }
+        }
+    }
+
+    /// Follow a device told to apply an update: once it restarts, it runs the
+    /// update's version, or the update failed. A device need not say it
+    /// applied one, nor ever say that it did not. Its record is refreshed too.
+    async fn follow_apply(&self, job: ApplyJob) {
+        let ApplyJob {
+            node,
+            version,
+            since,
+        } = job;
+        let handle = DeviceHandle {
+            fabric_index: node.fab_idx,
+            node_id: node.node_id,
+        };
+
+        loop {
+            Timer::after(APPLY_POLL).await;
+
+            let progress = self
+                .ota_updates
+                .borrow()
+                .get(&node.node_id)
+                .map(|update| update.progress.clone());
+            match progress {
+                Some(OtaProgress::Applying { version: applying }) if applying == version => {}
+                // As the device said.
+                Some(OtaProgress::Applied { .. }) => {
+                    self.refresh_identity_of(handle).await;
+                    return;
+                }
+                // Another update since.
+                _ => return,
+            }
+
+            if Instant::now() - since > APPLY_TIMEOUT {
+                (self.ota_events)(OtaEvent::Failed {
+                    node,
+                    reason: format!(
+                        "the device did not restart with version {} within {} min",
+                        display::hex_u32(version),
+                        APPLY_TIMEOUT.as_secs() / 60
+                    ),
+                });
+                return;
+            }
+
+            // Up for less than since then: it restarted.
+            let health = with_timeout(
+                APPLY_READ_TIMEOUT,
+                self.controller.read_health(handle, DiagSet::LIVE),
+            )
+            .await;
+            let Some(up_secs) = health
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|health| health.general?.up_time_secs)
+            else {
+                continue;
+            };
+            if Duration::from_secs(up_secs) >= Instant::now() - since {
+                continue;
+            }
+
+            let Some(running) = self.refresh_identity_of(handle).await else {
+                continue;
+            };
+
+            (self.ota_events)(if running == version {
+                OtaEvent::Applied { node, version }
+            } else {
+                OtaEvent::Failed {
+                    node,
+                    reason: format!(
+                        "the device restarted with version {} still, not {}",
+                        display::hex_u32(running),
+                        display::hex_u32(version)
+                    ),
+                }
+            });
+            return;
+        }
+    }
+
+    /// Read a device's identity afresh into its listing; answers the version
+    /// it runs.
+    async fn refresh_identity_of(&self, handle: DeviceHandle) -> Option<u32> {
+        let ident = with_timeout(APPLY_READ_TIMEOUT, self.controller.read_basic_info(handle))
+            .await
+            .ok()?;
+        let running = ident.fingerprint.software_version?;
+
+        self.refresh_listed(handle.node_id, ident);
+
+        Some(running)
+    }
 }
 
 /// Hand each OTA event to the followers of that update, and track it; an
-/// update that ended loses its followers.
+/// update that ended loses its followers. A device told to apply an update goes
+/// to `apply_jobs`, to see whether it does.
 pub(super) fn events(
     followers: Rc<RefCell<Vec<OtaFollower>>>,
     updates: Rc<RefCell<BTreeMap<u64, TrackedUpdate>>>,
-) -> Box<dyn Fn(OtaEvent)> {
-    Box::new(move |event| {
+    apply_jobs: async_channel::Sender<ApplyJob>,
+) -> Rc<dyn Fn(OtaEvent)> {
+    Rc::new(move |event| {
+        let event = not_applied(&updates.borrow(), event);
+
+        if let OtaEvent::Applying { node, version } = &event {
+            let _ = apply_jobs.try_send(ApplyJob {
+                node: *node,
+                version: *version,
+                since: Instant::now(),
+            });
+        }
+
         track(&mut updates.borrow_mut(), &event);
 
         let mut followers = followers.borrow_mut();
@@ -287,6 +435,9 @@ pub(super) fn events(
             OtaEvent::Applied { node, version } => {
                 (Some(node.node_id), None, OtaProgress::Applied { version })
             }
+            OtaEvent::Failed { node, reason } => {
+                (Some(node.node_id), None, OtaProgress::Failed { reason })
+            }
         };
 
         for follower in followers.iter() {
@@ -302,12 +453,36 @@ pub(super) fn events(
             }
         }
 
-        if let (Some(node_id), OtaProgress::Applied { .. } | OtaProgress::NotOffered) =
-            (node_id, &progress)
+        if let (
+            Some(node_id),
+            OtaProgress::Applied { .. } | OtaProgress::NotOffered | OtaProgress::Failed { .. },
+        ) = (node_id, &progress)
         {
             followers.retain(|follower| follower.node_id != node_id);
         }
     })
+}
+
+/// `event`, or a failure if it says a device applying an update runs another
+/// version.
+fn not_applied(updates: &BTreeMap<u64, TrackedUpdate>, event: OtaEvent) -> OtaEvent {
+    let OtaEvent::Applied { node, version } = event else {
+        return event;
+    };
+
+    match updates.get(&node.node_id).map(|update| &update.progress) {
+        Some(OtaProgress::Applying { version: applying }) if *applying != version => {
+            OtaEvent::Failed {
+                node,
+                reason: format!(
+                    "the device runs version {}, not {}",
+                    display::hex_u32(version),
+                    display::hex_u32(*applying)
+                ),
+            }
+        }
+        _ => OtaEvent::Applied { node, version },
+    }
 }
 
 fn no_upload(id: u32) -> PeekError {
@@ -385,6 +560,14 @@ fn track(updates: &mut BTreeMap<u64, TrackedUpdate>, event: &OtaEvent) {
             update.progress = progress;
             update.last = now;
         }
+        OtaEvent::Failed { node, reason } => {
+            if let Some(update) = updates.get_mut(&node.node_id) {
+                update.progress = OtaProgress::Failed {
+                    reason: reason.clone(),
+                };
+                update.last = now;
+            }
+        }
     }
 }
 
@@ -443,6 +626,55 @@ mod tests {
         );
         assert_eq!(updates[&7].progress, OtaProgress::Applied { version: 257 });
         assert_eq!(updates[&7].name.as_deref(), Some(IMAGE));
+    }
+
+    #[test]
+    fn a_device_reporting_another_version_failed_its_update() {
+        let mut updates = BTreeMap::new();
+        track(
+            &mut updates,
+            &OtaEvent::Applying {
+                node: node(7),
+                version: 0x0001_06FF,
+            },
+        );
+
+        let event = not_applied(
+            &updates,
+            OtaEvent::Applied {
+                node: node(7),
+                version: 0x0001_05FF,
+            },
+        );
+        assert!(matches!(event, OtaEvent::Failed { .. }));
+
+        track(&mut updates, &event);
+        assert!(matches!(updates[&7].progress, OtaProgress::Failed { .. }));
+        assert!(!updates[&7].progress.in_progress());
+
+        // The version it was told to apply is an update applied.
+        assert!(matches!(
+            not_applied(
+                &BTreeMap::from([(
+                    7,
+                    TrackedUpdate {
+                        name: None,
+                        progress: OtaProgress::Applying {
+                            version: 0x0001_06FF
+                        },
+                        downloaded: None,
+                        size: None,
+                        started: Instant::now(),
+                        last: Instant::now(),
+                    }
+                )]),
+                OtaEvent::Applied {
+                    node: node(7),
+                    version: 0x0001_06FF,
+                },
+            ),
+            OtaEvent::Applied { .. }
+        ));
     }
 
     #[test]

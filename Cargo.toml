@@ -47,8 +47,8 @@ nix = { version = "0.30", features = ["net"] }
 # `main`: `Transport::browse`, the OTA Provider changes and the Commissioner's
 # PASE session reuse.
 [patch.crates-io]
-#rs-matter = { path = "../rs-matter/rs-matter" }
-rs-matter = { git = "https://github.com/project-chip/rs-matter" }
+rs-matter = { path = "../rs-matter/rs-matter" }
+#rs-matter = { git = "https://github.com/project-chip/rs-matter" }
 
 # `--profile dist`: the executable to hand out, as small as it gets without
 # slowing the crypto down much (static x86_64: 16.7 MB as `release`, 10.9 MB;

@@ -78,7 +78,7 @@ controller serves the CLI, the MCP server and mobile apps.
 
 | Area | Methods |
 |---|---|
-| Commissioning | `commission` (IP or BLE, network credentials, `remember`, a progress listener), `cancel_commission`, `read_qr_image`, `discover` (mDNS + BLE) |
+| Commissioning | `commission` (IP or BLE, network credentials, `remember`, a progress listener), `cancel_commission`, `read_qr_image`, `discover` (mDNS + BLE), `advertised_devices` (the commissioned devices on the network, on our fabrics or others', grouped by device) |
 | Device list | `list_devices`, `sync`, `remember`, `set_tags`, `decommission` |
 | Health | `peek_device` (one-shot: also its heap, and the threads (tasks) of its software and their stacks, where it reports them), `subscribe` (live: General Diagnostics (uptime, reboots, operating hours) and the fabrics the device is on; returns a `Subscription`, which stops when dropped) |
 | Thread | `read_thread_mesh`: networks, nodes, links and findings, from our Thread devices' tables and the LAN's MeshCoP / Matter adverts |
@@ -219,6 +219,12 @@ of it is private to `core`.
   ConnectNetwork answer falls through to CASE, which decides.
 - Discovery lists only devices in commissioning mode (mDNS `CM` ≠ 0), plus
   commissionable BLE advertisements.
+- `advertised_devices` browses `_matter._tcp` across all fabrics, resolves each
+  node and groups the nodes sharing an address into one device. A foreign
+  fabric is named (its controller's vendor, its label) when a device of ours is
+  on it too: the compressed fabric ID follows from the root key and fabric ID in
+  that device's Fabrics list. Nothing more can be read from a device not on our
+  fabrics.
 
 ### Health subscriptions
 - One subscription per device, shared by all its listeners; a late one gets
@@ -422,7 +428,8 @@ its own platform pieces (e.g. `Builtin` mDNS over its multicast socket), plus an
 inventory with remember, tags and sync; one-shot and live health; diagnostic
 logs; identify; OTA Provider and updates; decommission; a device's networking
 and changes to its networks; the Thread mesh; several fabrics of our own; a
-device's fabrics, and removing another controller's; sharing a device through
+device's fabrics, and removing another controller's; the devices on other
+controllers' fabrics; sharing a device through
 an enhanced commissioning window; a time source for our devices, and their
 clocks read and set; web UI, CLI and MCP on one API, in one executable; the API in `core` (`MatterPeek`), exported over UniFFI.
 

@@ -13,7 +13,7 @@ use rs_matter::crypto::Crypto;
 use rs_matter::persist::KvBlobStore;
 use rs_matter::utils::sync::Notification;
 
-use crate::api::{DeviceHealth, HealthListener, PeekError, SubscriptionState};
+use crate::api::{DeviceFabric, DeviceHealth, HealthListener, PeekError, SubscriptionState};
 use crate::model::{DeviceHandle, DiagSet};
 use crate::ota::OtaImageStore;
 
@@ -35,6 +35,11 @@ pub(super) struct Watch {
 }
 
 impl Watch {
+    /// The fabrics the device reported being on, so far.
+    pub(super) fn fabrics(&self) -> &[DeviceFabric] {
+        self.health.fabrics.as_deref().unwrap_or_default()
+    }
+
     fn report(&mut self, node_id: u64, health: DeviceHealth) {
         self.reports += 1;
         self.health.merge(health.clone());

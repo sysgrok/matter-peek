@@ -80,6 +80,13 @@ impl MatterPeek {
         .await
     }
 
+    /// The commissioned devices the network advertises, on our fabrics or
+    /// others'. Those on none of ours are commissioned by other controllers,
+    /// which have to open a commissioning window on them for us.
+    pub async fn advertised_devices(&self) -> Result<Vec<AdvertisedDevice>, PeekError> {
+        self.call(Op::AdvertisedDevices).await
+    }
+
     /// Read the setup code out of a picture of a device's QR code (a PNG or
     /// JPEG file).
     pub async fn read_qr_image(&self, image: Vec<u8>) -> Result<String, PeekError> {
@@ -580,6 +587,7 @@ pub(crate) enum Op {
         max: u8,
         reply: Reply<Discovered>,
     },
+    AdvertisedDevices(Reply<Vec<AdvertisedDevice>>),
     ReadQrImage {
         image: Vec<u8>,
         reply: Reply<String>,

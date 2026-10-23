@@ -187,6 +187,12 @@ pub enum OtaEvent {
     Applying { node: OtaRequestorId, version: u32 },
     /// `node` reports that it runs `version` now.
     Applied { node: OtaRequestorId, version: u32 },
+    /// `node` was told to apply its update, but does not run it: `reason`
+    /// says what it did.
+    Failed {
+        node: OtaRequestorId,
+        reason: String,
+    },
 }
 
 /// The OTA Provider registry: offers the images of an [`OtaStore`] to the nodes

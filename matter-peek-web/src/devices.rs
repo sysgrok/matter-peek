@@ -118,12 +118,57 @@ impl App {
                 </div>
             }
         };
+        let body = html! {
+            <>
+                { body }
+                { self.view_advertised(link) }
+            </>
+        };
 
         html! {
             <>
                 { ui::page_header("Devices", subtitle, actions) }
                 { body }
             </>
+        }
+    }
+
+    /// The devices the network advertises on other controllers' fabrics
+    /// only, once looked for.
+    fn view_advertised(&self, link: &Scope<Self>) -> Html {
+        let others = self
+            .advertised
+            .as_ref()
+            .map(|all| all.iter().filter(|d| !d.ours()).collect::<Vec<_>>());
+
+        html! {
+            <section class="advertised">
+                <div class="advertised-head">
+                    <div class="advertised-intro">
+                        <h2 class="advertised-title">{ "On other fabrics only" }</h2>
+                        <p class="advertised-text">
+                            { "Devices commissioned by other controllers. To add one, open a \
+                               commissioning window on it in its controller's app (share it, or \
+                               pair it with another app), then commission it here with the code \
+                               shown." }
+                        </p>
+                    </div>
+                    { ui::icon_button(Icon::Radar, "Look", classes!("is-soft", self.looking.then_some("is-loading")),
+                        self.looking, Some("Browse the network for commissioned devices"),
+                        link.callback(|_| Msg::LookAdvertised)) }
+                </div>
+                if let Some(others) = others {
+                    if others.is_empty() {
+                        <p class="advertised-none">
+                            { "None: every commissioned device on the network is on a fabric of ours." }
+                        </p>
+                    } else {
+                        <div class="advertised-grid">
+                            { for others.into_iter().map(view_advertised_device) }
+                        </div>
+                    }
+                }
+            </section>
         }
     }
 
@@ -637,5 +682,48 @@ fn view_log(logs: &LogsView) -> Html {
             </div>
             { body }
         </div>
+    }
+}
+
+/// A device on other controllers' fabrics: who has it, as far as our devices
+/// tell, its address and its fabrics.
+fn view_advertised_device(d: &api::AdvertisedDevice) -> Html {
+    let mut owners: Vec<String> = d
+        .fabrics
+        .iter()
+        .map(|f| match f.vendor_id {
+            Some(vid) => display::vendor_label(vid, None),
+            None => "An unknown controller".into(),
+        })
+        .collect();
+    owners.dedup();
+
+    let address = d.addresses.first().cloned().unwrap_or_default();
+    let more = d.addresses.len().saturating_sub(1);
+
+    html! {
+        <article class="advertised-card">
+            <span class="tile-icon is-other">{ icon(Icon::Chip, 20) }</span>
+            <div class="advertised-body">
+                <p class="advertised-who">{ owners.join(", ") }</p>
+                <p class="advertised-addr mono" title={d.addresses.join("\n")}>
+                    { address }
+                    if more > 0 {
+                        <span class="advertised-more">{ format!(" +{more}") }</span>
+                    }
+                </p>
+                <ul class="advertised-fabrics">
+                    { for d.fabrics.iter().map(|f| html! {
+                        <li>
+                            <span class="mono">{ format!("{:016X}", f.compressed_fabric_id) }</span>
+                            { format!(" · node {}", display::hex_u64(f.node_id)) }
+                            if let Some(label) = &f.label {
+                                { format!(" · “{label}”") }
+                            }
+                        </li>
+                    }) }
+                </ul>
+            </div>
+        </article>
     }
 }
