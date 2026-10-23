@@ -137,7 +137,10 @@ unused MCP layer is left out by the linker.
 - the mDNS backend (permanently, for operational resolves),
 - our own node (OTA Provider, time source, BDX, inbound subscription
   reports, CASE for devices that reach us),
-- the operations (one at a time, plus a periodic sync),
+- the operations (side by side, plus a periodic sync): those without device
+  I/O are answered at once; the others queue, in arrival order, on read/write
+  locks of the device, the fabric or the sync they use. One commission runs at
+  a time; another is refused,
 - the subscriptions (detached, so they never block operations).
 
 The service is `no_std` and generic over what the host provides (`api::platform`):
@@ -551,7 +554,5 @@ far as `ICACCSRRequest`.
   the flows fall back rather than trust them.
 - **Fabric slots**: the orphan sweep reclaims ours; clearing the store without
   decommissioning still strands them on devices that are offline at the time.
-- **Serial operations**: the service runs one operation at a time, so a
-  commission (up to minutes over BLE) holds up the others.
 - **UniFFI**: the bindings generate, but no app has used them yet; listener
   calls run on the controller's thread and must return quickly.

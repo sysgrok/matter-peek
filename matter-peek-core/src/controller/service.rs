@@ -4,14 +4,16 @@
 //! One task, for the controller's lifetime: it loads the persisted controller
 //! fabric, ensures the CA, then runs side by side the transport pump, the mDNS
 //! backend (for operational resolves), our own node (OTA Provider, BDX,
-//! subscription reports), the operations (one at a time, plus a periodic sync)
-//! and the health subscriptions (detached, so they never block operations).
+//! subscription reports), the operations (side by side unless they conflict,
+//! see [`locks`], plus a periodic sync) and the health subscriptions (detached,
+//! so they never block operations).
 //!
 //! It is `no_std`: the host hands it the stack, the crypto, the KV store, the OTA
 //! image store and the UDP network (see [`crate::host`] for this host's).
 
 use core::cell::{Cell, RefCell};
-use core::pin::pin;
+use core::future::Future;
+use core::pin::{pin, Pin};
 use core::sync::atomic::AtomicBool;
 
 use alloc::boxed::Box;
@@ -22,8 +24,10 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use embassy_futures::select::{select, select4, Either, Either4};
+use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_time::{Duration, Instant, Timer};
+
+use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use log::{error, info, warn};
 
@@ -33,7 +37,7 @@ use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::{NetworkReceive, NetworkSend, NoNetwork};
 use rs_matter::Matter;
 
-use crate::api::{BorderRouter, Op, PeekConfig, PeekError, Service};
+use crate::api::{BorderRouter, FabricRef, Op, PeekConfig, PeekError, Service};
 use crate::fabrics::OurFabrics;
 use crate::matter::Controller;
 use crate::mdns::Mdns;
@@ -43,6 +47,7 @@ use crate::ota::{OtaEvent, OtaImageStore, OtaProvider};
 use crate::persist::{ControllerStore, KvBuf};
 use crate::subscribe::Reports;
 
+use locks::{Key, Locks, Mode};
 use ota::{OtaFollower, TrackedUpdate, Upload};
 use watch::{SubJob, Watch};
 use window::OpenedWindow;
@@ -51,6 +56,7 @@ mod commission;
 mod convert;
 mod devices;
 mod fabrics;
+mod locks;
 mod mesh;
 mod netconfig;
 mod ota;
@@ -85,6 +91,9 @@ pub struct Platform<'a, C, S, O, N, M> {
     pub mdns: M,
 }
 
+/// A started operation, borrowing the service's state.
+type Run<'r> = Pin<Box<dyn Future<Output = ()> + 'r>>;
+
 /// The state every operation works on.
 struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     matter: &'a Matter<'a>,
@@ -93,6 +102,13 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     /// Our fabrics, and the default.
     fabrics: RefCell<OurFabrics>,
     store: ControllerStore<'a, S>,
+    /// Which operations may run now.
+    locks: Locks,
+    /// Set while a commission runs: one at a time.
+    commissioning: Cell<bool>,
+    /// The node ID the running commission gives its device, which only the
+    /// commission lists.
+    commissioned_node: Cell<Option<u64>>,
     /// Set by `MatterPeek::cancel_commission`, checked by the commission.
     cancel: Arc<AtomicBool>,
     /// The live health subscriptions, by device, each shared by its listeners.
@@ -132,8 +148,8 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
 }
 
 impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
-    /// Run the operations one at a time, syncing periodically if asked to,
-    /// until every handle is dropped.
+    /// Run the operations, side by side unless they conflict (see [`Locks`]),
+    /// syncing periodically if asked to, until every handle is dropped.
     async fn run_ops(&self, service: Service, periodic_sync: bool) {
         let after = |secs| {
             if periodic_sync {
@@ -144,26 +160,157 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         };
 
         let mut next_sync = after(FIRST_SYNC_DELAY_SECS);
+        let mut running = FuturesUnordered::<Run<'_>>::new();
 
         loop {
-            match select(service.ops.recv(), Timer::at(next_sync)).await {
-                Either::First(Ok(op)) => {
+            let done = async {
+                // An empty `FuturesUnordered` is ready at once (with `None`).
+                if running.is_empty() {
+                    core::future::pending::<()>().await;
+                }
+                running.next().await;
+            };
+
+            match select3(service.ops.recv(), Timer::at(next_sync), done).await {
+                Either3::First(Ok(op)) => {
                     if matches!(op, Op::Sync { .. }) {
                         next_sync = after(SYNC_PERIOD_SECS);
                     }
 
-                    self.run_op(op).await;
-                }
-                Either::First(Err(_)) => return,
-                Either::Second(()) => {
-                    if let Err(e) = self.sync_devices(false).await {
-                        warn!("sync failed: {e:?}");
+                    if let Some(run) = self.start(op).await {
+                        running.push(run);
                     }
-
-                    next_sync = after(SYNC_PERIOD_SECS);
                 }
+                Either3::First(Err(_)) => return,
+                Either3::Second(()) => {
+                    next_sync = after(SYNC_PERIOD_SECS);
+
+                    // A sync queued already does.
+                    if !self.locks.busy(Key::Sync) {
+                        let guard = self.locks.queue(&self.sync_keys());
+                        running.push(Box::pin(async move {
+                            guard.ready().await;
+                            if let Err(e) = self.sync_devices(false).await {
+                                warn!("sync failed: {e:?}");
+                            }
+                        }));
+                    }
+                }
+                Either3::Third(()) => {}
             }
         }
+    }
+
+    /// Start `op`. One without device I/O is answered at once; any other comes
+    /// back, to run once the [`Locks`] let it.
+    async fn start(&self, op: Op) -> Option<Run<'_>> {
+        let op = match op {
+            Op::Commission { reply, .. } if self.commissioning.get() => {
+                let busy =
+                    PeekError::failed("another commission is running: try again once it is done");
+                let _ = reply.send(Err(busy)).await;
+                return None;
+            }
+            op => op,
+        };
+
+        let Some(keys) = self.keys(&op) else {
+            self.run_op(op).await;
+            return None;
+        };
+
+        let commission = matches!(op, Op::Commission { .. });
+        if commission {
+            self.commissioning.set(true);
+        }
+
+        let guard = self.locks.queue(&keys);
+
+        Some(Box::pin(async move {
+            guard.ready().await;
+            self.run_op(op).await;
+
+            if commission {
+                self.commissioning.set(false);
+                self.commissioned_node.set(None);
+            }
+        }))
+    }
+
+    /// The keys `op` runs under, or `None` if it does no device I/O.
+    fn keys(&self, op: &Op) -> Option<Vec<(Key, Mode)>> {
+        let keys = match op {
+            Op::ReadQrImage { .. }
+            | Op::Fabrics(_)
+            | Op::CreateFabric { .. }
+            | Op::RenameFabric { .. }
+            | Op::ListDevices { .. }
+            | Op::Assistant(_)
+            | Op::SetAssistant { .. }
+            | Op::Remember { .. }
+            | Op::SetTags { .. }
+            | Op::Unwatch { .. }
+            | Op::OtaImages(_)
+            | Op::OtaUpdates(_)
+            | Op::OtaUploadBegin { .. }
+            | Op::OtaUploadChunk { .. }
+            | Op::OtaUploadEnd { .. }
+            | Op::OtaUploadDiscard { .. }
+            | Op::OtaDelete { .. } => return None,
+            Op::Discover { .. } => Vec::new(),
+            Op::Sync { .. } => self.sync_keys(),
+            // The fabric must not go meanwhile.
+            Op::Commission { fabric, .. }
+            | Op::SetDefaultFabric { fabric, .. }
+            | Op::ReadThreadMesh { fabric, .. } => self.fabric_keys(fabric, Mode::Read),
+            Op::DeleteFabric { fabric, .. } => self.fabric_keys(fabric, Mode::Write),
+            Op::PeekDevice { node_id, .. }
+            | Op::ReadNetwork { node_id, .. }
+            | Op::RetrieveLogs { node_id, .. }
+            | Op::Identify { node_id, .. }
+            | Op::Watch { node_id, .. }
+            | Op::Window { node_id, .. }
+            | Op::DeviceTime { node_id, .. } => self.device_keys(*node_id, Mode::Read),
+            Op::Decommission { node_id, .. }
+            | Op::ChangeNetwork { node_id, .. }
+            | Op::RemoveDeviceFabric { node_id, .. }
+            | Op::OpenWindow { node_id, .. }
+            | Op::CloseWindow { node_id, .. }
+            | Op::SetDeviceTime { node_id, .. }
+            | Op::OtaUpdate { node_id, .. } => self.device_keys(*node_id, Mode::Write),
+        };
+
+        Some(keys)
+    }
+
+    /// A listed device, used as `mode`, and its fabric, read.
+    fn device_keys(&self, node_id: u64, mode: Mode) -> Vec<(Key, Mode)> {
+        let mut keys = alloc::vec![(Key::Node(node_id), mode)];
+        if let Ok(device) = self.lookup_device(node_id) {
+            keys.push((Key::Fabric(device.handle.fabric_index.get()), Mode::Read));
+        }
+
+        keys
+    }
+
+    /// The fabrics `fabric` names, used as `mode`.
+    fn fabric_keys(&self, fabric: &FabricRef, mode: Mode) -> Vec<(Key, Mode)> {
+        self.our_fabrics(fabric)
+            .map(|fabrics| {
+                fabrics
+                    .iter()
+                    .map(|fabric| (Key::Fabric(fabric.fab_idx.get()), mode))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// One sync at a time, reading every fabric of ours.
+    fn sync_keys(&self) -> Vec<(Key, Mode)> {
+        let mut keys = self.fabric_keys(&FabricRef::All, Mode::Read);
+        keys.push((Key::Sync, Mode::Write));
+
+        keys
     }
 
     /// Run one operation and send its result. A handle that went away meanwhile
@@ -480,6 +627,9 @@ async fn run<'a, C, S, O, N, M>(
         controller,
         fabrics: RefCell::new(fabrics),
         store,
+        locks: Locks::new(),
+        commissioning: Cell::new(false),
+        commissioned_node: Cell::new(None),
         cancel: service.cancel.clone(),
         subs: RefCell::new(BTreeMap::new()),
         next_watcher: Cell::new(1),

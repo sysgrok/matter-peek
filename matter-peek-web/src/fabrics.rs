@@ -32,7 +32,7 @@ impl App {
         };
         let title = self.device_title(node_id);
         let health = self.subs.get(&node_id).map(|sub| &sub.health);
-        let refreshing = self.loading == Some(crate::Loading::Device(node_id));
+        let refreshing = self.refreshing(node_id);
 
         html! {
             <div class="modal is-active">

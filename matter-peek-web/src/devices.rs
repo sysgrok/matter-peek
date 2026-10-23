@@ -10,7 +10,7 @@ use crate::icons::{icon, kind_class, kind_icon, Icon};
 use crate::ui;
 use crate::{
     input_value, log_intent_file, log_intent_name, network, select_value, App, Ask, LiveSub,
-    Loading, LogsView, Msg, SubConn, Tab,
+    LogsView, Msg, SubConn, Tab,
 };
 
 impl App {
@@ -64,7 +64,7 @@ impl App {
                 }
                 <button
                     class={classes!("button", "is-icon",
-                        (self.loading == Some(Loading::List)).then_some("is-loading"))}
+                        self.loading_list.then_some("is-loading"))}
                     title="Read the list again"
                     disabled={self.busy_stored}
                     onclick={link.callback(|_| Msg::ListDevices)}>
@@ -77,7 +77,7 @@ impl App {
         };
 
         let body = if self.stored.is_empty() {
-            if self.loading == Some(Loading::List) {
+            if self.loading_list {
                 html! {
                     <div class="empty-state">
                         <span class="loader is-large"></span>
@@ -129,7 +129,7 @@ impl App {
 
     fn view_device_card(&self, d: &api::DeviceInfo, link: &Scope<Self>) -> Html {
         let node_id = d.handle.node_id;
-        let busy = self.busy_stored;
+        let busy = self.device_busy(node_id);
         let live = self.subs.get(&node_id);
 
         // Offline per its subscription; until that is live or offline, per the
@@ -164,7 +164,7 @@ impl App {
 
         let hardware = d.hardware_version().unwrap_or_else(|| "—".into());
         let software = d.software_version().unwrap_or_else(|| "—".into());
-        let refreshing = self.loading == Some(Loading::Device(node_id));
+        let refreshing = self.refreshing(node_id);
 
         html! {
             <article class={classes!("device-card", offline.then_some("is-offline"))}>
@@ -352,7 +352,7 @@ impl App {
                         <span class="icon is-small is-left">{ icon(Icon::Tag, 14) }</span>
                     </div>
                     <div class="control">
-                        <button class="button is-small is-link" disabled={self.busy_stored}
+                        <button class="button is-small is-link" disabled={self.device_busy(node_id)}
                             title="Save the tags"
                             onclick={link.callback(move |_| Msg::SaveTags(node_id))}>
                             { icon(Icon::Check, 16) }

@@ -1,5 +1,6 @@
 //! The device list, and the operations on a listed device.
 
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -257,18 +258,26 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             return;
         }
 
-        let updated = self.store.load_devices().and_then(|mut devices| {
-            match devices.iter_mut().find(|d| d.handle.node_id == node_id) {
-                Some(device) => {
-                    device.network = kind;
-                    self.store.save_devices(&devices)
-                }
-                None => Ok(()),
-            }
-        });
-        if let Err(e) = updated {
+        if let Err(e) = self.update_record(node_id, |device| device.network = kind) {
             warn!("cannot note the network of node 0x{node_id:016X}: {e:?}");
         }
+    }
+
+    /// Apply `f` to the record of `node_id`; `false` if it has none.
+    fn update_record(
+        &self,
+        node_id: u64,
+        f: impl FnOnce(&mut StoredDevice),
+    ) -> Result<bool, Error> {
+        let mut devices = self.store.load_devices()?;
+        let Some(device) = devices.iter_mut().find(|d| d.handle.node_id == node_id) else {
+            return Ok(false);
+        };
+
+        f(device);
+        self.store.save_devices(&devices)?;
+
+        Ok(true)
     }
 
     /// Retrieve a diagnostic log of a listed device.
@@ -422,7 +431,16 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// record that are gone and, if `refresh`, re-read the others' identity.
     /// Notes which devices are online. Returns a notice of what changed, if
     /// anything did.
+    ///
+    /// Other operations run meanwhile, so every change is made on the list as it
+    /// is then, and a device listed after the browse is left as it is.
     pub(super) async fn sync_devices(&self, refresh: bool) -> Result<Option<String>, Error> {
+        let before: BTreeSet<u64> = self
+            .listed_devices()
+            .iter()
+            .map(|d| d.handle.node_id)
+            .collect();
+
         let fabrics: Vec<_> = self.fabrics.borrow().iter().cloned().collect();
         let mut advertised = Vec::new();
         for fabric in &fabrics {
@@ -434,7 +452,6 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             }));
         }
 
-        let mut remembered = self.store.load_devices()?;
         let mut found = 0;
 
         for &handle in &advertised {
@@ -442,15 +459,11 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             // In use on a fabric of ours, so never to be handed out again.
             self.store.reserve_node_id(node_id)?;
 
-            let record = remembered.iter().position(|d| d.handle.node_id == node_id);
-            let listed = record.is_some()
-                || self
-                    .transient
-                    .borrow()
-                    .iter()
-                    .any(|d| d.handle.node_id == node_id);
+            // Its commission lists it.
+            let commissioning = || self.commissioned_node.get() == Some(node_id);
 
-            if listed && !refresh {
+            let listed = self.lookup_device(node_id).is_ok();
+            if commissioning() || (listed && !refresh) {
                 continue;
             }
 
@@ -468,15 +481,17 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 continue;
             }
 
-            if let Some(i) = record {
-                refresh_identity(&mut remembered[i], ident);
-                self.store.save_devices(&remembered)?;
+            if commissioning()
+                || self.update_record(node_id, |d| refresh_identity(d, ident.clone()))?
+            {
                 continue;
             }
 
             let mut transient = self.transient.borrow_mut();
             match transient.iter_mut().find(|d| d.handle.node_id == node_id) {
                 Some(device) => refresh_identity(device, ident),
+                // Removed during the read.
+                None if listed => {}
                 None => {
                     info!("sync: listing node 0x{node_id:016X}, found on our fabric");
                     transient.push(new_record(handle, &ident));
@@ -488,9 +503,14 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         // Without a record, a device is listed only while it is on our fabric.
         self.transient
             .borrow_mut()
-            .retain(|d| advertised.contains(&d.handle));
+            .retain(|d| !before.contains(&d.handle.node_id) || advertised.contains(&d.handle));
 
-        *self.online.borrow_mut() = Some(advertised.iter().map(|d| d.node_id).collect());
+        let mut online = self.online.borrow_mut();
+        let online = online.get_or_insert_with(BTreeSet::new);
+        online.retain(|node_id| {
+            !before.contains(node_id) || advertised.iter().any(|d| d.node_id == *node_id)
+        });
+        online.extend(advertised.iter().map(|d| d.node_id));
 
         Ok((found > 0)
             .then(|| format!("{found} device(s) found on our fabrics were added to the list.")))

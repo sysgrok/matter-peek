@@ -91,13 +91,28 @@ enum SubConn {
     Reconnecting,
 }
 
-/// A Refresh request in flight.
+/// What a request is for: its answer ends that, and nothing else.
 #[derive(Clone, Copy, PartialEq)]
-enum Loading {
-    /// Of the device list.
+enum Pending {
+    /// Nothing waits for it.
+    None,
+    /// Reading the device list.
     List,
-    /// Of one device.
-    Device(u64),
+    /// Syncing the device list.
+    Sync,
+    /// An operation on a device; `refresh` spins its Refresh button.
+    Device {
+        node_id: u64,
+        refresh: bool,
+    },
+    /// The network popup of a device.
+    Network(u64),
+    /// The logs popup of a device.
+    Logs(u64),
+    Discover,
+    Commission,
+    /// An OTA image upload.
+    Upload,
 }
 
 /// Which top-level tab is showing.
@@ -289,8 +304,8 @@ enum Msg {
     /// The OTA updates the devices asked for; `None` if they could not be read.
     OtaUpdates(Option<wire::Response>),
     Step(StepLine),
-    Done(wire::Response),
-    Error(String),
+    Done(Pending, wire::Response),
+    Error(Pending, String),
 }
 
 struct App {
@@ -322,10 +337,13 @@ struct App {
     /// The discovery popup is showing.
     discover_open: bool,
     discovering: bool,
-    /// A device op (list / peek / identify / …) is in flight.
+    /// The device list is being read or synced.
     busy_stored: bool,
-    /// Which Refresh button's request that is, for its spinner.
-    loading: Option<Loading>,
+    /// It is being read, for the spinner of its Refresh button.
+    loading_list: bool,
+    /// The operations in flight on devices: node ID, and whether it spins the
+    /// device's Refresh button.
+    device_ops: Vec<(u64, bool)>,
     discovered: Vec<api::DiscoveredDevice>,
     discovered_ble: Vec<api::BleDevice>,
     /// The devices on our fabric.
@@ -451,7 +469,8 @@ impl Component for App {
             discover_open: false,
             discovering: false,
             busy_stored: false,
-            loading: None,
+            loading_list: false,
+            device_ops: Vec::new(),
             discovered: Vec::new(),
             discovered_ble: Vec::new(),
             stored: Vec::new(),
@@ -515,10 +534,11 @@ impl Component for App {
                 // the Devices tab with an empty list.
                 if tab == Tab::Devices && self.stored.is_empty() && !self.busy_stored {
                     self.busy_stored = true;
-                    self.loading = Some(Loading::List);
+                    self.loading_list = true;
                     self.set_status(None);
                     send_request(
                         ctx.link().clone(),
+                        Pending::List,
                         wire::Request::ListDevices {
                             fabric: api::FabricRef::All,
                         },
@@ -526,7 +546,7 @@ impl Component for App {
                 }
                 // Devices offer updates to the images, and show those running.
                 if matches!(tab, Tab::Devices | Tab::Updates) {
-                    send_request(ctx.link().clone(), wire::Request::OtaImages);
+                    send_request(ctx.link().clone(), Pending::None, wire::Request::OtaImages);
                     if !self.ota_polling {
                         self.ota_polling = true;
                         read_ota_updates(ctx.link().clone(), 0);
@@ -561,10 +581,11 @@ impl Component for App {
                             )))
                     }
                     Some(Ask::RemoveFabric(node_id, fabric_index, _)) => {
-                        self.loading = Some(Loading::Device(node_id));
+                        let pending = self.start_device_op(node_id, true);
                         self.error = None;
                         send_request(
                             ctx.link().clone(),
+                            pending,
                             wire::Request::RemoveDeviceFabric {
                                 node_id,
                                 fabric_index,
@@ -605,7 +626,7 @@ impl Component for App {
                 true
             }
             Msg::ClearStatus(seq) => {
-                if seq != self.status_seq || self.busy_stored {
+                if seq != self.status_seq || self.working() {
                     return false;
                 }
                 self.stored_status = None;
@@ -616,7 +637,7 @@ impl Component for App {
                 true
             }
             Msg::OtaImages => {
-                send_request(ctx.link().clone(), wire::Request::OtaImages);
+                send_request(ctx.link().clone(), Pending::None, wire::Request::OtaImages);
                 false
             }
             Msg::QrImage(file) => {
@@ -635,7 +656,11 @@ impl Component for App {
                 true
             }
             Msg::OtaDelete(name) => {
-                send_request(ctx.link().clone(), wire::Request::OtaDelete { name });
+                send_request(
+                    ctx.link().clone(),
+                    Pending::None,
+                    wire::Request::OtaDelete { name },
+                );
                 false
             }
             Msg::OtaChoose(node_id, name) => {
@@ -896,11 +921,12 @@ impl Component for App {
             }
             Msg::ListDevices => {
                 self.busy_stored = true;
-                self.loading = Some(Loading::List);
+                self.loading_list = true;
                 self.set_status(None);
                 self.error = None;
                 send_request(
                     ctx.link().clone(),
+                    Pending::List,
                     wire::Request::ListDevices {
                         fabric: api::FabricRef::All,
                     },
@@ -914,6 +940,7 @@ impl Component for App {
                 self.notice = None;
                 send_request(
                     ctx.link().clone(),
+                    Pending::Sync,
                     wire::Request::Sync {
                         fabric: api::FabricRef::All,
                     },
@@ -924,16 +951,23 @@ impl Component for App {
                 // One-shot re-read — the result updates this device's card panel
                 // (not a status line). Useful for the values the subscription
                 // doesn't push on every change (e.g. the live-computed uptime).
-                self.busy_stored = true;
-                self.loading = Some(Loading::Device(node_id));
+                let pending = self.start_device_op(node_id, true);
                 self.error = None;
-                send_request(ctx.link().clone(), wire::Request::PeekDevice { node_id });
+                send_request(
+                    ctx.link().clone(),
+                    pending,
+                    wire::Request::PeekDevice { node_id },
+                );
                 true
             }
             Msg::Remember(node_id) => {
-                self.busy_stored = true;
+                let pending = self.start_device_op(node_id, false);
                 self.error = None;
-                send_request(ctx.link().clone(), wire::Request::Remember { node_id });
+                send_request(
+                    ctx.link().clone(),
+                    pending,
+                    wire::Request::Remember { node_id },
+                );
                 true
             }
             Msg::OpenLogs(node_id) => {
@@ -954,7 +988,11 @@ impl Component for App {
             Msg::OpenNetwork(node_id) => {
                 self.error = None;
                 self.network_view = Some(NetworkView::new(node_id));
-                send_request(ctx.link().clone(), wire::Request::ReadNetwork { node_id });
+                send_request(
+                    ctx.link().clone(),
+                    Pending::Network(node_id),
+                    wire::Request::ReadNetwork { node_id },
+                );
                 true
             }
             Msg::RefreshNetwork => {
@@ -965,6 +1003,7 @@ impl Component for App {
                 self.error = None;
                 send_request(
                     ctx.link().clone(),
+                    Pending::Network(network.node_id),
                     wire::Request::ReadNetwork {
                         node_id: network.node_id,
                     },
@@ -1071,6 +1110,7 @@ impl Component for App {
                 self.error = None;
                 send_request(
                     ctx.link().clone(),
+                    Pending::Logs(logs.node_id),
                     wire::Request::RetrieveLogs {
                         node_id: logs.node_id,
                         intent,
@@ -1079,7 +1119,7 @@ impl Component for App {
                 true
             }
             Msg::Identify(node_id) => {
-                self.busy_stored = true;
+                let pending = self.start_device_op(node_id, false);
                 self.set_status(Some(format!(
                     "Asking node {} to identify itself…",
                     display::hex_u64(node_id)
@@ -1087,12 +1127,13 @@ impl Component for App {
                 self.error = None;
                 send_request(
                     ctx.link().clone(),
+                    pending,
                     wire::Request::Identify { node_id, secs: 3 },
                 );
                 true
             }
             Msg::Decommission(node_id) => {
-                self.busy_stored = true;
+                let pending = self.start_device_op(node_id, false);
                 self.set_status(Some(format!(
                     "Decommissioning node {}…",
                     display::hex_u64(node_id)
@@ -1110,6 +1151,7 @@ impl Component for App {
                 self.subs.remove(&node_id);
                 send_request(
                     ctx.link().clone(),
+                    pending,
                     wire::Request::Decommission {
                         node_id,
                         force: false,
@@ -1229,31 +1271,25 @@ impl Component for App {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                self.busy_stored = true;
+                let pending = self.start_device_op(node_id, false);
                 self.editing_tags = None;
                 self.set_status(Some(format!(
                     "Saving the tags of node {}…",
                     display::hex_u64(node_id)
                 )));
                 self.error = None;
-                send_request(ctx.link().clone(), wire::Request::SetTags { node_id, tags });
+                send_request(
+                    ctx.link().clone(),
+                    pending,
+                    wire::Request::SetTags { node_id, tags },
+                );
                 true
             }
             Msg::Step(line) => {
                 self.steps.push(line);
                 true
             }
-            Msg::Done(resp) => {
-                self.running = false;
-                self.discovering = false;
-                self.busy_stored = false;
-                self.loading = None;
-                if let Some(logs) = self.logs.as_mut() {
-                    logs.loading = false;
-                }
-                if let Some(network) = self.network_view.as_mut() {
-                    network.loading = false;
-                }
+            Msg::Done(pending, resp) => {
                 match resp {
                     wire::Response::Discovered {
                         devices,
@@ -1295,10 +1331,7 @@ impl Component for App {
                     // `Subscribed` / streamed subscription frames arrive on the
                     // dedicated persistent subscription WS, not this one-shot path.
                     wire::Response::Subscribed { .. } => {}
-                    wire::Response::OtaImages { images } => {
-                        self.uploading = None;
-                        self.ota_images = images;
-                    }
+                    wire::Response::OtaImages { images } => self.ota_images = images,
                     // Uploads run on their own connection (`send_ota_upload`), as
                     // the reads of the running updates (`read_ota_updates`).
                     wire::Response::OtaUploadStarted { .. } | wire::Response::OtaUpdates { .. } => {
@@ -1365,9 +1398,10 @@ impl Component for App {
                         }
                         self.result = Some(other);
                         self.busy_stored = true;
-                        self.loading = Some(Loading::List);
+                        self.loading_list = true;
                         send_request(
                             ctx.link().clone(),
+                            Pending::List,
                             wire::Request::ListDevices {
                                 fabric: api::FabricRef::All,
                             },
@@ -1376,22 +1410,12 @@ impl Component for App {
                     }
                     wire::Response::Error { message } => self.error = Some(message),
                 }
-                if let Some(network) = self.network_view.as_mut() {
-                    network.changing = false;
-                }
+                self.finish(pending);
                 self.fade_status(ctx);
                 true
             }
-            Msg::Error(e) => {
-                self.uploading = None;
-                self.running = false;
-                self.discovering = false;
-                self.busy_stored = false;
-                self.loading = None;
-                if let Some(network) = self.network_view.as_mut() {
-                    network.loading = false;
-                    network.changing = false;
-                }
+            Msg::Error(pending, e) => {
+                self.finish(pending);
                 self.error = Some(e);
                 self.set_status(None);
                 true
@@ -1466,6 +1490,62 @@ impl Component for App {
 }
 
 impl App {
+    /// Note an operation on a device, for its request.
+    fn start_device_op(&mut self, node_id: u64, refresh: bool) -> Pending {
+        self.device_ops.push((node_id, refresh));
+        Pending::Device { node_id, refresh }
+    }
+
+    /// Whether an operation on the device is in flight.
+    fn device_busy(&self, node_id: u64) -> bool {
+        self.device_ops.iter().any(|(id, _)| *id == node_id)
+    }
+
+    /// Whether the device's Refresh button spins.
+    fn refreshing(&self, node_id: u64) -> bool {
+        self.device_ops.contains(&(node_id, true))
+    }
+
+    /// Whether anything shown in the status line is still in flight.
+    fn working(&self) -> bool {
+        self.busy_stored || !self.device_ops.is_empty()
+    }
+
+    /// The request for `pending` was answered, or failed.
+    fn finish(&mut self, pending: Pending) {
+        match pending {
+            Pending::None => {}
+            Pending::List => {
+                self.busy_stored = false;
+                self.loading_list = false;
+            }
+            Pending::Sync => self.busy_stored = false,
+            Pending::Device { node_id, refresh } => {
+                if let Some(i) = self
+                    .device_ops
+                    .iter()
+                    .position(|op| *op == (node_id, refresh))
+                {
+                    self.device_ops.remove(i);
+                }
+            }
+            Pending::Network(node_id) => {
+                if let Some(view) = self.network_view.as_mut().filter(|n| n.node_id == node_id) {
+                    view.loading = false;
+                    view.changing = false;
+                }
+            }
+            Pending::Logs(node_id) => {
+                if let Some(logs) = self.logs.as_mut().filter(|l| l.node_id == node_id) {
+                    logs.loading = false;
+                }
+            }
+            Pending::Discover => self.discovering = false,
+            Pending::Commission => self.running = false,
+            Pending::Upload => self.uploading = None,
+        }
+    }
+
     /// Show `status` in the status line, or clear it.
     fn set_status(&mut self, status: Option<String>) {
         self.stored_status = status;
@@ -1644,6 +1724,7 @@ impl App {
         self.error = None;
         send_request(
             ctx.link().clone(),
+            Pending::Discover,
             wire::Request::Discover {
                 discriminator,
                 setup_code,
@@ -1716,7 +1797,7 @@ impl App {
             remember: self.remember,
             fabric: self.fabric_ref(),
         };
-        send_request(ctx.link().clone(), req);
+        send_request(ctx.link().clone(), Pending::Commission, req);
 
         // Safety net: auto-cancel if the commission runs too long. When the timer
         // fires we only act if still `running` (a completed run cleared it).
@@ -1834,7 +1915,7 @@ impl App {
 
         html! {
             <div class="snackbar">
-                if self.busy_stored {
+                if self.working() {
                     <span class="loader"></span>
                 } else {
                     <span class="snackbar-icon">{ icon(Icon::CheckCircle, 18) }</span>
@@ -1956,9 +2037,15 @@ fn log_intent_file(intent: api::LogIntent) -> &'static str {
 }
 
 /// Open a WS, send the request, and pump server frames back as component
-/// messages (step events, then the final response) until it completes.
-fn send_request(link: html::Scope<App>, request: wire::Request) {
-    request_loop(link, request, Msg::Done, Msg::Error);
+/// messages (step events, then the final response) until it completes. The
+/// answer ends `pending`.
+fn send_request(link: html::Scope<App>, pending: Pending, request: wire::Request) {
+    request_loop(
+        link,
+        request,
+        move |response| Msg::Done(pending, response),
+        move |e| Msg::Error(pending, e),
+    );
 }
 
 /// Send a request of the Assistant page: its answer goes to the page.
@@ -1976,8 +2063,8 @@ fn send_chat_request(link: html::Scope<App>, request: wire::Request) {
 fn request_loop(
     link: html::Scope<App>,
     request: wire::Request,
-    done: fn(wire::Response) -> Msg,
-    failed: fn(String) -> Msg,
+    done: impl Fn(wire::Response) -> Msg + 'static,
+    failed: impl Fn(String) -> Msg + 'static,
 ) {
     spawn_local(async move {
         let ws = match WebSocket::open(&ws_url()) {
@@ -2099,11 +2186,15 @@ fn send_qr_image(link: html::Scope<App>, file: web_sys::File) {
         match gloo_file::futures::read_as_bytes(&gloo_file::File::from(file)).await {
             Ok(image) => send_request(
                 link,
+                Pending::None,
                 wire::Request::ReadQrImage {
                     image: base64::engine::general_purpose::STANDARD.encode(image),
                 },
             ),
-            Err(e) => link.send_message(Msg::Error(format!("cannot read the image: {e}"))),
+            Err(e) => link.send_message(Msg::Error(
+                Pending::None,
+                format!("cannot read the image: {e}"),
+            )),
         }
     });
 }
@@ -2111,7 +2202,7 @@ fn send_qr_image(link: html::Scope<App>, file: web_sys::File) {
 fn send_ota_upload(link: html::Scope<App>, file: web_sys::File) {
     spawn_local(async move {
         if let Err(e) = ota_upload(&link, gloo_file::File::from(file)).await {
-            link.send_message(Msg::Error(e));
+            link.send_message(Msg::Error(Pending::Upload, e));
         }
     });
 }
@@ -2154,7 +2245,7 @@ async fn ota_upload(link: &html::Scope<App>, file: gloo_file::File) -> Result<()
 
     let end = wire::Request::OtaUploadEnd { upload_id };
     let images = call(&mut write, &mut read, &mut req_id, end).await?;
-    link.send_message(Msg::Done(images));
+    link.send_message(Msg::Done(Pending::Upload, images));
 
     Ok(())
 }
@@ -2213,7 +2304,7 @@ fn send_ota_update(link: html::Scope<App>, node_id: u64, name: String) {
     spawn_local(async move {
         let failed = |message: String| {
             link.send_message(Msg::OtaAnnounced(node_id, Err(message.clone())));
-            link.send_message(Msg::Error(message));
+            link.send_message(Msg::Error(Pending::None, message));
         };
 
         let ws = match WebSocket::open(&ws_url()) {

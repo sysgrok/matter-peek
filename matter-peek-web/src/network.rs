@@ -65,6 +65,7 @@ impl NetworkView {
         self.confirm = None;
         send_request(
             link.clone(),
+            crate::Pending::Network(self.node_id),
             wire::Request::ChangeNetwork {
                 node_id: self.node_id,
                 endpoint,

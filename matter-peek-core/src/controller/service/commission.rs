@@ -168,6 +168,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             .store
             .allocate_node_id(FIRST_DEVICE_NODE_ID)
             .map_err(|e| failed("cannot allocate a node ID", e))?;
+        self.commissioned_node.set(Some(device_node_id));
 
         // Before the commission: the device has no fabric of ours yet.
         if self.cancel.load(Ordering::SeqCst) {
