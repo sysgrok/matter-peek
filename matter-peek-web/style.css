@@ -768,7 +768,7 @@ pre.log-text { max-height: 70vh; margin: 0; padding: .75rem 0; overflow: auto; b
 .dm-field > .select, .dm-field > .input { align-self: flex-start; max-width: 22rem; width: 100%; }
 .dm-field > .select select { width: 100%; }
 .dm-cluster.is-controls { font-weight: 600; }
-.dm-controls { display: grid; grid-template-columns: minmax(7rem, auto) minmax(0, 1fr) auto; gap: .9rem 1rem; align-items: center; max-width: 40rem; }
+.dm-controls { display: grid; grid-template-columns: minmax(7rem, 15rem) minmax(0, 1fr) auto; gap: .9rem 1rem; align-items: center; max-width: 40rem; }
 .dm-control { display: contents; }
 .dm-control-label { font-weight: 600; color: var(--bulma-text-strong); }
 .dm-control > .button, .dm-control > .select, .dm-control > .buttons { justify-self: start; grid-column: 2 / span 2; }
@@ -780,3 +780,5 @@ pre.log-text { max-height: 70vh; margin: 0; padding: .75rem 0; overflow: auto; b
 .device-type { font-weight: 600; color: var(--bulma-text); }
 .device-actions-main .button { padding-left: .55em; padding-right: .55em; }
 .device-actions-main .button .icon:first-child:not(:last-child) { margin-right: .2em; }
+.dm-control-group { grid-column: 1 / -1; margin-top: .6rem; padding-top: .6rem; border-top: 1px solid var(--bulma-border-weak); font-size: .8rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--bulma-text-weak); }
+.dm-control > .dm-number { justify-self: start; grid-column: 2 / span 2; max-width: 10rem; }

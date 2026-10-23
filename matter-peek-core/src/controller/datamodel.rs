@@ -113,7 +113,8 @@ pub async fn write<C: Crypto>(
     let exchange = Exchange::initiate(matter, crypto, dev.fabric_index, dev.node_id).await?;
     let handle = exchange
         .write_with(attr.timed.then_some(TIMED_TIMEOUT_MS), |msg| {
-            msg.write_requests()?
+            msg.timed_request(attr.timed)?
+                .write_requests()?
                 .push()?
                 .path(endpoint, cluster, attr.id)?
                 .data(|w| values::write(w, &tag, value, &attr.value).map_err(invalid))?
@@ -152,7 +153,8 @@ pub async fn invoke<C: Crypto>(
     let exchange = Exchange::initiate(matter, crypto, dev.fabric_index, dev.node_id).await?;
     let chunk = exchange
         .invoke_with(cmd.timed.then_some(TIMED_TIMEOUT_MS), |msg| {
-            msg.invoke_requests()?
+            msg.timed_request(cmd.timed)?
+                .invoke_requests()?
                 .push()?
                 .path(endpoint, cluster, cmd.id)?
                 .data(|w| values::write_fields(w, &tag, fields, cmd.fields).map_err(invalid))?
