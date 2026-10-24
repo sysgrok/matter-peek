@@ -48,6 +48,7 @@ pub(super) fn device(
         remembered,
         network: d.network,
         device_types: d.device_types,
+        details: d.details,
     }
 }
 

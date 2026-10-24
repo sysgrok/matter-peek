@@ -25,7 +25,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use crate::api::{self, display, wire, FabricRef};
+use crate::api::{self, display, query, wire, FabricRef};
 
 use jsonrpc::Response;
 
@@ -222,8 +222,14 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
              their identity, versions, fingerprint, tags, whether they are \
              online and whether they are remembered. Remembered devices are \
              listed also while offline; the others only once commissioned or \
-             found by a sync since the server started.",
-            json!({ "type": "object", "properties": { "fabric": fabric_schema() } }),
+             found by a sync since the server started. Each has its `details`: \
+             Matter version, clusters served, endpoints, power, ICD mode, and \
+             network (SSID or Thread network name, Thread role). `filter` \
+             narrows the list, e.g. to the devices to act on.",
+            json!({ "type": "object", "properties": {
+                "fabric": fabric_schema(),
+                "filter": { "type": "string", "description": query::help() },
+            } }),
         ),
         tool(
             "list_fabrics",
@@ -907,6 +913,10 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
         "advertised_devices" => wire::Request::AdvertisedDevices,
         "list_devices" => wire::Request::ListDevices {
             fabric: arg_fabric(args),
+            filter: args
+                .get("filter")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         },
         "list_fabrics" => wire::Request::Fabrics,
         "create_fabric" => wire::Request::CreateFabric {

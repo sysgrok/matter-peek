@@ -171,6 +171,12 @@ mod data {
     include!(concat!(env!("OUT_DIR"), "/schema.rs"));
 }
 
+/// Every cluster, by ID.
+#[cfg(test)]
+pub fn clusters() -> &'static [ClusterSchema] {
+    data::CLUSTERS
+}
+
 /// The cluster with `id`, if the IDL has it.
 pub fn cluster(id: u32) -> Option<&'static ClusterSchema> {
     data::CLUSTERS

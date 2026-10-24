@@ -26,6 +26,7 @@ pub mod display;
 pub mod mcp;
 #[cfg(feature = "controller")]
 pub mod platform;
+pub mod query;
 pub mod wire;
 
 #[cfg(feature = "controller")]

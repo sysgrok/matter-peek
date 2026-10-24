@@ -26,6 +26,7 @@ mod commission;
 mod datamodel;
 mod devices;
 mod fabrics;
+mod filter;
 mod icons;
 mod memory;
 mod network;
@@ -306,7 +307,7 @@ enum Msg {
     /// Persist the edited tags for a given device.
     SaveTags(u64),
     /// Filter the stored list by tag substring.
-    TagFilter(String),
+    Filter(filter::FilterMsg),
     /// Fetch the stored OTA images.
     OtaImages,
     /// The user picked an OTA image file to upload.
@@ -380,7 +381,11 @@ struct App {
     /// from the device's current tags when the list arrives.
     tag_inputs: HashMap<u64, String>,
     /// Filter the device list to devices whose tags contain this substring.
-    tag_filter: String,
+    /// The device filter, as typed.
+    filter: String,
+    filter_focus: bool,
+    /// The completion picked with the arrow keys.
+    filter_pick: usize,
     steps: Vec<StepLine>,
     result: Option<wire::Response>,
     /// Transient status line for device ops (identify ack, …).
@@ -516,7 +521,9 @@ impl Component for App {
             advertised: None,
             looking: false,
             tag_inputs: HashMap::new(),
-            tag_filter: String::new(),
+            filter: String::new(),
+            filter_focus: false,
+            filter_pick: 0,
             steps: Vec::new(),
             result: None,
             stored_status: None,
@@ -587,6 +594,7 @@ impl Component for App {
                         Pending::List,
                         wire::Request::ListDevices {
                             fabric: api::FabricRef::All,
+                            filter: None,
                         },
                     );
                 }
@@ -976,6 +984,7 @@ impl Component for App {
                     Pending::List,
                     wire::Request::ListDevices {
                         fabric: api::FabricRef::All,
+                        filter: None,
                     },
                 );
                 true
@@ -1416,10 +1425,7 @@ impl Component for App {
                 self.tag_inputs.insert(node_id, text);
                 false
             }
-            Msg::TagFilter(text) => {
-                self.tag_filter = text;
-                true
-            }
+            Msg::Filter(msg) => self.update_filter(msg),
             Msg::SaveTags(node_id) => {
                 let tags = self
                     .tag_inputs
@@ -1561,6 +1567,7 @@ impl Component for App {
                             Pending::List,
                             wire::Request::ListDevices {
                                 fabric: api::FabricRef::All,
+                                filter: None,
                             },
                         );
                         self.tab = Tab::Devices;

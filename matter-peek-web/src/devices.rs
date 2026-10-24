@@ -5,9 +5,10 @@
 use yew::html::Scope;
 use yew::prelude::*;
 
-use matter_peek_core::api::{self, display};
+use matter_peek_core::api::{self, display, query};
 
 use crate::datamodel::controls;
+use crate::filter::{filter, vendor_term, FilterMsg};
 use crate::icons::{device_type_icon, icon, kind_class, kind_icon, Icon};
 use crate::ui;
 use crate::{
@@ -44,12 +45,17 @@ impl App {
             .visible_fabric()
             .map(|fabric| fabric.name.clone())
             .unwrap_or_else(|| "our fabric".into());
+        let shown = if visible.len() < count {
+            format!("{} of ", visible.len())
+        } else {
+            String::new()
+        };
         let subtitle = if count == 0 {
             html! { format!("The devices on {fabric}, live") }
         } else {
             html! {
                 <>
-                    { format!("{count} device{} on {fabric}", if count == 1 { "" } else { "s" }) }
+                    { format!("{shown}{count} device{} on {fabric}", if count == 1 { "" } else { "s" }) }
                     <span class="dot-sep"></span>
                     <span class="live-count">{ format!("{live} live") }</span>
                 </>
@@ -59,12 +65,7 @@ impl App {
         let actions = html! {
             <>
                 if count > 0 {
-                    <div class="control has-icons-left search-box">
-                        <input class="input" type="search" placeholder="Filter by tag"
-                            value={self.tag_filter.clone()}
-                            oninput={link.callback(|e: InputEvent| Msg::TagFilter(input_value(e)))} />
-                        <span class="icon is-left">{ icon(Icon::Search, 18) }</span>
-                    </div>
+                    { self.view_filter_box(link) }
                 }
                 if !visible.is_empty() {
                     { ui::face_switch(face, false, link.callback(Msg::FlipAll)) }
@@ -102,10 +103,10 @@ impl App {
             ui::empty_state(
                 Icon::Search,
                 "No matches",
-                &format!("No device is tagged like “{}”.", self.tag_filter.trim()),
+                &format!("No device matches “{}”.", self.filter.trim()),
                 html! {
                     <button class="button is-soft"
-                        onclick={link.callback(|_| Msg::TagFilter(String::new()))}>
+                        onclick={link.callback(|_| filter(FilterMsg::Clear))}>
                         { "Clear the filter" }
                     </button>
                 },
@@ -119,6 +120,7 @@ impl App {
         };
         let body = html! {
             <>
+                { self.view_filter_error() }
                 { body }
                 { self.view_advertised(link) }
             </>
@@ -130,18 +132,6 @@ impl App {
                 { body }
             </>
         }
-    }
-
-    /// The devices shown: those tagged as the filter says.
-    pub(crate) fn visible_devices(&self) -> Vec<&api::DeviceInfo> {
-        let filter = self.tag_filter.trim().to_lowercase();
-
-        self.stored
-            .iter()
-            .filter(|d| {
-                filter.is_empty() || d.tags.iter().any(|t| t.to_lowercase().contains(&filter))
-            })
-            .collect()
     }
 
     /// The devices the network advertises on other controllers' fabrics
@@ -316,23 +306,38 @@ impl App {
         } else {
             Msg::Refresh
         };
+        // Its network, vendor and type also filter by them.
+        let tile = html! {
+            <span class={classes!("tile-icon", kind_class(d.network))}
+                title={d.network.map(|kind| kind.label())}>
+                { icon(device_type_icon(d.device_type()).or(kind_icon(d.network)).unwrap_or(Icon::Chip), 22) }
+            </span>
+        };
+        let tile = match d.network.and_then(query::network_word) {
+            Some(net) => self.filter_chip(format!("net:{net}"), tile, link),
+            None => tile,
+        };
+        let vendor = html! { d.vendor().unwrap_or_else(|| "Unknown vendor".into()) };
+        let vendor = match vendor_term(d) {
+            Some(term) => self.filter_chip(term, vendor, link),
+            None => vendor,
+        };
 
         html! {
             <header class="device-head">
-                <span class={classes!("tile-icon", kind_class(d.network))}
-                    title={d.network.map(|kind| kind.label())}>
-                    { icon(device_type_icon(d.device_type()).or(kind_icon(d.network)).unwrap_or(Icon::Chip), 22) }
-                </span>
+                { tile }
                 <div class="device-title">
                     <h2>{ d.title() }</h2>
                     <p>
                         if let Some(name) = d.device_type().and_then(display::device_type_name) {
-                            <span class="device-type">{ name }</span>
+                            { self.filter_chip(format!("type:{}", query::slug(&name)),
+                                html! { <span class="device-type">{ name }</span> }, link) }
                             <span class="dot-sep"></span>
                         }
-                        { d.vendor().unwrap_or_else(|| "Unknown vendor".into()) }
+                        { vendor }
                         if d.is_test_vendor() {
-                            { ui::pill("Test vendor", Some("is-warning"), None) }
+                            { self.filter_chip("is:test-vendor".into(),
+                                ui::pill("Test vendor", Some("is-warning"), None), link) }
                         }
                     </p>
                 </div>
@@ -552,9 +557,11 @@ impl App {
 
         html! {
             <div class="device-tags">
-                { for d.tags.iter().map(|tag| html! {
-                    <span class="tag-chip">{ icon(Icon::Tag, 12) }{ tag.clone() }</span>
-                }) }
+                { for d.tags.iter().map(|tag| self.filter_chip(
+                    format!("tag:{}", query::slug(tag)),
+                    html! { <span class="tag-chip">{ icon(Icon::Tag, 12) }{ tag.clone() }</span> },
+                    link,
+                )) }
                 <button class="tag-edit" title="Edit the tags"
                     onclick={link.callback(move |_| Msg::EditTags(Some(node_id)))}>
                     { icon(if d.tags.is_empty() { Icon::Plus } else { Icon::Edit }, 13) }
@@ -570,16 +577,9 @@ impl App {
         &'a self,
         d: &'a api::DeviceInfo,
     ) -> impl Iterator<Item = &'a api::OtaImageInfo> + 'a {
-        let fp = &d.fingerprint;
-
-        self.ota_images.iter().filter(move |image| {
-            fp.vendor_id
-                .is_none_or(|vid| image.vendor_id == 0 || image.vendor_id == vid)
-                && fp
-                    .product_id
-                    .is_none_or(|pid| image.product_id == 0 || image.product_id == pid)
-                && fp.software_version.is_none_or(|v| image.version > v)
-        })
+        self.ota_images
+            .iter()
+            .filter(move |image| image.applies_to(d))
     }
 
     /// A device card's update strip, when there is an image for it or an

@@ -281,9 +281,20 @@ impl MatterPeek {
             .await
     }
 
-    /// The devices on `fabric` of ours, or on all of them.
-    pub async fn list_devices(&self, fabric: FabricRef) -> Result<DeviceList, PeekError> {
-        self.call(|reply| Op::ListDevices { fabric, reply }).await
+    /// The devices on `fabric` of ours, or on all of them; those `filter`
+    /// matches (see [`query`](super::query)), if any. A filter on a live fact
+    /// (`is:shared`, `uptime:`) knows it only of the devices followed now.
+    pub async fn list_devices(
+        &self,
+        fabric: FabricRef,
+        filter: Option<String>,
+    ) -> Result<DeviceList, PeekError> {
+        self.call(|reply| Op::ListDevices {
+            fabric,
+            filter,
+            reply,
+        })
+        .await
     }
 
     /// Sync the device list with the devices on our fabrics: list the ones not
@@ -816,6 +827,7 @@ pub(crate) enum Op {
     },
     ListDevices {
         fabric: FabricRef,
+        filter: Option<String>,
         reply: Reply<DeviceList>,
     },
     Sync {

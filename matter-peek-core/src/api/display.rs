@@ -18,6 +18,7 @@ use super::types::{
     WifiSecurity, WifiVersion,
 };
 
+mod clusters;
 mod dcl;
 mod device_types;
 
@@ -271,6 +272,15 @@ pub fn product_label(vid: u16, pid: u16, name: Option<String>) -> String {
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn device_type_name(id: u32) -> Option<String> {
     device_type(id).map(|(_, name, _)| name.to_string())
+}
+
+/// The name of cluster `id`, as the Matter IDL has it: `OnOff`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn cluster_name(id: u32) -> Option<String> {
+    clusters::CLUSTERS
+        .binary_search_by_key(&id, |(i, _)| *i)
+        .ok()
+        .map(|i| clusters::CLUSTERS[i].1.to_string())
 }
 
 /// Device type `id`, e.g. `On/Off Light (0x0100)`.
@@ -549,6 +559,16 @@ mod tests {
         assert_eq!(time_source_label(99), "source 99");
     }
 
+    #[cfg(feature = "controller")]
+    #[test]
+    fn cluster_names_are_the_schemas() {
+        let schema: alloc::vec::Vec<_> = crate::schema::clusters()
+            .iter()
+            .map(|c| (c.id, c.name))
+            .collect();
+        assert_eq!(clusters::CLUSTERS, schema.as_slice());
+    }
+
     #[test]
     fn durations_start_at_the_largest_unit() {
         assert_eq!(duration(0), "0s");
@@ -602,6 +622,7 @@ mod tests {
     #[test]
     fn the_registry_is_sorted() {
         assert!(dcl::VENDORS.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(clusters::CLUSTERS.windows(2).all(|w| w[0].0 < w[1].0));
         assert!(dcl::PRODUCTS
             .windows(2)
             .all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1)));

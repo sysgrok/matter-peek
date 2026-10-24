@@ -442,8 +442,13 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                     .send(self.delete_fabric(&fabric, deletion).await)
                     .await;
             }
-            Op::ListDevices { fabric, reply } => {
-                let _ = reply.send(self.list_devices_on(&fabric, None)).await;
+            Op::ListDevices {
+                fabric,
+                filter,
+                reply,
+            } => {
+                let list = self.list_matching(&fabric, filter.as_deref().unwrap_or_default());
+                let _ = reply.send(list).await;
             }
             Op::Assistant(reply) => {
                 let model = self

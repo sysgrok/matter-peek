@@ -156,7 +156,9 @@ impl WireSession {
                 .advertised_devices()
                 .await
                 .map(|devices| Response::AdvertisedDevices { devices }),
-            Request::ListDevices { fabric } => peek.list_devices(fabric).await.map(devices),
+            Request::ListDevices { fabric, filter } => {
+                peek.list_devices(fabric, filter).await.map(devices)
+            }
             Request::PeekDevice { node_id } => peek
                 .peek_device(node_id)
                 .await

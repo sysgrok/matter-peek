@@ -14,6 +14,7 @@ use rs_matter::crypto::Crypto;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::persist::KvBlobStore;
 
+use crate::api::query::{Facts, Known, Query};
 use crate::api::{
     DeviceHealth, DeviceList, DevicesListener, FabricRef, LogIntent, NetworkInfo, NetworkKind,
     PeekError, SubscriptionState,
@@ -87,6 +88,40 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
 
         list.devices
             .retain(|d| fabrics.contains(&d.handle.fabric_index));
+
+        Ok(list)
+    }
+
+    /// The listed devices on `fabric` that `filter` matches, with what is known
+    /// of them now: the health of those followed, and the updates.
+    pub(super) fn list_matching(
+        &self,
+        fabric: &FabricRef,
+        filter: &str,
+    ) -> Result<DeviceList, PeekError> {
+        let query =
+            Query::parse(filter).map_err(|e| PeekError::failed(format!("the filter: {e}")))?;
+        let mut list = self.list_devices_on(fabric, None)?;
+        if query.is_empty() {
+            return Ok(list);
+        }
+
+        let images = self.ota_images();
+        let updates = self.ota_updates();
+        let subs = self.subs.borrow();
+        list.devices.retain(|device| {
+            let node_id = device.handle.node_id;
+            let known = Known {
+                online: None,
+                health: subs.get(&node_id).map(|watch| watch.health()),
+                ota: updates
+                    .iter()
+                    .find(|update| update.node_id == node_id)
+                    .map(|update| &update.progress),
+                images: &images,
+            };
+            query.matches(&Facts::of(device, &known))
+        });
 
         Ok(list)
     }
@@ -542,8 +577,14 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             // Its commission lists it.
             let commissioning = || self.commissioned_node.get() == Some(node_id);
 
-            let listed = self.lookup_device(node_id).is_ok();
-            if commissioning() || (listed && !refresh) {
+            // A listed device is read again on demand, or while we lack its
+            // details.
+            let listed = self.lookup_device(node_id);
+            let known = listed
+                .as_ref()
+                .is_ok_and(|device| !device.details.clusters.is_empty());
+            let listed = listed.is_ok();
+            if commissioning() || (known && !refresh) {
                 continue;
             }
 
@@ -622,6 +663,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             fingerprint: device.fingerprint,
             network: device.network,
             device_types: device.device_types,
+            details: device.details,
         };
 
         self.update_devices(|devices| adopt(devices, device.handle, &ident), None)
@@ -728,6 +770,9 @@ fn refresh_identity(device: &mut StoredDevice, ident: DeviceIdentity) {
     if !ident.device_types.is_empty() {
         device.device_types = ident.device_types;
     }
+    if !ident.details.clusters.is_empty() {
+        device.details = ident.details;
+    }
 }
 
 /// Add a record for a device on our fabric. A record of the same unit under
@@ -765,5 +810,6 @@ pub(super) fn new_record(handle: DeviceHandle, ident: &DeviceIdentity) -> Stored
         tags: Vec::new(),
         network: ident.network,
         device_types: ident.device_types.clone(),
+        details: ident.details.clone(),
     }
 }

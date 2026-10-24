@@ -79,7 +79,7 @@ controller serves the CLI, the MCP server and mobile apps.
 | Area | Methods |
 |---|---|
 | Commissioning | `commission` (IP or BLE, network credentials, `remember`, a progress listener), `cancel_commission`, `read_qr_image`, `discover` (mDNS + BLE), `advertised_devices` (the commissioned devices on the network, on our fabrics or others', grouped by device) |
-| Device list | `list_devices`, `subscribe_devices` (live: the list now, then each time it changes; returns a `DevicesSubscription`), `sync`, `remember`, `set_tags`, `decommission` |
+| Device list | `list_devices` (with a filter, see [Device filters](#device-filters)), `subscribe_devices` (live: the list now, then each time it changes; returns a `DevicesSubscription`), `sync`, `remember`, `set_tags`, `decommission` |
 | Health | `peek_device` (one-shot: also its heap, and the threads (tasks) of its software and their stacks, where it reports them), `subscribe` (live: General Diagnostics (uptime, reboots, operating hours) and the fabrics the device is on; returns a `Subscription`, which stops when dropped) |
 | Thread | `read_thread_mesh`: networks, nodes, links and findings, from our Thread devices' tables and the LAN's MeshCoP / Matter adverts |
 | Device | `read_network` (interfaces, known networks, Wi-Fi / Thread / Ethernet diagnostics), `change_network` (add or update, remove, connect, reorder a known network), `retrieve_logs`, `identify` |
@@ -203,12 +203,38 @@ of it is private to `core`.
 - **Sync** browses our fabric over mDNS: it adds the devices on it that are
   missing from the list, refreshes the others' identity and online state, and
   drops unremembered devices that are gone. The server syncs at start and every
-  5 minutes.
+  5 minutes; those syncs read again only the devices whose details it lacks.
+- A device's identity read (one IM read of eight paths, within the nine a
+  device must take) also gets its **details**: the Matter version, the
+  clusters it serves, its application endpoints, its power sources, how it
+  idles (ICD), and its network (SSID or Thread network name, Thread role).
 - **Decommission** sends `RemoveFabric` over CASE, retried for up to 30 s, and
   drops the device either way (with a warning if it could not be reached);
   `force` skips contacting it.
 - Before AddNOC, commissioning removes any fabric on the device that has our
   root key (left over from a lost store), so fabric slots don't leak.
+
+### Device filters
+`core::api::query` is the one filter language of the web UI, the CLI
+(`list <filter>`, `filters`), MCP (`list_devices` `filter`) and the API
+(`list_devices`): words match the start of a word of anything known of a
+device (tags, names, the facets' values); `key:value` matches one facet,
+`key:a,b` either value; `-term` negates; quotes keep spaces; facets with
+numbers take `<`, `<=`, `>`, `>=`, `=` in their units (`uptime:<1h`,
+`heap:<16k`, `spec:>=1.4`). So the tag `offline` and the state `is:offline`
+never collide: a word matches both, `tag:` and `is:` one each.
+
+The facets come from the record (`net`, `type`, `vendor`, `product`, `fabric`,
+`sw`, `hw`, `node`, `label`, `tag`, and the details: `spec`, `cluster`, `can`,
+`power`, `icd`, `endpoints`, `ssid`, `thread`, `role`), from the health
+subscription (`eco`, `fabrics`, `uptime`, `reboots`, `hours`, `heap`) and from
+the updates (`ota`); `is:` takes states (online, offline, remembered, shared,
+fabrics-full, updatable, updating, sleepy, bridge, test-vendor). The web knows
+the live facts of every card; the server only of the devices followed now, so
+there a term on a live fact matches no other device. The web box completes
+the last term from the devices shown (facets, and values with how many
+devices have them), and a card's network icon, type, vendor and tags add
+their term.
 
 ### Commissioning
 - Over IP: PASE, AddNOC, then CASE to finish. Over BLE: PASE over BTP, the
@@ -461,7 +487,8 @@ inventory with remember, tags and sync; one-shot and live health; diagnostic
 logs; identify; OTA Provider and updates; decommission; a device's networking
 and changes to its networks; the Thread mesh; several fabrics of our own; a
 device's fabrics, and removing another controller's; the devices on other
-controllers' fabrics; the data model (device types, any attribute read,
+controllers' fabrics; device filters over tags and everything known of a
+device; the data model (device types, any attribute read,
 written or followed live, any command, the events), with controls on the
 back of each card; sharing a device through
 an enhanced commissioning window; a time source for our devices, and their
@@ -469,10 +496,7 @@ clocks read and set; web UI, CLI and MCP on one API, in one executable; the API 
 
 **Next**
 - Migrating devices to a new Wi-Fi, and other changes to the networks of many
-  devices at once.
-- Filtering devices by what we know of them (Wi-Fi / Thread / Ethernet, device
-  types, clusters, fabrics), next to the user's tags; the same filters select
-  devices for bulk changes.
+  devices at once, selected with a filter.
 - Devices on other fabrics only (to have their commissioning windows opened
   for us).
 - Adding a device to, or moving it to, another fabric of ours (through our

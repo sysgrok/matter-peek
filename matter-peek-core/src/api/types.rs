@@ -515,6 +515,79 @@ pub struct DeviceInfo {
     /// The device types of its application endpoints, if known.
     #[serde(default)]
     pub device_types: Vec<u32>,
+    /// What it serves, and the network it is on.
+    #[serde(default)]
+    pub details: DeviceDetails,
+}
+
+/// What a device serves and the network it is on, beyond its identity: read
+/// with it, and again with each sync.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DeviceDetails {
+    /// The Matter specification version it implements, as BasicInformation
+    /// `SpecificationVersion` has it: `0x01040200` is 1.4.2.
+    #[serde(default)]
+    pub spec_version: Option<u32>,
+    /// The clusters it serves, on any endpoint, sorted.
+    #[serde(default)]
+    pub clusters: Vec<u32>,
+    /// How many application endpoints it has (all but the root's).
+    #[serde(default)]
+    pub endpoints: Option<u16>,
+    /// Its kinds of power source, if it says.
+    #[serde(default)]
+    pub power: Vec<PowerKind>,
+    /// How it idles, if it is an intermittently connected device.
+    #[serde(default)]
+    pub icd: Option<IcdMode>,
+    /// The Wi-Fi network (SSID) or Thread network (name) it is on; empty if
+    /// unknown.
+    #[serde(default)]
+    pub network_name: String,
+    /// Its role in its Thread network.
+    #[serde(default)]
+    pub thread_role: Option<ThreadRole>,
+}
+
+/// A kind of power source, as the Power Source cluster's features have it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum PowerKind {
+    Wired,
+    Battery,
+    Rechargeable,
+    Replaceable,
+}
+
+impl PowerKind {
+    /// All of them, in the order of their feature bits.
+    pub const ALL: [Self; 4] = [
+        Self::Wired,
+        Self::Battery,
+        Self::Rechargeable,
+        Self::Replaceable,
+    ];
+
+    /// Those of Power Source features `features`.
+    pub fn of_features(features: u32) -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .enumerate()
+            .filter(|(bit, _)| features & (1 << bit) != 0)
+            .map(|(_, kind)| kind)
+            .collect()
+    }
+
+    /// The feature bits of `kinds`.
+    pub fn features(kinds: &[Self]) -> u32 {
+        Self::ALL
+            .into_iter()
+            .enumerate()
+            .filter(|(_, kind)| kinds.contains(kind))
+            .fold(0, |bits, (bit, _)| bits | 1 << bit)
+    }
 }
 
 /// The numeric BasicInformation attributes of a device.

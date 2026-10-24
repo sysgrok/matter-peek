@@ -136,6 +136,21 @@ To see what a strong model makes of the tools alone, `scripts/claude-eval.sh`
 runs Claude Code with only these tools: no auto-memory, CLAUDE.md, user
 settings or Claude Code tools of its own.
 
+### Filtering devices
+
+One filter language for the web UI's filter box, `matter-peek list <filter>`
+and MCP's `list_devices` `filter`: words match the start of a word of
+anything known of a device (tags, names, the facets' values), and
+`key:value` terms match one facet: `net:thread is:offline`,
+`-eco:google cluster:on-off`, `type:light spec:>=1.4`, `uptime:<1h`,
+`tag:"ground floor"`. `key:a,b` takes either value and `-term` negates.
+`matter-peek filters` lists the facets (network, SSID and Thread network,
+device type, vendor, product, clusters, power, ICD, versions, the other
+controllers it is on, uptime, heap, update, ...) and the `is:` states
+(online, shared, fabrics-full, updatable, sleepy, ...). The web box completes
+the last term, with how many devices have each value; a card's network icon,
+type, vendor and tags add their term.
+
 ### Fabrics: several homes
 
 matter-peek keeps devices on fabrics of its own, each with a root CA of its

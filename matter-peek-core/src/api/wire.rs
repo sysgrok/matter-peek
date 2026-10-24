@@ -128,6 +128,8 @@ pub enum Request {
     ListDevices {
         #[serde(default)]
         fabric: FabricRef,
+        #[serde(default)]
+        filter: Option<String>,
     },
     /// See `MatterPeek::peek_device`. Answered with [`Response::Peek`].
     PeekDevice { node_id: u64 },
@@ -297,7 +299,7 @@ impl Request {
     pub fn default_fabric(&mut self, fabric: &FabricRef) {
         match self {
             Self::Commission { fabric: of, .. }
-            | Self::ListDevices { fabric: of }
+            | Self::ListDevices { fabric: of, .. }
             | Self::Sync { fabric: of }
             | Self::ReadThreadMesh { fabric: of }
                 if *of == FabricRef::Default =>

@@ -25,7 +25,7 @@ use clap::builder::BoolishValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::server::client::{self, Connection};
-use matter_peek_core::api::{self, display, wire};
+use matter_peek_core::api::{self, display, query, wire};
 
 mod chat;
 mod mcp;
@@ -67,7 +67,13 @@ enum Command {
         /// On all our fabrics.
         #[arg(long)]
         all: bool,
+        /// Only those this filter matches, e.g. `net:thread is:online
+        /// -eco:google`; `matter-peek filters` lists what it takes.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        filter: Vec<String>,
     },
+    /// What `list` filters take: their syntax, facets and states.
+    Filters,
     /// Sync the device list with the devices on our fabrics.
     Sync,
     /// Our fabrics: the "homes" devices are commissioned into.
@@ -503,6 +509,10 @@ fn main() -> ExitCode {
     if let Command::Serve { listen } = &cli.command {
         return serve(listen);
     }
+    if let Command::Filters = &cli.command {
+        print_filters();
+        return ExitCode::SUCCESS;
+    }
 
     match server::block_on(run(cli)) {
         Ok(true) => ExitCode::SUCCESS,
@@ -580,12 +590,24 @@ async fn run(cli: Cli) -> io::Result<bool> {
     let out = Out { json: cli.json };
 
     match cli.command {
-        Command::List { all } => {
+        Command::List { all, filter } => {
             let fabric = if all { api::FabricRef::All } else { fabric };
-            let request = wire::Request::ListDevices { fabric };
+            let filter = (!filter.is_empty()).then(|| filter_text(&filter));
+            let filtered = filter.is_some();
+            let request = wire::Request::ListDevices { fabric, filter };
 
-            devices(&out, call(&conn, &out, request).await?)
+            match call(&conn, &out, request).await? {
+                Some(wire::Response::Devices { devices, .. })
+                    if filtered && devices.is_empty() && !out.json =>
+                {
+                    println!("No device matches the filter.");
+                    Ok(true)
+                }
+                response => devices(&out, response),
+            }
         }
+        // Answered before connecting.
+        Command::Filters => Ok(true),
         Command::Sync => devices(
             &out,
             call(&conn, &out, wire::Request::Sync { fabric }).await?,
@@ -1423,6 +1445,45 @@ fn fabrics(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
     }
 
     Ok(true)
+}
+
+/// The filter the words of `list` make: a word with spaces (quoted in the
+/// shell) is quoted again.
+fn filter_text(words: &[String]) -> String {
+    let quoted: Vec<String> = words
+        .iter()
+        .map(|word| {
+            if !word.contains(char::is_whitespace) || word.contains('"') {
+                return word.clone();
+            }
+            match word.split_once(':') {
+                Some((key, value)) => format!("{key}:\"{value}\""),
+                None => format!("\"{word}\""),
+            }
+        })
+        .collect();
+
+    quoted.join(" ")
+}
+
+/// What filters take, a facet or state a line.
+fn print_filters() {
+    println!("Words match the start of a word of anything known of a device: its tags,");
+    println!("names and facet values. key:value matches one facet, key:a,b either value;");
+    println!("-term negates; quotes keep spaces. Facets with numbers take <, <=, >, >=, =");
+    println!("in their units (uptime:<1h, heap:<16k, spec:>=1.4). All terms must match.");
+    println!("No OR between terms, and no brackets. Live facts (is:shared, uptime:, ...)");
+    println!("are known only of the devices followed now.");
+    println!();
+    println!("Facets:");
+    for facet in query::FACETS {
+        println!("  {:<10} {}", format!("{}:", facet.key), facet.help);
+    }
+    println!();
+    println!("States (is:):");
+    for (state, help) in query::STATES {
+        println!("  {state:<13} {help}");
+    }
 }
 
 fn devices(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {

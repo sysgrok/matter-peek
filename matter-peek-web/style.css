@@ -96,6 +96,19 @@ html, body { background: var(--bulma-scheme-main-bis); min-height: 100vh; }
 .page-head-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
 .page-head-actions:has(.search-box) { flex: 1 1 auto; justify-content: flex-end; }
 .search-box { flex: 1 1 15rem; }
+.search-box { position: relative; }
+.filter-suggestions { position: absolute; top: calc(100% + .35rem); left: 0; right: 0; z-index: 31; max-height: 22rem; overflow-y: auto; padding: .35rem; border: 1px solid var(--bulma-border-weak); border-radius: 12px; background: var(--bulma-scheme-main); box-shadow: 0 12px 32px hsla(220, 30%, 10%, .18); }
+.filter-suggestion { display: flex; align-items: baseline; gap: .75rem; padding: .4rem .6rem; border-radius: 8px; cursor: pointer; }
+.filter-suggestion:hover { background: var(--bulma-background); }
+.filter-suggestion.is-active { background: hsla(var(--link-hsl), .1); }
+.filter-suggestion-term { flex: none; font-family: var(--bulma-code-family); font-size: .82rem; color: var(--bulma-text-strong); }
+.filter-suggestion.is-active .filter-suggestion-term { color: var(--bulma-link); }
+.filter-suggestion-help { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .78rem; color: var(--bulma-text-weak); }
+.filter-error { margin: -.75rem 0 1rem; font-size: .85rem; color: var(--bulma-danger-on-scheme); }
+.filter-chip { cursor: pointer; }
+.filter-chip:hover > .tag-chip, .filter-chip:hover > .pill { filter: brightness(.95); }
+.device-title .filter-chip:hover { color: var(--bulma-link); }
+.device-head > .filter-chip { flex: none; display: inline-flex; }
 .live-count { font-weight: 600; color: var(--bulma-success-on-scheme); }
 @media screen and (max-width: 768px) {
   .page-title { font-size: 1.5rem; }

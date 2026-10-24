@@ -30,10 +30,11 @@ use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::sync::blocking::Mutex;
 
 use crate::api::agent::{ModelConfig, Think};
-use crate::model::{DeviceHandle, NetworkKind, StoredDevice};
+use crate::api::{IcdMode, PowerKind, ThreadRole};
+use crate::model::{DeviceDetails, DeviceHandle, NetworkKind, StoredDevice};
 
 /// Scratch buffer size for the KV store (fits a fabric blob or our device list).
-const KV_BUF_LEN: usize = 4096;
+const KV_BUF_LEN: usize = 64 * 1024;
 
 /// The scratch buffer a [`ControllerStore`] lends to its [`SharedKvBlobStore`].
 ///
@@ -323,6 +324,50 @@ fn network_kind(code: u8) -> Option<NetworkKind> {
     }
 }
 
+/// The code `mode` is stored as.
+fn icd_code(mode: IcdMode) -> u8 {
+    match mode {
+        IcdMode::Sit => 0,
+        IcdMode::Lit => 1,
+    }
+}
+
+/// The [`IcdMode`] stored as `code`.
+fn icd_mode(code: u8) -> Option<IcdMode> {
+    match code {
+        0 => Some(IcdMode::Sit),
+        1 => Some(IcdMode::Lit),
+        _ => None,
+    }
+}
+
+/// The code `role` is stored as: the Thread Network Diagnostics value.
+fn thread_role_code(role: ThreadRole) -> u8 {
+    match role {
+        ThreadRole::Unspecified => 0,
+        ThreadRole::Unassigned => 1,
+        ThreadRole::SleepyEndDevice => 2,
+        ThreadRole::EndDevice => 3,
+        ThreadRole::Reed => 4,
+        ThreadRole::Router => 5,
+        ThreadRole::Leader => 6,
+    }
+}
+
+/// The [`ThreadRole`] stored as `code`.
+fn thread_role(code: u8) -> Option<ThreadRole> {
+    match code {
+        0 => Some(ThreadRole::Unspecified),
+        1 => Some(ThreadRole::Unassigned),
+        2 => Some(ThreadRole::SleepyEndDevice),
+        3 => Some(ThreadRole::EndDevice),
+        4 => Some(ThreadRole::Reed),
+        5 => Some(ThreadRole::Router),
+        6 => Some(ThreadRole::Leader),
+        _ => None,
+    }
+}
+
 /// `None` for an empty string, `Some(clone)` otherwise — so blank device names
 /// don't bloat the persisted blob and round-trip cleanly to/from empty.
 fn opt_str(s: &str) -> Option<String> {
@@ -441,6 +486,14 @@ struct StoredDeviceWire {
     software_version_string: Option<String>,
     // The device types of the application endpoints; appended last, as `network`.
     device_types: Option<Vec<u32>>,
+    // Its `DeviceDetails`; appended last, as `network`.
+    spec_version: Option<u32>,
+    clusters: Option<Vec<u32>>,
+    endpoints: Option<u16>,
+    power: Option<u32>,
+    icd: Option<u8>,
+    network_name: Option<String>,
+    thread_role: Option<u8>,
 }
 
 impl StoredDeviceList {
@@ -468,6 +521,14 @@ impl StoredDeviceList {
                     hardware_version_string: opt_str(&d.hardware_version_string),
                     software_version_string: opt_str(&d.software_version_string),
                     device_types: (!d.device_types.is_empty()).then(|| d.device_types.clone()),
+                    spec_version: d.details.spec_version,
+                    clusters: (!d.details.clusters.is_empty()).then(|| d.details.clusters.clone()),
+                    endpoints: d.details.endpoints,
+                    power: (!d.details.power.is_empty())
+                        .then(|| PowerKind::features(&d.details.power)),
+                    icd: d.details.icd.map(icd_code),
+                    network_name: opt_str(&d.details.network_name),
+                    thread_role: d.details.thread_role.map(thread_role_code),
                 })
                 .collect(),
         }
@@ -501,6 +562,15 @@ impl StoredDeviceList {
                     tags: w.tags,
                     network: w.network.and_then(network_kind),
                     device_types: w.device_types.unwrap_or_default(),
+                    details: DeviceDetails {
+                        spec_version: w.spec_version,
+                        clusters: w.clusters.unwrap_or_default(),
+                        endpoints: w.endpoints,
+                        power: w.power.map(PowerKind::of_features).unwrap_or_default(),
+                        icd: w.icd.and_then(icd_mode),
+                        network_name: w.network_name.unwrap_or_default(),
+                        thread_role: w.thread_role.and_then(thread_role),
+                    },
                 })
             })
             .collect()
@@ -580,6 +650,15 @@ mod tests {
             tags: tags.iter().map(|t| t.to_string()).collect(),
             network: Some(NetworkKind::Thread),
             device_types: vec![0x0100, 0x0302],
+            details: DeviceDetails {
+                spec_version: Some(0x0104_0200),
+                clusters: vec![0x0003, 0x0006, 0x002F, 0x0046],
+                endpoints: Some(2),
+                power: vec![PowerKind::Battery, PowerKind::Replaceable],
+                icd: Some(IcdMode::Lit),
+                network_name: "MyHome".to_string(),
+                thread_role: Some(ThreadRole::SleepyEndDevice),
+            },
         }
     }
 

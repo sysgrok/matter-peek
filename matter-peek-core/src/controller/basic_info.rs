@@ -1,14 +1,17 @@
 //! Reading a device's identity in one round trip: its BasicInformation (the
 //! stable string identifiers `UniqueID` / `SerialNumber` / `NodeLabel`, its
 //! names and version strings, and a fingerprint from the mandatory numeric
-//! attributes as a fallback), and the kind of network it is on.
+//! attributes as a fallback), the kind of network it is on, and its details:
+//! what it serves, its power, how it idles, and its network.
 //!
 //! All reads are best-effort: an optional attribute the device doesn't serve
 //! comes back as an attribute-status error in that attribute's iterator, which
 //! we map to an empty field / `None`.
 
 extern crate alloc;
+use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use core::num::NonZeroU8;
 
@@ -17,8 +20,15 @@ use log::debug;
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::decl::basic_information::{self, BasicInformationAttrResponses as _};
 use rs_matter::dm::clusters::decl::descriptor::{self, DescriptorAttrResponses as _};
+use rs_matter::dm::clusters::decl::icd_management::{
+    self, IcdManagementAttrResponses as _, OperatingModeEnum,
+};
 use rs_matter::dm::clusters::decl::network_commissioning::{
     self, NetworkCommissioningAttrResponses as _,
+};
+use rs_matter::dm::clusters::decl::power_source::{self, PowerSourceAttrResponses as _};
+use rs_matter::dm::clusters::decl::thread_network_diagnostics::{
+    self, RoutingRoleEnum, ThreadNetworkDiagnosticsAttrResponses as _,
 };
 use rs_matter::dm::EndptId;
 use rs_matter::error::Error;
@@ -27,6 +37,7 @@ use rs_matter::im::{AttrPath, GenericPath};
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::Matter;
 
+use crate::api::{IcdMode, NetworkKind, PowerKind, ThreadRole};
 use crate::model::DeviceIdentity;
 
 /// BasicInformation lives on the root node endpoint.
@@ -58,8 +69,9 @@ async fn try_read_basic_info<C: Crypto>(
     fab_idx: NonZeroU8,
     node_id: u64,
 ) -> Result<DeviceIdentity, Error> {
-    // BasicInformation whole (it is small), and the kind of network of the
-    // primary interface.
+    // BasicInformation and the primary interface's Network Commissioning
+    // whole (they are small); eight paths in all, within the nine a device
+    // must take.
     let paths = [
         AttrPath::from_gp(&GenericPath::new(
             Some(ROOT_ENDPOINT),
@@ -69,14 +81,33 @@ async fn try_read_basic_info<C: Crypto>(
         AttrPath::from_gp(&GenericPath::new(
             Some(ROOT_ENDPOINT),
             Some(network_commissioning::FULL_CLUSTER.id),
-            Some(network_commissioning::AttributeId::FeatureMap as _),
-        )),
-        // What it is: the device types of every endpoint.
-        AttrPath::from_gp(&GenericPath::new(
             None,
-            Some(descriptor::FULL_CLUSTER.id),
-            Some(descriptor::AttributeId::DeviceTypeList as _),
         )),
+        // What it is, and what it serves, on every endpoint.
+        attr(
+            descriptor::FULL_CLUSTER.id,
+            descriptor::AttributeId::DeviceTypeList as _,
+        ),
+        attr(
+            descriptor::FULL_CLUSTER.id,
+            descriptor::AttributeId::ServerList as _,
+        ),
+        attr(
+            power_source::FULL_CLUSTER.id,
+            power_source::AttributeId::FeatureMap as _,
+        ),
+        attr(
+            icd_management::FULL_CLUSTER.id,
+            icd_management::AttributeId::OperatingMode as _,
+        ),
+        attr(
+            thread_network_diagnostics::FULL_CLUSTER.id,
+            thread_network_diagnostics::AttributeId::NetworkName as _,
+        ),
+        attr(
+            thread_network_diagnostics::FULL_CLUSTER.id,
+            thread_network_diagnostics::AttributeId::RoutingRole as _,
+        ),
     ];
 
     let exchange = Exchange::initiate(matter, crypto, fab_idx, node_id).await?;
@@ -87,6 +118,11 @@ async fn try_read_basic_info<C: Crypto>(
     // Each chunk carries some of the attributes; an attribute the device does
     // not serve comes back as a status, read as empty / `None`.
     let mut identity = DeviceIdentity::default();
+    let mut clusters = BTreeSet::new();
+    let mut endpoints = BTreeSet::new();
+    let mut power = None;
+    let mut operating_mode = None;
+    let mut networks: Vec<(Vec<u8>, bool)> = Vec::new();
     loop {
         {
             let resp = chunk.response()?;
@@ -111,6 +147,10 @@ async fn try_read_basic_info<C: Crypto>(
             set(&mut fp.product_id, reads.product_id());
             set(&mut fp.hardware_version, reads.hardware_version());
             set(&mut fp.software_version, reads.software_version());
+            set(
+                &mut identity.details.spec_version,
+                reads.specification_version(),
+            );
 
             let mut feature_map = None;
             set(
@@ -119,6 +159,43 @@ async fn try_read_basic_info<C: Crypto>(
             );
             if let Some(features) = feature_map {
                 identity.network = crate::network::kind_of(features);
+            }
+            for (_, list) in resp.network_commissioning_read_resp().networks() {
+                let Ok(list) = list else { continue };
+                for network in list.iter().filter_map(Result::ok) {
+                    if let (Ok(id), Ok(connected)) = (network.network_id(), network.connected()) {
+                        networks.push((id.to_vec(), connected));
+                    }
+                }
+            }
+
+            for (endpoint, list) in resp.descriptor_read_resp().server_list() {
+                let Ok(list) = list else { continue };
+                if endpoint != ROOT_ENDPOINT {
+                    endpoints.insert(endpoint);
+                }
+                clusters.extend(list.iter().filter_map(Result::ok));
+            }
+            for (_, features) in resp.power_source_read_resp().feature_map() {
+                if let Ok(features) = features {
+                    power = Some(power.unwrap_or(0) | features);
+                }
+            }
+            set(
+                &mut operating_mode,
+                resp.icd_management_read_resp().operating_mode(),
+            );
+
+            let thread = resp.thread_network_diagnostics_read_resp();
+            for (_, name) in thread.network_name() {
+                if let Ok(Some(name)) = name.map(|name| name.into_option()) {
+                    identity.details.network_name = name.to_string();
+                }
+            }
+            for (_, role) in thread.routing_role() {
+                if let Ok(Some(role)) = role.map(|role| role.into_option()) {
+                    identity.details.thread_role = Some(thread_role(role));
+                }
             }
 
             for (endpoint, list) in resp.descriptor_read_resp().device_type_list() {
@@ -138,8 +215,54 @@ async fn try_read_basic_info<C: Crypto>(
 
         match chunk.complete().await? {
             Some(next) => chunk = next,
-            None => return Ok(identity),
+            None => break,
         }
+    }
+
+    let details = &mut identity.details;
+    if !clusters.is_empty() {
+        details.endpoints = Some(endpoints.len() as u16);
+        // The ICD Management cluster without a mode is a short-idle one.
+        if clusters.contains(&icd_management::FULL_CLUSTER.id) {
+            details.icd = Some(match operating_mode {
+                Some(OperatingModeEnum::LIT) => IcdMode::Lit,
+                _ => IcdMode::Sit,
+            });
+        }
+        details.clusters = clusters.into_iter().collect();
+    }
+    details.power = power.map(PowerKind::of_features).unwrap_or_default();
+    // A Wi-Fi device's network: the one flagged connected, or its only one.
+    if identity.network == Some(NetworkKind::WiFi) {
+        let only = (networks.len() == 1).then(|| &networks[0].0);
+        let ssid = networks
+            .iter()
+            .find(|(_, connected)| *connected)
+            .map(|(id, _)| id)
+            .or(only);
+        if let Some(ssid) = ssid {
+            details.network_name = String::from_utf8_lossy(ssid).into_owned();
+        }
+    }
+
+    Ok(identity)
+}
+
+/// Attribute `attribute` of cluster `cluster`, on every endpoint.
+fn attr(cluster: u32, attribute: u32) -> AttrPath {
+    AttrPath::from_gp(&GenericPath::new(None, Some(cluster), Some(attribute)))
+}
+
+/// `role`, as the API has it.
+fn thread_role(role: RoutingRoleEnum) -> ThreadRole {
+    match role {
+        RoutingRoleEnum::Unspecified => ThreadRole::Unspecified,
+        RoutingRoleEnum::Unassigned => ThreadRole::Unassigned,
+        RoutingRoleEnum::SleepyEndDevice => ThreadRole::SleepyEndDevice,
+        RoutingRoleEnum::EndDevice => ThreadRole::EndDevice,
+        RoutingRoleEnum::REED => ThreadRole::Reed,
+        RoutingRoleEnum::Router => ThreadRole::Router,
+        RoutingRoleEnum::Leader => ThreadRole::Leader,
     }
 }
 

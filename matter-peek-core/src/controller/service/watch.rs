@@ -51,6 +51,11 @@ pub(super) struct Watch {
 }
 
 impl Watch {
+    /// The health merged from the reports so far.
+    pub(super) fn health(&self) -> &DeviceHealth {
+        &self.health
+    }
+
     fn new(stop: async_channel::Sender<()>, retry: Rc<Notification>) -> Self {
         Self {
             stop,

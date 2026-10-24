@@ -2,7 +2,9 @@
 
 use core::num::NonZeroU8;
 
-pub use crate::api::{DeviceHealth, GeneralDiag, LogIntent, NetworkKind, SoftwareDiag};
+pub use crate::api::{
+    DeviceDetails, DeviceHealth, GeneralDiag, LogIntent, NetworkKind, SoftwareDiag,
+};
 
 /// Which diagnostic clusters to read in a health snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +92,8 @@ pub struct StoredDevice {
     pub network: Option<NetworkKind>,
     /// The device types of its application endpoints, if known.
     pub device_types: alloc::vec::Vec<u32>,
+    /// What it serves, and the network it is on.
+    pub details: DeviceDetails,
 }
 
 /// Device identity read from the BasicInformation cluster at commission time.
@@ -125,6 +129,8 @@ pub struct DeviceIdentity {
     pub network: Option<NetworkKind>,
     /// The device types of its application endpoints (all but the root's).
     pub device_types: alloc::vec::Vec<u32>,
+    /// What it serves, and the network it is on.
+    pub details: DeviceDetails,
 }
 
 /// The always-available numeric BasicInformation attributes.
@@ -251,6 +257,7 @@ mod tests {
             tags: vec!["keep-me".to_string()],
             network: None,
             device_types: vec![],
+            details: DeviceDetails::default(),
         }
     }
 
@@ -266,6 +273,7 @@ mod tests {
             fingerprint,
             network: None,
             device_types: vec![],
+            details: DeviceDetails::default(),
         }
     }
 
