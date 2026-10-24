@@ -37,7 +37,10 @@ use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::{NetworkReceive, NetworkSend, NoNetwork};
 use rs_matter::Matter;
 
-use crate::api::{BorderRouter, FabricRef, ModelScope, Op, PeekConfig, PeekError, Service};
+use crate::api::{
+    BorderRouter, DeviceInfo, DevicesListener, FabricRef, ModelScope, Op, PeekConfig, PeekError,
+    Service,
+};
 use crate::fabrics::OurFabrics;
 use crate::matter::Controller;
 use crate::mdns::Mdns;
@@ -144,6 +147,10 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     /// The listed devices we keep no record of (not remembered): commissioned
     /// without `remember`, or found by a sync, since the controller started.
     transient: RefCell<Vec<StoredDevice>>,
+    /// Who follows the device list, by watcher ID.
+    devices_listeners: RefCell<Vec<(u64, Arc<dyn DevicesListener>)>>,
+    /// The device list as they were last told it.
+    devices_told: RefCell<Option<Vec<DeviceInfo>>>,
     /// The names of Thread networks, by extended PAN ID, as border routers
     /// advertise them.
     thread_names: RefCell<BTreeMap<u64, String>>,
@@ -186,8 +193,9 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                         next_sync = after(SYNC_PERIOD_SECS);
                     }
 
-                    if let Some(run) = self.start(op).await {
-                        running.push(run);
+                    match self.start(op).await {
+                        Some(run) => running.push(run),
+                        None => self.tell_devices(),
                     }
                 }
                 Either3::First(Err(_)) => return,
@@ -205,7 +213,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                         }));
                     }
                 }
-                Either3::Third(()) => {}
+                Either3::Third(()) => self.tell_devices(),
             }
         }
     }
@@ -259,6 +267,8 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             | Op::Remember { .. }
             | Op::SetTags { .. }
             | Op::Unwatch { .. }
+            | Op::WatchDevices { .. }
+            | Op::UnwatchDevices { .. }
             | Op::OtaImages(_)
             | Op::OtaUpdates(_)
             | Op::OtaUploadBegin { .. }
@@ -523,6 +533,10 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                     .await;
             }
             Op::Unwatch { node_id, watcher } => self.unwatch(node_id, watcher),
+            Op::WatchDevices { listener, reply } => {
+                let _ = reply.send(self.watch_devices(listener)).await;
+            }
+            Op::UnwatchDevices { watcher } => self.unwatch_devices(watcher),
             Op::OtaImages(reply) => {
                 let _ = reply.send(Ok(self.ota_images())).await;
             }
@@ -727,6 +741,8 @@ async fn run<'a, C, S, O, N, M>(
         next_upload_id: Cell::new(1),
         online: RefCell::new(None),
         transient: RefCell::new(Vec::new()),
+        devices_listeners: RefCell::new(Vec::new()),
+        devices_told: RefCell::new(None),
         thread_names: RefCell::new(BTreeMap::new()),
         thread_names_missed: Cell::new(None),
         border_routers: RefCell::new(BTreeMap::new()),
@@ -841,7 +857,8 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             Op::Assistant(reply) => refuse(reply, error).await,
             Op::ReadThreadMesh { reply, .. } => refuse(reply, error).await,
             Op::SetAssistant { reply, .. } => refuse(reply, error).await,
-            Op::Unwatch { .. } | Op::OtaUploadDiscard { .. } => {}
+            Op::WatchDevices { reply, .. } => refuse(reply, error).await,
+            Op::Unwatch { .. } | Op::UnwatchDevices { .. } | Op::OtaUploadDiscard { .. } => {}
         }
     }
 }

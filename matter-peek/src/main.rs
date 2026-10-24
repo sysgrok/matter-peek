@@ -1165,8 +1165,8 @@ impl Out {
             wire::Event::OtaProgress { progress, .. } => {
                 println!("{}", ota_progress_text(progress))
             }
-            // The commands ask the server for no chats.
-            wire::Event::Chat { .. } => {}
+            // The commands ask the server for no chats, nor to follow the list.
+            wire::Event::Chat { .. } | wire::Event::Devices { .. } => {}
         }
     }
 }

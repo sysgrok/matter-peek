@@ -367,6 +367,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                     SubscriptionState::Offline => self.set_online(node_id, false),
                     SubscriptionState::Stopped => {}
                 }
+                self.tell_devices();
                 with_watch(&mut |watch| watch.set_state(node_id, state));
             },
         );

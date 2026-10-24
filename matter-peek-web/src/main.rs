@@ -287,15 +287,20 @@ enum Msg {
     /// Attributes a device's (node_id) subscription reported, for its card and
     /// the data model popup.
     ModelEvent(u64, api::DeviceModel),
+    /// The device list changed, on the server.
+    DevicesChanged(Vec<api::DeviceInfo>),
     /// Turn a device's (node_id) card to its controls (`true`), or its health.
     Flip(u64, bool),
     /// Turn the cards shown to their controls (`true`), or their health.
     FlipAll(bool),
     /// A control on the back of a device's (node_id) card.
     CardAct(u64, datamodel::Action),
-    /// What a device (node_id) answered a control on its card with.
-    CardDone(u64, wire::Response),
-    CardFailed(u64, String),
+    /// Re-read the controls on the back of a device's (node_id) card.
+    CardRefresh(u64),
+    /// What a device (node_id) answered a control, or a Refresh (`true`), on
+    /// its card with.
+    CardDone(u64, bool, wire::Response),
+    CardFailed(u64, bool, String),
     /// Edit the tag-input text for a given device (node_id).
     TagsInput(u64, String),
     /// Persist the edited tags for a given device.
@@ -728,13 +733,9 @@ impl Component for App {
             }
             Msg::OtaProgress(node_id, progress) => {
                 self.ota_announcing.remove(&node_id);
-                let ended = self.ota_ends(node_id, &progress);
                 self.ota_status
                     .insert(node_id, ota_progress_text(&progress));
                 self.ota_progress.insert(node_id, progress);
-                if ended {
-                    self.relist(ctx);
-                }
                 true
             }
             Msg::OtaAnnounced(node_id, result) => {
@@ -755,7 +756,6 @@ impl Component for App {
                 };
 
                 // The running ones, and those this page shows already.
-                let mut ended = false;
                 for update in &updates {
                     let node_id = update.node_id;
                     if !update.in_progress() && !self.ota_progress.contains_key(&node_id) {
@@ -766,7 +766,6 @@ impl Component for App {
                         .get(&node_id)
                         .is_none_or(|shown| ota_stage(&update.progress) >= ota_stage(shown))
                     {
-                        ended |= self.ota_ends(node_id, &update.progress);
                         self.ota_status
                             .insert(node_id, ota_progress_text(&update.progress));
                         self.ota_progress.insert(node_id, update.progress.clone());
@@ -780,9 +779,6 @@ impl Component for App {
                 if updates.iter().any(api::OtaUpdateInfo::in_progress) {
                     self.ota_polling = true;
                     read_ota_updates(ctx.link().clone(), OTA_UPDATES_POLL_MS);
-                }
-                if ended {
-                    self.relist(ctx);
                 }
                 true
             }
@@ -1266,8 +1262,9 @@ impl Component for App {
                 }
                 self.sub_ws = Some(tx);
                 self.sub_ws_opening = false;
-                // (Re)send Subscribe for every device we intend to watch — covers
-                // the initial open and any reconnect.
+                // (Re)send Subscribe for the list and every device we intend to
+                // watch — covers the initial open and any reconnect.
+                self.sub_send(&wire::Request::SubscribeDevices);
                 let nodes: Vec<u64> = self.subs.keys().copied().collect();
                 for node_id in nodes {
                     self.sub_send(&wire::Request::Subscribe { node_id });
@@ -1292,9 +1289,7 @@ impl Component for App {
                 for sub in self.subs.values_mut() {
                     sub.conn = SubConn::Reconnecting;
                 }
-                if !self.subs.is_empty() || !self.model_scopes.is_empty() {
-                    self.open_sub_ws(ctx, SUB_WS_RETRY_MS);
-                }
+                self.open_sub_ws(ctx, SUB_WS_RETRY_MS);
                 true
             }
             Msg::SubscribeFailed(node_id) => {
@@ -1320,6 +1315,10 @@ impl Component for App {
                 false
             }
             Msg::ModelEvent(node_id, model) => self.model_event(node_id, model),
+            Msg::DevicesChanged(devices) => {
+                self.take_devices(ctx, devices);
+                true
+            }
             Msg::Flip(node_id, controls) => {
                 if controls {
                     self.flipped.insert(node_id);
@@ -1351,22 +1350,56 @@ impl Component for App {
                 request_loop(
                     ctx.link().clone(),
                     datamodel::request(node_id, action),
-                    move |response| Msg::CardDone(node_id, response),
-                    move |e| Msg::CardFailed(node_id, e),
+                    move |response| Msg::CardDone(node_id, false, response),
+                    move |e| Msg::CardFailed(node_id, false, e),
                 );
                 true
             }
-            Msg::CardDone(node_id, response) => {
-                self.finish(Pending::Device {
-                    node_id,
-                    refresh: false,
-                });
+            Msg::CardRefresh(node_id) => {
+                self.card_errors.remove(&node_id);
+                // Its application endpoints; every endpoint until it has some.
+                let mut endpoints: Vec<_> = self
+                    .card_models
+                    .get(&node_id)
+                    .map(|model| {
+                        model
+                            .endpoints
+                            .iter()
+                            .filter(|e| e.id != 0)
+                            .map(|e| Some(e.id))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if endpoints.is_empty() {
+                    endpoints.push(None);
+                }
+                for endpoint in endpoints {
+                    self.start_device_op(node_id, true);
+                    request_loop(
+                        ctx.link().clone(),
+                        wire::Request::ReadModel {
+                            node_id,
+                            endpoint,
+                            cluster: None,
+                        },
+                        move |response| Msg::CardDone(node_id, true, response),
+                        move |e| Msg::CardFailed(node_id, true, e),
+                    );
+                }
+                true
+            }
+            Msg::CardDone(node_id, refresh, response) => {
+                self.finish(Pending::Device { node_id, refresh });
                 match response {
-                    wire::Response::Model { model } => {
-                        if let Some(card) = self.card_models.get_mut(&node_id) {
+                    wire::Response::Model { model } => match self.card_models.get_mut(&node_id) {
+                        Some(card) => {
                             datamodel::absorb(card, model);
                         }
-                    }
+                        None if self.flipped.contains(&node_id) => {
+                            self.card_models.insert(node_id, model);
+                        }
+                        None => {}
+                    },
                     wire::Response::Error { message } => {
                         self.card_errors.insert(node_id, message);
                     }
@@ -1374,11 +1407,8 @@ impl Component for App {
                 }
                 true
             }
-            Msg::CardFailed(node_id, e) => {
-                self.finish(Pending::Device {
-                    node_id,
-                    refresh: false,
-                });
+            Msg::CardFailed(node_id, refresh, e) => {
+                self.finish(Pending::Device { node_id, refresh });
                 self.card_errors.insert(node_id, e);
                 true
             }
@@ -1437,16 +1467,7 @@ impl Component for App {
                         if notice.is_some() {
                             self.notice = notice;
                         }
-                        // Seed each device's tag-edit buffer from its (normalized)
-                        // tags, so the input reflects server truth.
-                        self.tag_inputs = devices
-                            .iter()
-                            .map(|d| (d.handle.node_id, d.tags.join(", ")))
-                            .collect();
-                        // A dashboard watches everything: auto-subscribe every
-                        // listed device of the fabric shown (and drop panels for
-                        // any that vanished).
-                        self.set_devices(ctx, devices);
+                        self.take_devices(ctx, devices);
                     }
                     wire::Response::AdvertisedDevices { devices } => {
                         self.advertised = Some(devices);
@@ -1616,6 +1637,7 @@ impl Component for App {
             ctx.link()
                 .send_message(Msg::OurFabrics(our_fabrics::FabricsMsg::Load));
             ctx.link().send_message(Msg::SelectTab(Tab::Devices));
+            self.open_sub_ws(ctx, 0);
         }
 
         if std::mem::take(&mut self.scroll_chat) {
@@ -1627,33 +1649,23 @@ impl Component for App {
 }
 
 impl App {
-    /// Whether `progress` ends the update of the device that this page shows
-    /// running.
-    fn ota_ends(&self, node_id: u64, progress: &api::OtaProgress) -> bool {
-        !progress.in_progress()
-            && !matches!(progress, api::OtaProgress::NotOffered)
-            && self
-                .ota_progress
-                .get(&node_id)
-                .is_some_and(api::OtaProgress::in_progress)
-    }
+    /// Show `devices`, the device list as the server has it now, and follow
+    /// them. Each tag-edit buffer is seeded from the (normalized) tags, but
+    /// that of a device whose tags are being edited.
+    fn take_devices(&mut self, ctx: &Context<Self>, devices: Vec<api::DeviceInfo>) {
+        let editing = self
+            .editing_tags
+            .and_then(|node_id| Some((node_id, self.tag_inputs.remove(&node_id)?)));
 
-    /// Read the device list again, unless that is under way: a device's
-    /// record changed.
-    fn relist(&mut self, ctx: &Context<Self>) {
-        if self.busy_stored {
-            return;
-        }
+        self.tag_inputs = devices
+            .iter()
+            .map(|d| (d.handle.node_id, d.tags.join(", ")))
+            .collect();
+        self.tag_inputs.extend(editing);
 
-        self.busy_stored = true;
-        self.loading_list = true;
-        send_request(
-            ctx.link().clone(),
-            Pending::List,
-            wire::Request::ListDevices {
-                fabric: api::FabricRef::All,
-            },
-        );
+        // A dashboard watches everything: auto-subscribe every listed device
+        // of the fabric shown (and drop panels for any that vanished).
+        self.set_devices(ctx, devices);
     }
 
     /// Note an operation on a device, for its request.
@@ -1790,8 +1802,8 @@ impl App {
 
     /// Open the persistent subscription WS after `delay_ms`, unless it is open
     /// or opening, spawning its reader (server frames → `Msg`) and writer (outbound requests) tasks. All
-    /// live subscriptions share this one connection; it stays open while any
-    /// device is being watched. The server ties each subscription to this
+    /// live subscriptions, the device list's too, share this one connection;
+    /// it stays open with the page. The server ties each subscription to this
     /// connection, so closing it stops them all server-side too.
     fn open_sub_ws(&mut self, ctx: &Context<Self>, delay_ms: u32) {
         if self.sub_ws.is_some() || self.sub_ws_opening {
@@ -1852,6 +1864,9 @@ impl App {
                             }
                             wire::Event::Model { node_id, model } => {
                                 link.send_message(Msg::ModelEvent(node_id, model))
+                            }
+                            wire::Event::Devices { devices } => {
+                                link.send_message(Msg::DevicesChanged(devices))
                             }
                             wire::Event::Step { .. } | wire::Event::Chat { .. } => {}
                         },
@@ -2329,6 +2344,7 @@ fn request_loop(
                     wire::Event::HealthReport { .. }
                     | wire::Event::SubscriptionState { .. }
                     | wire::Event::Model { .. }
+                    | wire::Event::Devices { .. }
                     | wire::Event::OtaProgress { .. } => {}
                     wire::Event::Chat { chat_id, update } => {
                         link.send_message(Msg::Assistant(AssistantMsg::Update(chat_id, update)));

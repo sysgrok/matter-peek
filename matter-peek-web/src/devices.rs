@@ -69,14 +69,6 @@ impl App {
                 if !visible.is_empty() {
                     { ui::face_switch(face, false, link.callback(Msg::FlipAll)) }
                 }
-                <button
-                    class={classes!("button", "is-icon",
-                        self.loading_list.then_some("is-loading"))}
-                    title="Read the list again"
-                    disabled={self.busy_stored}
-                    onclick={link.callback(|_| Msg::ListDevices)}>
-                    { icon(Icon::Refresh, 18) }
-                </button>
                 { ui::icon_button(Icon::Sync, "Sync", classes!("is-tinted"), self.busy_stored,
                     Some("Add the devices on our fabric missing from the list, and refresh the others"),
                     link.callback(|_| Msg::Sync)) }
@@ -228,7 +220,6 @@ impl App {
 
         let hardware = d.hardware_version().unwrap_or_else(|| "—".into());
         let software = d.software_version().unwrap_or_else(|| "—".into());
-        let refreshing = self.refreshing(node_id);
         let flipped = self.flipped.contains(&node_id);
         let pill = ui::pill(state, class, Some(why));
 
@@ -237,34 +228,7 @@ impl App {
             <div class="flip-inner">
             <article class={classes!("device-card", "flip-front", offline.then_some("is-offline"))}
                 inert={flipped.then_some("")}>
-                <header class="device-head">
-                    <span class={classes!("tile-icon", kind_class(d.network))}
-                        title={d.network.map(|kind| kind.label())}>
-                        { icon(device_type_icon(d.device_type()).or(kind_icon(d.network)).unwrap_or(Icon::Chip), 22) }
-                    </span>
-                    <div class="device-title">
-                        <h2>{ d.title() }</h2>
-                        <p>
-                            if let Some(name) = d.device_type().and_then(display::device_type_name) {
-                                <span class="device-type">{ name }</span>
-                                <span class="dot-sep"></span>
-                            }
-                            { d.vendor().unwrap_or_else(|| "Unknown vendor".into()) }
-                            if d.is_test_vendor() {
-                                { ui::pill("Test vendor", Some("is-warning"), None) }
-                            }
-                        </p>
-                    </div>
-                    <div class="device-head-end">
-                        { pill.clone() }
-                        <button class={classes!("icon-action", refreshing.then_some("is-loading"))}
-                            title="Read its health now" disabled={busy}
-                            onclick={link.callback(move |_| Msg::Refresh(node_id))}>
-                            { icon(Icon::Refresh, 18) }
-                        </button>
-                        { ui::face_switch(Some(false), true, link.callback(move |c| Msg::Flip(node_id, c))) }
-                    </div>
-                </header>
+                { self.view_device_head(d, false, pill.clone(), link) }
 
                 <dl class="device-facts">
                     <div>
@@ -337,6 +301,54 @@ impl App {
         }
     }
 
+    /// A device card's header, the same on both faces; Refresh re-reads what
+    /// the face shows: its health, or its `controls`.
+    fn view_device_head(
+        &self,
+        d: &api::DeviceInfo,
+        controls: bool,
+        pill: Html,
+        link: &Scope<Self>,
+    ) -> Html {
+        let node_id = d.handle.node_id;
+        let refresh: fn(u64) -> Msg = if controls {
+            Msg::CardRefresh
+        } else {
+            Msg::Refresh
+        };
+
+        html! {
+            <header class="device-head">
+                <span class={classes!("tile-icon", kind_class(d.network))}
+                    title={d.network.map(|kind| kind.label())}>
+                    { icon(device_type_icon(d.device_type()).or(kind_icon(d.network)).unwrap_or(Icon::Chip), 22) }
+                </span>
+                <div class="device-title">
+                    <h2>{ d.title() }</h2>
+                    <p>
+                        if let Some(name) = d.device_type().and_then(display::device_type_name) {
+                            <span class="device-type">{ name }</span>
+                            <span class="dot-sep"></span>
+                        }
+                        { d.vendor().unwrap_or_else(|| "Unknown vendor".into()) }
+                        if d.is_test_vendor() {
+                            { ui::pill("Test vendor", Some("is-warning"), None) }
+                        }
+                    </p>
+                </div>
+                <div class="device-head-end">
+                    { pill }
+                    <button class={classes!("icon-action", self.refreshing(node_id).then_some("is-loading"))}
+                        title="Refresh" disabled={self.device_busy(node_id)}
+                        onclick={link.callback(move |_| refresh(node_id))}>
+                        { icon(Icon::Refresh, 18) }
+                    </button>
+                    { ui::face_switch(Some(controls), true, link.callback(move |c| Msg::Flip(node_id, c))) }
+                </div>
+            </header>
+        }
+    }
+
     /// The back of a device's card: the controls of its application
     /// endpoints, while `flipped`.
     fn view_device_back(
@@ -405,19 +417,7 @@ impl App {
         html! {
             <article class={classes!("device-card", "flip-back", offline.then_some("is-offline"))}
                 inert={(!flipped).then_some("")}>
-                <header class="device-head">
-                    <span class={classes!("tile-icon", kind_class(d.network))}>
-                        { icon(device_type_icon(d.device_type()).or(kind_icon(d.network)).unwrap_or(Icon::Chip), 22) }
-                    </span>
-                    <div class="device-title">
-                        <h2>{ d.title() }</h2>
-                        <p>{ "Controls" }</p>
-                    </div>
-                    <div class="device-head-end">
-                        { pill }
-                        { ui::face_switch(Some(true), true, link.callback(move |c| Msg::Flip(node_id, c))) }
-                    </div>
-                </header>
+                { self.view_device_head(d, true, pill, link) }
                 <div class="card-controls">
                     { body }
                     if let Some(error) = self.card_errors.get(&node_id) {

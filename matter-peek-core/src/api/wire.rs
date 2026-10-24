@@ -179,6 +179,13 @@ pub enum Request {
     /// Stop following a device's data model on this connection. Answered with
     /// [`Response::Ok`].
     UnsubscribeModel { node_id: u64 },
+    /// Follow the device list on this connection (see
+    /// `MatterPeek::subscribe_devices`), as [`Event::Devices`]: the list now,
+    /// then each time it changes. Answered with [`Response::Ok`].
+    SubscribeDevices,
+    /// Stop following the device list on this connection. Answered with
+    /// [`Response::Ok`].
+    UnsubscribeDevices,
     /// See `MatterPeek::decommission`. Answered with [`Response::Devices`].
     Decommission { node_id: u64, force: bool },
     /// See `MatterPeek::sync`. Answered with [`Response::Devices`].
@@ -432,6 +439,8 @@ pub enum Event {
     /// Attributes of a device whose data model this connection follows (see
     /// `ModelListener::on_model`).
     Model { node_id: u64, model: DeviceModel },
+    /// The device list, on all our fabrics, if this connection follows it.
+    Devices { devices: Vec<DeviceInfo> },
     /// How an update started on this connection goes.
     OtaProgress { node_id: u64, progress: OtaProgress },
     /// What the assistant does in chat `chat_id`, asked on this connection.

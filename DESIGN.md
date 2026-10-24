@@ -79,7 +79,7 @@ controller serves the CLI, the MCP server and mobile apps.
 | Area | Methods |
 |---|---|
 | Commissioning | `commission` (IP or BLE, network credentials, `remember`, a progress listener), `cancel_commission`, `read_qr_image`, `discover` (mDNS + BLE), `advertised_devices` (the commissioned devices on the network, on our fabrics or others', grouped by device) |
-| Device list | `list_devices`, `sync`, `remember`, `set_tags`, `decommission` |
+| Device list | `list_devices`, `subscribe_devices` (live: the list now, then each time it changes; returns a `DevicesSubscription`), `sync`, `remember`, `set_tags`, `decommission` |
 | Health | `peek_device` (one-shot: also its heap, and the threads (tasks) of its software and their stacks, where it reports them), `subscribe` (live: General Diagnostics (uptime, reboots, operating hours) and the fabrics the device is on; returns a `Subscription`, which stops when dropped) |
 | Thread | `read_thread_mesh`: networks, nodes, links and findings, from our Thread devices' tables and the LAN's MeshCoP / Matter adverts |
 | Device | `read_network` (interfaces, known networks, Wi-Fi / Thread / Ethernet diagnostics), `change_network` (add or update, remove, connect, reorder a known network), `retrieve_logs`, `identify` |

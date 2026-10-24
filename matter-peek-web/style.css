@@ -94,13 +94,14 @@ html, body { background: var(--bulma-scheme-main-bis); min-height: 100vh; }
 .page-title { font-size: 1.75rem; font-weight: 700; letter-spacing: -.02em; line-height: 1.2; color: var(--bulma-text-strong); }
 .page-subtitle { display: flex; align-items: center; flex-wrap: wrap; margin-top: .2rem; color: var(--bulma-text-weak); }
 .page-head-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
-.search-box { width: 15rem; }
+.page-head-actions:has(.search-box) { flex: 1 1 auto; justify-content: flex-end; }
+.search-box { flex: 1 1 15rem; }
 .live-count { font-weight: 600; color: var(--bulma-success-on-scheme); }
 @media screen and (max-width: 768px) {
   .page-title { font-size: 1.5rem; }
   .page-head-actions { width: 100%; }
   .page-head-actions:empty { display: none; }
-  .search-box { flex: 1; width: auto; }
+  .search-box { flex-basis: 100%; }
 }
 
 /* Pills, notifications, empty states. */

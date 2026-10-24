@@ -443,6 +443,24 @@ impl MatterPeek {
         }))
     }
 
+    /// Follow the device list, on all our fabrics: `listener` gets it now, then
+    /// again each time it changes, until the returned subscription is stopped
+    /// or dropped.
+    pub async fn subscribe_devices(
+        &self,
+        listener: Arc<dyn DevicesListener>,
+    ) -> Result<Arc<DevicesSubscription>, PeekError> {
+        let watcher = self
+            .call(|reply| Op::WatchDevices { listener, reply })
+            .await?;
+
+        Ok(Arc::new(DevicesSubscription {
+            watcher,
+            ops: self.ops.clone(),
+            stopped: AtomicBool::new(false),
+        }))
+    }
+
     /// The stored OTA images.
     pub async fn ota_images(&self) -> Result<Vec<OtaImageInfo>, PeekError> {
         self.call(Op::OtaImages).await
@@ -590,6 +608,32 @@ impl Drop for Subscription {
     }
 }
 
+/// A live subscription to the device list; stops when dropped.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
+pub struct DevicesSubscription {
+    watcher: u64,
+    ops: async_channel::Sender<Op>,
+    stopped: AtomicBool,
+}
+
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl DevicesSubscription {
+    /// Stop following the device list.
+    pub fn stop(&self) {
+        if !self.stopped.swap(true, Ordering::SeqCst) {
+            let _ = self.ops.try_send(Op::UnwatchDevices {
+                watcher: self.watcher,
+            });
+        }
+    }
+}
+
+impl Drop for DevicesSubscription {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// An OTA image file being stored; dropped unfinished, it is discarded.
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct OtaUpload {
@@ -668,6 +712,14 @@ pub trait ModelListener: Send + Sync {
     /// Attributes reported: first those known so far, then those that
     /// changed, with their values as they are now (merge them in).
     fn on_model(&self, node_id: u64, model: DeviceModel);
+}
+
+/// Follows the device list; see [`MatterPeek::subscribe_devices`]. Called on
+/// the controller's thread: return quickly.
+#[cfg_attr(feature = "uniffi", uniffi::export(with_foreign))]
+pub trait DevicesListener: Send + Sync {
+    /// The listed devices, on all our fabrics.
+    fn on_devices(&self, devices: Vec<DeviceInfo>);
 }
 
 /// Follows a commission; see [`MatterPeek::commission`]. Called on the
@@ -823,6 +875,13 @@ pub(crate) enum Op {
     /// Remove a listener; the device subscription stops with its last one.
     Unwatch {
         node_id: u64,
+        watcher: u64,
+    },
+    WatchDevices {
+        listener: Arc<dyn DevicesListener>,
+        reply: Reply<u64>,
+    },
+    UnwatchDevices {
         watcher: u64,
     },
     OtaImages(Reply<Vec<OtaImageInfo>>),

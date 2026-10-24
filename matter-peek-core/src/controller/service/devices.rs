@@ -3,6 +3,7 @@
 use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use embassy_time::{with_timeout, Duration, Instant, Timer};
@@ -14,8 +15,8 @@ use rs_matter::error::{Error, ErrorCode};
 use rs_matter::persist::KvBlobStore;
 
 use crate::api::{
-    DeviceHealth, DeviceList, FabricRef, LogIntent, NetworkInfo, NetworkKind, PeekError,
-    SubscriptionState,
+    DeviceHealth, DeviceList, DevicesListener, FabricRef, LogIntent, NetworkInfo, NetworkKind,
+    PeekError, SubscriptionState,
 };
 use crate::model::{
     match_device, DeviceHandle, DeviceIdentity, DiagSet, MatchResult, StoredDevice,
@@ -88,6 +89,60 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             .retain(|d| fabrics.contains(&d.handle.fabric_index));
 
         Ok(list)
+    }
+
+    /// Follow the device list with `listener`, which gets it now; answers the
+    /// watcher's ID.
+    pub(super) fn watch_devices(
+        &self,
+        listener: Arc<dyn DevicesListener>,
+    ) -> Result<u64, PeekError> {
+        // The others first, so the list told below is news to none of them.
+        self.tell_devices();
+
+        let devices = self.list_devices_on(&FabricRef::All, None)?.devices;
+        listener.on_devices(devices.clone());
+
+        let id = self.next_watcher.get();
+        self.next_watcher.set(id + 1);
+        self.devices_listeners.borrow_mut().push((id, listener));
+        *self.devices_told.borrow_mut() = Some(devices);
+
+        Ok(id)
+    }
+
+    /// Stop telling `watcher` the device list.
+    pub(super) fn unwatch_devices(&self, watcher: u64) {
+        let mut listeners = self.devices_listeners.borrow_mut();
+        listeners.retain(|(id, _)| *id != watcher);
+        if listeners.is_empty() {
+            *self.devices_told.borrow_mut() = None;
+        }
+    }
+
+    /// Tell the device list's listeners the list, if it changed since they
+    /// were last told.
+    pub(super) fn tell_devices(&self) {
+        if self.devices_listeners.borrow().is_empty() {
+            return;
+        }
+
+        let devices = match self.list_devices_on(&FabricRef::All, None) {
+            Ok(list) => list.devices,
+            Err(e) => {
+                warn!("cannot list the devices: {e:?}");
+                return;
+            }
+        };
+        if self.devices_told.borrow().as_ref() == Some(&devices) {
+            return;
+        }
+
+        let listeners = self.devices_listeners.borrow().clone();
+        for (_, listener) in &listeners {
+            listener.on_devices(devices.clone());
+        }
+        *self.devices_told.borrow_mut() = Some(devices);
     }
 
     /// Drop a listed device without contacting it: its subscription, its
@@ -283,6 +338,9 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             }
             Err(e) => warn!("cannot note the identity of node 0x{node_id:016X}: {e:?}"),
         }
+
+        // Also outside of any operation: after an OTA update.
+        self.tell_devices();
     }
 
     /// Apply `f` to the record of `node_id`; `false` if it has none.

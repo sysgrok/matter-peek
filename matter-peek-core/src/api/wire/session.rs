@@ -12,8 +12,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 
 use crate::api::peek::{
-    CommissionListener, HealthListener, MatterPeek, ModelListener, OtaListener, OtaUpload,
-    Subscription,
+    CommissionListener, DevicesListener, DevicesSubscription, HealthListener, MatterPeek,
+    ModelListener, OtaListener, OtaUpload, Subscription,
 };
 use crate::api::types::*;
 
@@ -30,6 +30,7 @@ pub struct WireSession {
     out: async_channel::Sender<ServerMsg>,
     subscriptions: RefCell<BTreeMap<u64, Arc<Subscription>>>,
     model_subscriptions: RefCell<BTreeMap<u64, (ModelScope, Arc<Subscription>)>>,
+    devices_subscription: RefCell<Option<Arc<DevicesSubscription>>>,
     uploads: RefCell<BTreeMap<u32, Arc<OtaUpload>>>,
 }
 
@@ -41,6 +42,7 @@ impl WireSession {
             out,
             subscriptions: RefCell::new(BTreeMap::new()),
             model_subscriptions: RefCell::new(BTreeMap::new()),
+            devices_subscription: RefCell::new(None),
             uploads: RefCell::new(BTreeMap::new()),
         }
     }
@@ -228,6 +230,17 @@ impl WireSession {
             }
             Request::UnsubscribeModel { node_id } => {
                 self.model_subscriptions.borrow_mut().remove(&node_id);
+                Ok(Response::Ok)
+            }
+            Request::SubscribeDevices => {
+                let reports = Arc::new(Reports { out: out.clone() });
+                peek.subscribe_devices(reports).await.map(|subscription| {
+                    *self.devices_subscription.borrow_mut() = Some(subscription);
+                    Response::Ok
+                })
+            }
+            Request::UnsubscribeDevices => {
+                self.devices_subscription.borrow_mut().take();
                 Ok(Response::Ok)
             }
             Request::Decommission { node_id, force } => {
@@ -438,6 +451,14 @@ impl ModelListener for Reports {
     fn on_model(&self, node_id: u64, model: DeviceModel) {
         let _ = self.out.try_send(ServerMsg::Event {
             event: Event::Model { node_id, model },
+        });
+    }
+}
+
+impl DevicesListener for Reports {
+    fn on_devices(&self, devices: Vec<DeviceInfo>) {
+        let _ = self.out.try_send(ServerMsg::Event {
+            event: Event::Devices { devices },
         });
     }
 }
