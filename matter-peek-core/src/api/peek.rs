@@ -244,6 +244,13 @@ impl MatterPeek {
         .await
     }
 
+    /// What this controller can do: fixed by how it was built.
+    pub fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            ble: cfg!(feature = "ble"),
+        }
+    }
+
     /// Cancel the running commission at its next safe point: before the device
     /// has our fabric it stops there; after, the device is decommissioned. The
     /// commission then fails with [`PeekError::Cancelled`].

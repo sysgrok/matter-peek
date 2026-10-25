@@ -474,6 +474,14 @@ pub enum FabricDeletion {
     Forget,
 }
 
+/// What a controller can do, as it was built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct Capabilities {
+    /// Whether it commissions over Bluetooth LE ([`CommissionVia::Ble`]).
+    pub ble: bool,
+}
+
 /// A device on our fabric. See also its [`display`](super::display) helpers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]

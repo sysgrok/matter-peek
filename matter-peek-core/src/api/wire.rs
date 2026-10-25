@@ -124,6 +124,9 @@ pub enum Request {
         #[serde(default)]
         fields: String,
     },
+    /// See `MatterPeek::capabilities`. Answered with
+    /// [`Response::Capabilities`].
+    Capabilities,
     /// See `MatterPeek::list_devices`. Answered with [`Response::Devices`].
     ListDevices {
         #[serde(default)]
@@ -411,6 +414,9 @@ pub enum Response {
         model: String,
         reply: String,
         millis: u64,
+    },
+    Capabilities {
+        capabilities: Capabilities,
     },
     Error {
         message: String,

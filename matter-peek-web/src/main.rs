@@ -334,6 +334,8 @@ struct App {
     remember: bool,
     /// Commission over Bluetooth LE, rather than over the network.
     via_ble: bool,
+    /// Whether the controller commissions over Bluetooth, once it said.
+    can_ble: Option<bool>,
     /// The Bluetooth address of the device to commission; empty for the one
     /// matching the setup code.
     ble_addr: String,
@@ -495,6 +497,7 @@ impl Component for App {
             discover_filter: String::new(),
             remember: false,
             via_ble: false,
+            can_ble: None,
             ble_addr: String::new(),
             network: Network::Wifi,
             wifi_ssid: String::new(),
@@ -1468,6 +1471,10 @@ impl Component for App {
                     wire::Response::AdvertisedDevices { devices } => {
                         self.advertised = Some(devices);
                     }
+                    wire::Response::Capabilities { capabilities } => {
+                        self.can_ble = Some(capabilities.ble);
+                        self.via_ble &= capabilities.ble;
+                    }
                     wire::Response::Peek { node_id, health } => {
                         // A Refresh result: merge the fresh read into the device's
                         // card panel so its values (uptime, heap, …) update in place.
@@ -1638,6 +1645,11 @@ impl Component for App {
             // The app opens on the Devices tab; load it as if the user picked it.
             ctx.link()
                 .send_message(Msg::OurFabrics(our_fabrics::FabricsMsg::Load));
+            send_request(
+                ctx.link().clone(),
+                Pending::None,
+                wire::Request::Capabilities,
+            );
             ctx.link().send_message(Msg::SelectTab(Tab::Devices));
             self.open_sub_ws(ctx, 0);
         }

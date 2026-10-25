@@ -11,7 +11,7 @@
 //! | `mdns-avahi`   | Avahi (D-Bus)                 | Linux + Avahi (default)    |
 //! | `mdns-resolve` | systemd-resolved (D-Bus)      | Linux + systemd-resolved   |
 //! | `mdns-astro`   | Bonjour                       | macOS / iOS                |
-//! | `mdns-builtin` | rs-matter's own, on :5353     | fallback / Windows / tests |
+//! | `mdns-builtin` | rs-matter's own, on :5353     | Android / Windows / tests  |
 
 use core::future::Future;
 
@@ -151,9 +151,10 @@ impl Mdns for Astro {
     }
 }
 
-/// [`Builtin`] on its own socket, on the first suitable interface. Shares the
-/// port with a co-located device (`SO_REUSEPORT`, multicast loopback): a test
-/// convenience, not a deployment mode.
+/// [`Builtin`] on its own socket, on the first suitable interface: Android's
+/// backend, and Windows'. It shares the port with the system's responder, or
+/// a device on the same host (`SO_REUSEADDR` / `SO_REUSEPORT`, multicast
+/// loopback); on Android, the app lets multicast through Wi-Fi's power save.
 #[cfg(feature = "mdns-builtin")]
 #[derive(Default)]
 pub(crate) struct HostBuiltin;
@@ -540,8 +541,15 @@ fn interface() -> Result<(Ipv4Addr, rs_matter::transport::network::Ipv6Addr, u32
             Error::from(rs_matter::error::ErrorCode::NoNetworkInterface)
         })?;
 
-    log::info!("mdns: using interface {iname} ({ip}/{ipv6})");
-    Ok((ip.octets().into(), ipv6.octets().into(), 0))
+    // IPv6 multicast joins on this interface, not the default route's (on a
+    // phone, maybe mobile data's or a VPN's).
+    let index = nix::net::if_::if_nametoindex(iname.as_str()).map_err(|e| {
+        log::error!("mdns: no index for interface {iname}: {e}");
+        Error::from(rs_matter::error::ErrorCode::NoNetworkInterface)
+    })?;
+
+    log::info!("mdns: using interface {iname} (#{index}, {ip}/{ipv6})");
+    Ok((ip.octets().into(), ipv6.octets().into(), index))
 }
 
 #[cfg(test)]

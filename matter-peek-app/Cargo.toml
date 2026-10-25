@@ -29,9 +29,19 @@ async-channel = { workspace = true }
 # The core in the app, with its assistant: a hub of the server's.
 matter-peek-server = { path = "../matter-peek-server" }
 
-# The core, with the host's mDNS: Avahi on Linux, its own on Android.
-[target.'cfg(not(target_os = "android"))'.dependencies]
-matter-peek-core = { path = "../matter-peek-core" }
+# The core, with each platform's mDNS and, where rs-matter has it, BLE.
+# Avahi and BlueZ on Linux (both over D-Bus).
+[target.'cfg(target_os = "linux")'.dependencies]
+matter-peek-core = { path = "../matter-peek-core", features = ["ble"] }
 
+# Its own on Android: no BLE yet (Android's own commissioning is to do it).
 [target.'cfg(target_os = "android")'.dependencies]
+matter-peek-core = { path = "../matter-peek-core", default-features = false, features = ["mdns-builtin"] }
+
+# Bonjour on macOS (and iOS).
+[target.'cfg(target_vendor = "apple")'.dependencies]
+matter-peek-core = { path = "../matter-peek-core", default-features = false, features = ["mdns-astro"] }
+
+# Its own on Windows.
+[target.'cfg(windows)'.dependencies]
 matter-peek-core = { path = "../matter-peek-core", default-features = false, features = ["mdns-builtin"] }

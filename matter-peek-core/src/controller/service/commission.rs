@@ -127,6 +127,11 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         let fabric = self.our_fabric(fabric)?;
 
         let reach = match via {
+            CommissionVia::Ble { .. } if !cfg!(feature = "ble") => {
+                return Err(PeekError::failed(
+                    "this controller has no Bluetooth: commission the device over the network",
+                ));
+            }
             CommissionVia::Ip { addr } => Reach::Ip(
                 addr.parse()
                     .map_err(|e| PeekError::failed(format!("invalid peer address: {e}")))?,

@@ -54,8 +54,11 @@ impl App {
                         <div class="choices">
                             { choice(false, Icon::Globe, "Over the network",
                                 "It is on your network already, with its commissioning window open.") }
-                            { choice(true, Icon::Bluetooth, "Over Bluetooth",
-                                "A new device: it joins your Wi-Fi or Thread network as it is commissioned.") }
+                            // Unless the controller has no Bluetooth.
+                            if self.can_ble != Some(false) {
+                                { choice(true, Icon::Bluetooth, "Over Bluetooth",
+                                    "A new device: it joins your Wi-Fi or Thread network as it is commissioned.") }
+                            }
                         </div>
                     }) }
 

@@ -85,6 +85,9 @@ impl WireSession {
                     .await
                     .map(Response::Commissioned)
             }
+            Request::Capabilities => Ok(Response::Capabilities {
+                capabilities: peek.capabilities(),
+            }),
             Request::Fabrics => peek.fabrics().await.map(fabrics),
             Request::CreateFabric { name } => peek.create_fabric(name).await.map(fabrics),
             Request::RenameFabric { fabric, name } => {
