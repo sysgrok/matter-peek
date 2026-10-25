@@ -505,6 +505,12 @@ impl App {
         let Some(camera) = &self.camera else {
             return html! {};
         };
+        // Closer, and a phone's camera no longer focuses.
+        let hint = if camera.can_refocus {
+            "Hold the code 10–20 cm from the camera, and tap the picture to focus on it."
+        } else {
+            "Hold the code 10–20 cm from the camera, where it looks sharp."
+        };
 
         html! {
             <div class="modal is-active">
@@ -516,11 +522,14 @@ impl App {
                             onclick={link.callback(|_| Msg::CloseCamera)}></button>
                     </header>
                     <section class="modal-card-body">
-                        <div class="camera-view">
+                        <div class={classes!("camera-view", camera.can_refocus.then_some("can-refocus"))}
+                            onclick={link.callback(|_| Msg::CameraRefocus)}>
                             <video ref={self.video_ref.clone()} class="camera-video"
                                 autoplay=true muted=true playsinline=true></video>
                             if camera.stream.is_some() {
-                                <div class="camera-frame"></div>
+                                // Keyed by the refocus count, so that each replays its pulse.
+                                <div key={camera.refocused}
+                                    class={classes!("camera-frame", (camera.refocused > 0).then_some("is-refocusing"))}></div>
                             }
                             if let Some(e) = &camera.error {
                                 <div class="camera-status">
@@ -534,13 +543,44 @@ impl App {
                                 </div>
                             }
                         </div>
-                        <p class="camera-hint">
-                            { "Hold the QR code on the device or its box inside the frame." }
-                        </p>
+                        if let Some(zoom) = camera.zoom {
+                            <div class="camera-control">
+                                <span>{ "Zoom" }</span>
+                                <input type="range" min={zoom.min.to_string()} max={zoom.max.to_string()}
+                                    step={zoom.step.to_string()} value={zoom.value.to_string()}
+                                    oninput={link.callback(|e: InputEvent| {
+                                        Msg::CameraZoom(input_value(e).parse().unwrap_or(1.0))
+                                    })} />
+                                <span class="camera-control-value">{ format!("{:.1}×", zoom.value) }</span>
+                            </div>
+                        }
+                        if let Some(focus) = camera.focus {
+                            <div class="camera-control">
+                                <span>{ "Focus" }</span>
+                                <input type="range" min="0" max="1" step="0.005"
+                                    value={focus.position().to_string()}
+                                    oninput={link.callback(|e: InputEvent| {
+                                        Msg::CameraFocus(input_value(e).parse().unwrap_or(1.0))
+                                    })} />
+                                <span class="camera-control-value">
+                                    { if focus.manual { distance(focus.distance) } else { "Auto".into() } }
+                                </span>
+                            </div>
+                        }
+                        <p class="camera-hint">{ hint }</p>
                     </section>
                 </div>
             </div>
         }
+    }
+}
+
+/// `meters`, in words.
+fn distance(meters: f64) -> String {
+    if meters < 1.0 {
+        format!("{:.0} cm", meters * 100.0)
+    } else {
+        format!("{meters:.1} m")
     }
 }
 

@@ -212,6 +212,12 @@ enum Msg {
     OpenCamera,
     CloseCamera,
     CameraStream(web_sys::MediaStream),
+    /// Zoom the camera to this.
+    CameraZoom(f64),
+    /// Focus the camera by hand, this far along its range (0 near, 1 far).
+    CameraFocus(f64),
+    /// Have the camera refocus on the code.
+    CameraRefocus,
     CameraFailed(String),
     /// Time to send a frame to decode.
     CameraTick,
@@ -897,7 +903,46 @@ impl Component for App {
                     video.set_src_object(Some(&stream));
                     let _ = video.play();
                 }
+                camera.zoom = camera::zoom(&stream);
+                camera.focus = camera::focus(&stream);
+                camera.can_refocus = camera::can_refocus(&stream);
+                camera::aim(&stream);
                 camera.stream = Some(stream);
+                true
+            }
+            Msg::CameraZoom(value) => {
+                let Some(camera) = self.camera.as_mut() else {
+                    return false;
+                };
+                if let (Some(zoom), Some(stream)) = (camera.zoom.as_mut(), &camera.stream) {
+                    zoom.value = value;
+                    camera::set_zoom(stream, value);
+                }
+                true
+            }
+            Msg::CameraFocus(position) => {
+                let Some(camera) = self.camera.as_mut() else {
+                    return false;
+                };
+                if let (Some(focus), Some(stream)) = (camera.focus.as_mut(), &camera.stream) {
+                    focus.distance = focus.distance_at(position);
+                    focus.manual = true;
+                    camera::set_focus(stream, focus.distance);
+                }
+                true
+            }
+            Msg::CameraRefocus => {
+                let Some(camera) = self.camera.as_mut() else {
+                    return false;
+                };
+                let Some(stream) = camera.stream.as_ref().filter(|_| camera.can_refocus) else {
+                    return false;
+                };
+                camera::refocus(stream);
+                camera.refocused += 1;
+                if let Some(focus) = camera.focus.as_mut() {
+                    focus.manual = false;
+                }
                 true
             }
             Msg::CameraFailed(e) => {

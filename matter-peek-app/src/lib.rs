@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use log::{error, info};
 use tauri::ipc::Channel;
+use tauri::webview::{PermissionKind, PermissionResponse};
 use tauri::{Manager, State};
 
 use matter_peek_core::api::wire::{ClientMsg, Response, ServerMsg};
@@ -70,6 +71,12 @@ pub fn run() {
                 .level(log::LevelFilter::Info)
                 .build(),
         )
+        // The page reads QR codes with the camera, when asked to; it wants
+        // nothing else.
+        .on_permission_request(|_, kind| match kind {
+            PermissionKind::Camera => PermissionResponse::Allow,
+            _ => PermissionResponse::Default,
+        })
         .register_uri_scheme_protocol("matter-peek", |_, request| web(request.uri().path()))
         .setup(|app| {
             let store_dir = app.path().app_data_dir()?;
@@ -95,9 +102,19 @@ pub fn run() {
 fn web(path: &str) -> tauri::http::Response<Vec<u8>> {
     let response = tauri::http::Response::builder();
 
+    // The page names its files by their contents' hash; it itself must not be
+    // kept, or an updated app shows the old one.
+    let page = !path.trim_start_matches('/').contains('.') || path.ends_with("index.html");
+    let cache = if page {
+        "no-cache"
+    } else {
+        "public, max-age=86400"
+    };
+
     match matter_peek_server::web_file(path) {
         Some((content_type, body)) => response
             .header(tauri::http::header::CONTENT_TYPE, content_type)
+            .header(tauri::http::header::CACHE_CONTROL, cache)
             .body(body),
         None => response.status(404).body(b"Not found".to_vec()),
     }
