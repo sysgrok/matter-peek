@@ -1,7 +1,8 @@
 //! Takes the web UI into the executable, if it is built: the files of
 //! `MATTER_PEEK_WEB_DIST`, else of `../matter-peek-web/dist` (`trunk build
-//! --release` in `matter-peek-web/`), each gzipped. Without them, the server
-//! says how to add it.
+//! --release` in `matter-peek-web/`), else of `web-dist`, the copy a packaged
+//! crate carries (`scripts/vendor-web.sh`), each gzipped. Without them, the
+//! server says how to add it.
 
 use std::env;
 use std::fmt::Write as _;
@@ -15,11 +16,18 @@ use flate2::Compression;
 fn main() {
     println!("cargo:rerun-if-env-changed=MATTER_PEEK_WEB_DIST");
 
+    let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let built = crate_dir.join("../matter-peek-web/dist");
     let dist = env::var_os("MATTER_PEEK_WEB_DIST")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("../matter-peek-web/dist")
+            if built.join("index.html").is_file() {
+                built.clone()
+            } else {
+                crate_dir.join("web-dist")
+            }
         });
+    println!("cargo:rerun-if-changed={}", built.display());
     println!("cargo:rerun-if-changed={}", dist.display());
 
     let mut files = Vec::new();

@@ -84,7 +84,7 @@ impl App {
         html! {
             <div class="modal is-active">
                 <div class="modal-background" onclick={close.clone()}></div>
-                <div class="modal-card connection-card">
+                <div class={classes!("modal-card", "connection-card", (endpoint == Endpoint::Unset).then_some("is-required"))}>
                     { ui::modal_head("Connection", title, html! {}, close) }
                     <section class="modal-card-body">
                         <p class="connection-text">

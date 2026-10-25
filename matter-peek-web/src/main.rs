@@ -281,6 +281,8 @@ enum Msg {
     Flip(u64, bool),
     /// Turn the cards shown to their controls (`true`), or their health.
     FlipAll(bool),
+    /// A device's (node_id) card has turned over.
+    Turned(u64),
     /// A control on the back of a device's (node_id) card.
     CardAct(u64, datamodel::Action),
     /// Re-read the controls on the back of a device's (node_id) card.
@@ -411,6 +413,8 @@ struct App {
     sub_ws_opening: bool,
     /// The devices whose cards show their controls.
     flipped: HashSet<u64>,
+    /// The cards turning over now: in 3D until their turn ends.
+    turning: HashSet<u64>,
     /// Their data models, as reported so far.
     card_models: HashMap<u64, api::DeviceModel>,
     /// Why the last control on a card failed (node_id → message).
@@ -531,6 +535,7 @@ impl Component for App {
             sub_ws_gen: 0,
             sub_ws_opening: false,
             flipped: HashSet::new(),
+            turning: HashSet::new(),
             card_models: HashMap::new(),
             card_errors: HashMap::new(),
             model_scopes: HashMap::new(),
@@ -1320,11 +1325,7 @@ impl Component for App {
                 true
             }
             Msg::Flip(node_id, controls) => {
-                if controls {
-                    self.flipped.insert(node_id);
-                } else {
-                    self.flipped.remove(&node_id);
-                }
+                self.flip(node_id, controls);
                 self.sync_model_scopes(ctx);
                 true
             }
@@ -1335,15 +1336,12 @@ impl Component for App {
                     .map(|d| d.handle.node_id)
                     .collect();
                 for node_id in shown {
-                    if controls {
-                        self.flipped.insert(node_id);
-                    } else {
-                        self.flipped.remove(&node_id);
-                    }
+                    self.flip(node_id, controls);
                 }
                 self.sync_model_scopes(ctx);
                 true
             }
+            Msg::Turned(node_id) => self.turning.remove(&node_id),
             Msg::CardAct(node_id, action) => {
                 self.card_errors.remove(&node_id);
                 self.start_device_op(node_id, false);
@@ -1653,6 +1651,19 @@ impl Component for App {
 }
 
 impl App {
+    /// Turn a device's card to its controls (`true`), or its health; it turns
+    /// over if it shows the other.
+    fn flip(&mut self, node_id: u64, controls: bool) {
+        let turned = if controls {
+            self.flipped.insert(node_id)
+        } else {
+            self.flipped.remove(&node_id)
+        };
+        if turned {
+            self.turning.insert(node_id);
+        }
+    }
+
     /// Show `devices`, the device list as the server has it now, and follow
     /// them. Each tag-edit buffer is seeded from the (normalized) tags, but
     /// that of a device whose tags are being edited.

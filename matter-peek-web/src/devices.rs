@@ -185,8 +185,12 @@ impl App {
         let flipped = self.flipped.contains(&node_id);
 
         html! {
-            <div class={classes!("flip-card", flipped.then_some("is-flipped"))}>
-            <div class="flip-inner">
+            <div class={classes!("flip-card", flipped.then_some("is-flipped"),
+                self.turning.contains(&node_id).then_some("is-turning"))}>
+            <div class="flip-inner"
+                onanimationend={link.batch_callback(move |e: AnimationEvent| {
+                    e.animation_name().starts_with("card-to-").then_some(Msg::Turned(node_id))
+                })}>
             <article class={classes!("device-card", "flip-front", offline.then_some("is-offline"))}
                 inert={flipped.then_some("")}>
                 { self.view_device_head(d, false, pill.clone(), link) }

@@ -254,16 +254,29 @@ html, body { background: var(--bulma-scheme-main-bis); min-height: 100vh; }
   .two-way-thumb, .dm-switch-knob, .dm-switch-track { transition: none; }
 }
 
-/* A device card turns over to its controls; the back takes the front's height. */
-.flip-card { perspective: 2000px; min-width: 0; }
-.flip-inner { position: relative; height: 100%; transform-style: preserve-3d; transition: transform .55s cubic-bezier(.4, .2, .2, 1); }
-.flip-card.is-flipped .flip-inner { transform: rotateY(180deg); }
-.flip-front, .flip-back { -webkit-backface-visibility: hidden; backface-visibility: hidden; }
+/* A device card turns over to its controls; the back takes the front's height.
+   At rest it is flat, its other face hidden: 3D blurs text in WebKit, whose
+   backface-visibility also lets parts of the hidden face through. It is in
+   3D only while it turns, each face hiding halfway. */
+.flip-card { min-width: 0; }
+.flip-inner { position: relative; height: 100%; }
 .flip-front { height: 100%; }
-.flip-back { position: absolute; inset: 0; transform: rotateY(180deg); }
-@media (prefers-reduced-motion: reduce) {
-  .flip-inner { transition: none; }
+.flip-back { position: absolute; inset: 0; }
+.flip-card.is-flipped .flip-front, .flip-card:not(.is-flipped) .flip-back { visibility: hidden; }
+@media (prefers-reduced-motion: no-preference) {
+  .flip-card.is-turning { perspective: 2000px; }
+  .flip-card.is-turning .flip-inner { transform-style: preserve-3d; animation: card-to-back .55s cubic-bezier(.4, .2, .2, 1); }
+  .flip-card.is-turning:not(.is-flipped) .flip-inner { animation-name: card-to-front; }
+  .flip-card.is-turning .flip-front, .flip-card.is-turning .flip-back { -webkit-backface-visibility: hidden; backface-visibility: hidden; }
+  .flip-card.is-turning .flip-back { transform: rotateY(180deg); }
+  .flip-card.is-turning.is-flipped .flip-front, .flip-card.is-turning:not(.is-flipped) .flip-back { animation: face-leaves .55s linear; }
+  .flip-card.is-turning.is-flipped .flip-back, .flip-card.is-turning:not(.is-flipped) .flip-front { animation: face-comes .55s linear; }
 }
+@keyframes card-to-back { from { transform: rotateY(0); } to { transform: rotateY(180deg); } }
+@keyframes card-to-front { from { transform: rotateY(180deg); } to { transform: rotateY(0); } }
+/* The faces swap when the card is edge-on: at 32% of the turn, with its easing. */
+@keyframes face-leaves { 0%, 31.9% { visibility: visible; } 32%, 100% { visibility: hidden; } }
+@keyframes face-comes { 0%, 31.9% { visibility: hidden; } 32%, 100% { visibility: visible; } }
 .card-controls { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 1rem; margin: 0 -1.25rem; padding: 0 1.25rem; }
 .card-controls .dm-controls { grid-template-columns: minmax(5.5rem, 8.5rem) minmax(0, 1fr) auto; gap: .65rem .75rem; font-size: .9rem; max-width: none; }
 .card-controls .dm-control-value { min-width: 3.5rem; }
@@ -1069,6 +1082,7 @@ button.dm-chip:hover { border-color: var(--bulma-link); color: var(--bulma-link)
 .connection-button:hover { background: var(--bulma-background); color: var(--bulma-text-strong); }
 .connection-button.is-drawer { margin: .6rem .75rem 0; }
 .modal .modal-card.connection-card { width: min(480px, calc(100vw - 32px)); }
+.connection-card.is-required .modal-card-head .delete { display: none; }
 .connection-text { margin-bottom: 1rem; font-size: .88rem; color: var(--bulma-text-weak); }
 @media screen and (max-width: 768px) {
   .connection-button.is-appbar { display: none; }

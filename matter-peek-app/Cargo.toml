@@ -8,6 +8,9 @@ publish.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+# The web UI's copy goes into the package although git ignores it.
+include = ["/src", "/build.rs", "/tauri.conf.json", "/capabilities", "/icons", "/web-dist"]
+
 # The mobile builds take the library; the desktop one the binary.
 [lib]
 name = "matter_peek_app"
@@ -17,7 +20,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `custom-protocol`: the UI served from the executable also when built by
+# plain cargo (`cargo install`), not only by `cargo tauri build`.
+tauri = { version = "2", features = ["custom-protocol"] }
 tauri-plugin-log = "2"
 log = { workspace = true }
 serde_json = { workspace = true }

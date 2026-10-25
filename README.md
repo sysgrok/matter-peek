@@ -30,6 +30,8 @@ matter-peek/       the executable, `matter-peek`: the server (`serve`: the API
                    agents and the terminal chat
 matter-peek-web/   the Yew/Wasm web UI (a WebSocket client; a separate wasm
                    crate, built with trunk and taken into `matter-peek`)
+matter-peek-app/   the web UI as a desktop and Android app (Tauri), on the
+                   controller in the app or on a server
 ```
 
 Everything goes through the API. The web UI talks to the server that serves
@@ -94,6 +96,27 @@ cargo run --bin matter-peek -- --server ws://127.0.0.1:8087 mcp --allow-mutate
 cargo run --bin matter-peek -- assistant set --url http://localhost:11434/v1 --model qwen3.5:9b
 cargo run --bin matter-peek -- chat
 ```
+
+### The app
+
+`matter-peek-app` is the web UI as a desktop or Android app (Tauri). It runs on
+a controller of its own, in the app, or on a server (`192.168.10.9:8087`, …):
+asked at first launch, changed from the top bar.
+
+```sh
+# Linux only: the system's WebKitGTK, to build it (Windows' WebView2 and
+# macOS' WKWebView come with the OS)
+sudo apt install libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+# The desktop app, with the web UI built first (see above)
+cargo install --path matter-peek-app      # or: (cd matter-peek-app && cargo tauri build)
+
+# Android: the SDK with NDK 27 and a JDK (ANDROID_HOME, NDK_HOME, JAVA_HOME set)
+(cd matter-peek-app && cargo tauri android build --apk --target aarch64)
+```
+
+Both executables embed the web UI. A packaged crate has no `matter-peek-web`
+next to it, so it carries a copy, which `scripts/vendor-web.sh` makes.
 
 ### MCP (AI agents)
 
