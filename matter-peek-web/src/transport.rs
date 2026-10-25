@@ -55,8 +55,9 @@ extern "C" {
 
 /// Whether the page runs in the app.
 pub fn in_app() -> bool {
-    web_sys::window()
-        .is_some_and(|window| Reflect::has(&window, &JsValue::from_str("__TAURI__")).unwrap_or(false))
+    web_sys::window().is_some_and(|window| {
+        Reflect::has(&window, &JsValue::from_str("__TAURI__")).unwrap_or(false)
+    })
 }
 
 /// Where the API is: in a browser, the server that served the page; in the
@@ -130,7 +131,11 @@ fn open_in_app() -> (Writer, Reader) {
             let Message::Text(text) = msg else {
                 continue;
             };
-            let sent = invoke("wire_send", args(&[("id", id.clone()), ("msg", text.into())])).await;
+            let sent = invoke(
+                "wire_send",
+                args(&[("id", id.clone()), ("msg", text.into())]),
+            )
+            .await;
             if let Err(e) = sent {
                 let _ = incoming.unbounded_send(Err(js_error(e)));
                 break;
@@ -141,7 +146,10 @@ fn open_in_app() -> (Writer, Reader) {
         drop(onmessage);
     });
 
-    (Box::pin(write.sink_map_err(|e| e.to_string())), Box::pin(read))
+    (
+        Box::pin(write.sink_map_err(|e| e.to_string())),
+        Box::pin(read),
+    )
 }
 
 /// The WebSocket of the server that served the page, at `/ws` (`trunk serve`
@@ -171,7 +179,10 @@ fn server_url(address: &str) -> Option<String> {
     } else {
         format!("ws://{address}")
     };
-    let path = url.split("://").nth(1).is_some_and(|rest| rest.contains('/'));
+    let path = url
+        .split("://")
+        .nth(1)
+        .is_some_and(|rest| rest.contains('/'));
 
     Some(if path { url } else { format!("{url}/ws") })
 }

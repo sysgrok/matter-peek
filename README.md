@@ -106,9 +106,9 @@ a controller of its own, in the app, or on a server (`192.168.10.9:8087`, …):
 asked at first launch, changed from the top bar.
 
 ```sh
-# Linux only: the system's WebKitGTK, to build it (Windows' WebView2 and
-# macOS' WKWebView come with the OS)
-sudo apt install libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+# Linux only: the system's WebKitGTK and D-Bus, to build it (Windows'
+# WebView2 and macOS' WKWebView come with the OS)
+sudo apt install libwebkit2gtk-4.1-dev libdbus-1-dev
 
 # The desktop app, with the web UI built first (see above)
 cargo install --path matter-peek-app      # or: (cd matter-peek-app && cargo tauri build)
