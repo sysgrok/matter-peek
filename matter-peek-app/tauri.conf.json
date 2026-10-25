@@ -3,9 +3,7 @@
   "productName": "matter-peek",
   "version": "0.1.0",
   "identifier": "com.sysgrok.matterpeek",
-  "build": {
-    "frontendDist": "web-dist"
-  },
+  "build": {},
   "app": {
     "withGlobalTauri": true,
     "windows": [
@@ -13,7 +11,8 @@
         "title": "matter-peek",
         "width": 1280,
         "height": 860,
-        "resizable": true
+        "resizable": true,
+        "url": "matter-peek://localhost/"
       }
     ],
     "security": {

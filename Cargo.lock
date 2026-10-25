@@ -3148,17 +3148,16 @@ dependencies = [
  "blocking",
  "clap",
  "env_logger",
- "flate2",
  "futures-lite",
  "futures-util",
  "log",
  "matter-peek-core",
+ "matter-peek-server",
  "rpassword",
  "rustyline",
  "serde",
  "serde_json",
  "termimad",
- "ureq",
 ]
 
 [[package]]
@@ -3166,10 +3165,9 @@ name = "matter-peek-app"
 version = "0.1.0"
 dependencies = [
  "async-channel",
- "async-executor",
- "futures-lite",
  "log",
  "matter-peek-core",
+ "matter-peek-server",
  "serde_json",
  "tauri",
  "tauri-build",
@@ -3199,6 +3197,26 @@ dependencies = [
  "serde_json",
  "socket2 0.5.10",
  "uniffi",
+]
+
+[[package]]
+name = "matter-peek-server"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "async-executor",
+ "async-io",
+ "async-net",
+ "async-tungstenite",
+ "blocking",
+ "flate2",
+ "futures-lite",
+ "futures-util",
+ "log",
+ "matter-peek-core",
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

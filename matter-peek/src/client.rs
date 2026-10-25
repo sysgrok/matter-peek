@@ -2,13 +2,12 @@
 //!
 //! A [`Connection`] carries [`ClientMsg`]s in and [`ServerMsg`]s out, either over
 //! a WebSocket to a running server (`matter-peek serve`) ([`connect`]) or to a
-//! controller in this process ([`connect_in_process`]). Either way, the requests
+//! [`Hub`] in this process ([`connect_in_process`]). Either way, the requests
 //! are serviced the same way, the assistant's too.
 
 use core::cell::Cell;
 
 use std::io;
-use std::rc::Rc;
 
 use async_tungstenite::tungstenite::Message;
 use futures_util::{SinkExt, StreamExt};
@@ -16,16 +15,13 @@ use futures_util::{SinkExt, StreamExt};
 use log::{debug, warn};
 
 use matter_peek_core::api::platform::data_dir;
-use matter_peek_core::api::wire::{
-    ClientMsg, Event, ReqId, Request, Response, ServerMsg, WireSession,
-};
-use matter_peek_core::api::{MatterPeek, PeekConfig};
-
-use super::chats::Chats;
-use super::llm::model_from_env;
+use matter_peek_core::api::wire::{ClientMsg, Event, ReqId, Request, Response, ServerMsg};
+use matter_peek_core::api::PeekConfig;
+use matter_peek_server::llm::model_from_env;
+use matter_peek_server::{spawn, Hub};
 
 /// A connection to the API. Runs on the thread-local executor, so it must be
-/// driven by [`super::block_on`].
+/// driven by [`matter_peek_server::block_on`].
 pub struct Connection {
     tx: async_channel::Sender<ClientMsg>,
     rx: async_channel::Receiver<ServerMsg>,
@@ -99,7 +95,7 @@ pub async fn connect(url: &str) -> io::Result<Connection> {
     let (client_tx, client_rx) = async_channel::unbounded::<ClientMsg>();
     let (server_tx, server_rx) = async_channel::unbounded::<ServerMsg>();
 
-    super::spawn(async move {
+    spawn(async move {
         while let Ok(msg) = client_rx.recv().await {
             let Ok(json) = serde_json::to_string(&msg) else {
                 continue;
@@ -111,7 +107,7 @@ pub async fn connect(url: &str) -> io::Result<Connection> {
         }
     });
 
-    super::spawn(async move {
+    spawn(async move {
         while let Some(frame) = read.next().await {
             let text = match frame {
                 Ok(Message::Text(text)) => text,
@@ -141,24 +137,15 @@ pub async fn connect(url: &str) -> io::Result<Connection> {
 /// the assistant runs here too, as in the server. Fails if another matter-peek
 /// process (e.g. a running server) holds the store.
 pub fn connect_in_process(config: PeekConfig) -> io::Result<Connection> {
-    let peek = MatterPeek::start(config).map_err(io::Error::other)?;
+    let hub = Hub::start(config, model_from_env(), data_dir().join("chats"))?;
 
     let (client_tx, client_rx) = async_channel::unbounded::<ClientMsg>();
     let (server_tx, server_rx) = async_channel::unbounded::<ServerMsg>();
 
-    let chats = Chats::new(peek.clone(), model_from_env(), data_dir().join("chats"));
-    let session = Rc::new(WireSession::new(peek, server_tx.clone()));
-
-    super::spawn(async move {
+    let session = hub.connect(server_tx);
+    spawn(async move {
         while let Ok(msg) = client_rx.recv().await {
-            if msg.request.is_assistant() {
-                let chats = chats.clone();
-                let out = server_tx.clone();
-                super::spawn(async move { chats.handle(msg, out).await });
-            } else {
-                let session = session.clone();
-                super::spawn(async move { session.handle(msg).await });
-            }
+            session.handle(msg);
         }
     });
 

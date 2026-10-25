@@ -1,14 +1,11 @@
 //! The API over WebSocket/JSON, and the web UI over HTTP, on one port.
 //!
-//! A connection that asks to upgrade to WebSocket is the API: a
-//! [`WireSession`], whose [`ClientMsg`] frames run as requests (concurrently,
-//! so a `Cancel` reaches a running `Commission`), and whose responses and
-//! events go back as [`ServerMsg`] frames. The requests for the assistant go
-//! to its [`Chats`], which all connections share. Any other request is for a
-//! file of the web UI.
+//! A connection that asks to upgrade to WebSocket is the API: a [`Session`]
+//! of the [`Hub`], whose [`ClientMsg`] frames run as requests, and whose
+//! responses and events go back as [`ServerMsg`] frames. Any other request is
+//! for a file of the web UI.
 
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_tungstenite::tungstenite::Message;
@@ -20,10 +17,9 @@ use async_net::TcpStream;
 
 use log::{debug, error, info, warn};
 
-use matter_peek_core::api::wire::{ClientMsg, ServerMsg, WireSession};
-use matter_peek_core::api::MatterPeek;
+use matter_peek_core::api::wire::{ClientMsg, ServerMsg};
 
-use super::chats::Chats;
+use crate::hub::Hub;
 
 /// The most bytes a request's head may have.
 const MAX_HEAD_LEN: usize = 8 * 1024;
@@ -32,12 +28,8 @@ const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often to look whether more of it arrived.
 const HEAD_POLL: Duration = Duration::from_millis(10);
 
-/// Serve the API and the web UI on `addr` with `peek` and `chats`, forever.
-pub(crate) async fn serve(
-    addr: &str,
-    peek: Arc<MatterPeek>,
-    chats: Rc<Chats>,
-) -> std::io::Result<()> {
+/// Serve the API of `hub` and the web UI on `addr`, forever.
+pub(crate) async fn serve(addr: &str, hub: Rc<Hub>) -> std::io::Result<()> {
     let listener = async_net::TcpListener::bind(addr).await?;
     info!("server: the web UI at http://{addr}/, the API at ws://{addr}/ws");
 
@@ -45,10 +37,9 @@ pub(crate) async fn serve(
         let (stream, peer) = listener.accept().await?;
         debug!("server: connection from {peer}");
 
-        let peek = peek.clone();
-        let chats = chats.clone();
+        let hub = hub.clone();
         super::spawn(async move {
-            if let Err(e) = handle_conn(stream, peek, chats).await {
+            if let Err(e) = handle_conn(stream, &hub).await {
                 debug!("server: connection {peer} ended: {e}");
             }
         });
@@ -57,15 +48,11 @@ pub(crate) async fn serve(
 
 /// The API, if the connection asks to upgrade to WebSocket; else a file of
 /// the web UI.
-async fn handle_conn(
-    stream: TcpStream,
-    peek: Arc<MatterPeek>,
-    chats: Rc<Chats>,
-) -> Result<(), String> {
+async fn handle_conn(stream: TcpStream, hub: &Hub) -> Result<(), String> {
     let head = peek_head(&stream).await.map_err(|e| e.to_string())?;
 
     if is_upgrade(&head) {
-        websocket(stream, peek, chats).await
+        websocket(stream, hub).await
     } else {
         super::web::respond(stream, &head)
             .await
@@ -105,7 +92,7 @@ fn is_upgrade(head: &str) -> bool {
     })
 }
 
-async fn websocket<S>(stream: S, peek: Arc<MatterPeek>, chats: Rc<Chats>) -> Result<(), String>
+async fn websocket<S>(stream: S, hub: &Hub) -> Result<(), String>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -115,7 +102,7 @@ where
     let (mut write, mut read) = ws.split();
 
     let (out, out_rx) = async_channel::unbounded::<ServerMsg>();
-    let session = Rc::new(WireSession::new(peek, out.clone()));
+    let session = hub.connect(out);
 
     let writer = async {
         while let Ok(msg) = out_rx.recv().await {
@@ -153,14 +140,7 @@ where
                 }
             };
 
-            if msg.request.is_assistant() {
-                let chats = chats.clone();
-                let out = out.clone();
-                super::spawn(async move { chats.handle(msg, out).await });
-            } else {
-                let session = session.clone();
-                super::spawn(async move { session.handle(msg).await });
-            }
+            session.handle(msg);
         }
     };
 

@@ -8,8 +8,7 @@ publish.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-# The web UI's copy goes into the package although git ignores it.
-include = ["/src", "/build.rs", "/tauri.conf.json", "/capabilities", "/icons", "/web-dist"]
+include = ["/src", "/build.rs", "/tauri.conf.json", "/capabilities", "/icons"]
 
 # The mobile builds take the library; the desktop one the binary.
 [lib]
@@ -27,8 +26,8 @@ tauri-plugin-log = "2"
 log = { workspace = true }
 serde_json = { workspace = true }
 async-channel = { workspace = true }
-async-executor = { workspace = true }
-futures-lite = { workspace = true }
+# The core in the app, with its assistant: a hub of the server's.
+matter-peek-server = { path = "../matter-peek-server" }
 
 # The core, with the host's mDNS: Avahi on Linux, its own on Android.
 [target.'cfg(not(target_os = "android"))'.dependencies]

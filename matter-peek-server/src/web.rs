@@ -87,6 +87,19 @@ pub(super) async fn respond(mut stream: TcpStream, head: &str) -> io::Result<()>
     stream.flush().await
 }
 
+/// The web UI's file at `path` (the page itself for `/`): its content type
+/// and contents, as the app's window shows them. A build without the web UI
+/// has a page saying how to add it.
+pub fn web_file(path: &str) -> Option<(&'static str, Vec<u8>)> {
+    match file(path) {
+        Some((_, content_type, gzipped)) => Some((content_type, gunzip(gzipped).ok()?)),
+        None if FILES.is_empty() => {
+            Some(("text/html; charset=utf-8", NO_WEB_UI.as_bytes().to_vec()))
+        }
+        None => None,
+    }
+}
+
 /// Whether the request takes gzipped contents.
 fn accepts_gzip(head: &str) -> bool {
     head.lines().skip(1).any(|line| {

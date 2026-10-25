@@ -3,11 +3,12 @@ resolver = "2"
 members = [
     "matter-peek-core",
     "matter-peek",
+    "matter-peek-server",
     "matter-peek-app",
     # "matter-peek-web" is a separate wasm crate, excluded from the native workspace build.
 ]
 # The app (Tauri: WebKitGTK on Linux, the Android SDK for Android) only when asked for.
-default-members = ["matter-peek-core", "matter-peek"]
+default-members = ["matter-peek-core", "matter-peek-server", "matter-peek"]
 exclude = ["matter-peek-web"]
 
 [workspace.package]

@@ -4,22 +4,22 @@
 //! `wire_close` carry the [`wire`](matter_peek_core::api::wire) messages of
 //! one connection each, its answers and events flowing back on a channel.
 //!
-//! The core starts with the first connection to it, so an app on a server
-//! never starts one.
+//! The core, with its assistant, is a [`Hub`] of the server's: it starts with
+//! the first connection to it, so an app on a server never starts one. The
+//! page is the server's copy of the web UI, at `matter-peek://localhost/`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
 
-use async_executor::LocalExecutor;
 use log::{error, info};
 use tauri::ipc::Channel;
 use tauri::{Manager, State};
 
-use matter_peek_core::api::wire::{ClientMsg, Response, ServerMsg, WireSession};
-use matter_peek_core::api::{MatterPeek, PeekConfig};
+use matter_peek_core::api::wire::{ClientMsg, Response, ServerMsg};
+use matter_peek_core::api::PeekConfig;
+use matter_peek_server::{Hub, Session};
 
 /// The connections of the page to the core in this process.
 struct Wire {
@@ -34,9 +34,9 @@ enum Cmd {
     Close { id: u32 },
 }
 
-/// A connection, on the core or, when it could not start, on why not.
+/// A connection, to the core or, when it could not start, to why not.
 enum Conn {
-    Session(Rc<WireSession>),
+    Session(Session),
     Failed(Channel<String>, String),
 }
 
@@ -70,6 +70,7 @@ pub fn run() {
                 .level(log::LevelFilter::Info)
                 .build(),
         )
+        .register_uri_scheme_protocol("matter-peek", |_, request| web(request.uri().path()))
         .setup(|app| {
             let store_dir = app.path().app_data_dir()?;
             let (cmds, cmds_rx) = async_channel::unbounded();
@@ -89,25 +90,37 @@ pub fn run() {
         .expect("the app failed to run");
 }
 
+/// The web UI's file at `path`, from the server's copy: the window's page is
+/// at `matter-peek://localhost/`.
+fn web(path: &str) -> tauri::http::Response<Vec<u8>> {
+    let response = tauri::http::Response::builder();
+
+    match matter_peek_server::web_file(path) {
+        Some((content_type, body)) => response
+            .header(tauri::http::header::CONTENT_TYPE, content_type)
+            .body(body),
+        None => response.status(404).body(b"Not found".to_vec()),
+    }
+    .expect("a response of known parts")
+}
+
 /// Run the connections to the core, on this thread, until the app ends.
 fn serve(store_dir: PathBuf, cmds: async_channel::Receiver<Cmd>) {
-    let ex = LocalExecutor::new();
-
-    futures_lite::future::block_on(ex.run(async {
-        let mut peek: Option<Arc<MatterPeek>> = None;
+    matter_peek_server::block_on(async {
+        let mut hub: Option<Rc<Hub>> = None;
         let mut conns: HashMap<u32, Conn> = HashMap::new();
 
         while let Ok(cmd) = cmds.recv().await {
             match cmd {
                 Cmd::Open { id, channel } => {
-                    let started = match &peek {
-                        Some(peek) => Ok(peek.clone()),
+                    let started = match &hub {
+                        Some(hub) => Ok(hub.clone()),
                         None => start(&store_dir),
                     };
                     let conn = match started {
                         Ok(started) => {
-                            peek = Some(started.clone());
-                            Conn::Session(Rc::new(session(&ex, started, channel)))
+                            hub = Some(started.clone());
+                            Conn::Session(connect(&started, channel))
                         }
                         Err(e) => Conn::Failed(channel, e),
                     };
@@ -118,10 +131,7 @@ fn serve(store_dir: PathBuf, cmds: async_channel::Receiver<Cmd>) {
                         continue;
                     };
                     match conns.get(&id) {
-                        Some(Conn::Session(session)) => {
-                            let session = session.clone();
-                            ex.spawn(async move { session.handle(msg).await }).detach();
-                        }
+                        Some(Conn::Session(session)) => session.handle(msg),
                         Some(Conn::Failed(channel, message)) => {
                             let response = ServerMsg::Response {
                                 req_id: msg.req_id,
@@ -139,40 +149,40 @@ fn serve(store_dir: PathBuf, cmds: async_channel::Receiver<Cmd>) {
                 }
             }
         }
-    }));
+    });
 }
 
-/// Start the core, keeping its store in `store_dir`.
-fn start(store_dir: &std::path::Path) -> Result<Arc<MatterPeek>, String> {
+/// Start the core and its assistant, keeping the store and the chats in
+/// `store_dir`.
+fn start(store_dir: &Path) -> Result<Rc<Hub>, String> {
     info!(
         "app: starting the core, its store in {}",
         store_dir.display()
     );
 
-    MatterPeek::start(PeekConfig {
+    let config = PeekConfig {
         store_dir: Some(store_dir.display().to_string()),
         periodic_sync: true,
-    })
-    .map_err(|e| {
-        error!("app: the core does not start: {e:?}");
-        format!("the controller does not start: {e:?}")
+    };
+    Hub::start(config, None, store_dir.join("chats")).map_err(|e| {
+        error!("app: the core does not start: {e}");
+        format!("the controller does not start: {e}")
     })
 }
 
-/// A connection to `peek`, whose answers and events go to `channel`.
-fn session(ex: &LocalExecutor<'_>, peek: Arc<MatterPeek>, channel: Channel<String>) -> WireSession {
+/// A connection to `hub`, whose answers and events go to `channel`.
+fn connect(hub: &Hub, channel: Channel<String>) -> Session {
     let (out, out_rx) = async_channel::unbounded::<ServerMsg>();
 
-    ex.spawn(async move {
+    matter_peek_server::spawn(async move {
         while let Ok(msg) = out_rx.recv().await {
             if !send(&channel, &msg) {
                 break;
             }
         }
-    })
-    .detach();
+    });
 
-    WireSession::new(peek, out)
+    hub.connect(out)
 }
 
 /// Send `msg` to the page; `false` once it is gone.

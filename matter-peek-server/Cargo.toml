@@ -1,0 +1,39 @@
+[package]
+name = "matter-peek-server"
+description = "The matter-peek server: a controller and its assistant for the connections to them, and the API over WebSocket/JSON with the web UI, on one port"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+# The web UI's copy goes into the package although git ignores it.
+include = ["/src", "/build.rs", "/web-dist"]
+
+[dependencies]
+# The API and its controller; the executable picks the mDNS backend.
+matter-peek-core = { path = "../matter-peek-core", default-features = false, features = ["std"] }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true }
+log = { workspace = true }
+# The executor of the server and its connections (smol family), and the
+# assistant's model calls on a thread pool.
+async-executor = { workspace = true }
+async-io = { workspace = true }
+async-channel = { workspace = true }
+blocking = "1"
+futures-lite = { workspace = true }
+futures-util = { workspace = true }
+# The API over WebSocket, and the web UI over HTTP, on one port.
+async-net = { workspace = true }
+async-tungstenite = { workspace = true }
+# The assistant's model, over HTTPS (rustls, with its own root certificates).
+ureq = "3.5"
+# The web UI's files are kept gzipped; a client that takes no gzip gets them
+# unpacked.
+flate2 = "1"
+
+[build-dependencies]
+# The web UI's files, gzipped into the library.
+flate2 = "1"

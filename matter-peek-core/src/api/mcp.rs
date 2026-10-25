@@ -1594,17 +1594,31 @@ fn entries<'a>(value: &'a mut Value, key: &str) -> impl Iterator<Item = &'a mut 
         .flatten()
 }
 
-/// `value` without its nulls, empty strings and empty lists or objects: what an
-/// agent need not read.
+/// The result `value` without what an agent need not read: nulls, empty
+/// strings and, below its own fields, empty lists or objects. Its own lists
+/// stay, though empty: an empty one answers "none".
 fn compact(value: Value) -> Value {
     match value {
         Value::Object(map) => Value::Object(
             map.into_iter()
-                .map(|(key, value)| (key, compact(value)))
+                .map(|(key, value)| (key, prune(value)))
+                .filter(|(_, value)| !value.is_null() && value.as_str() != Some(""))
+                .collect(),
+        ),
+        other => prune(other),
+    }
+}
+
+/// `value` without its nulls, empty strings and empty lists or objects.
+fn prune(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, prune(value)))
                 .filter(|(_, value)| !is_empty(value))
                 .collect(),
         ),
-        Value::Array(items) => Value::Array(items.into_iter().map(compact).collect()),
+        Value::Array(items) => Value::Array(items.into_iter().map(prune).collect()),
         other => other,
     }
 }
@@ -1658,9 +1672,12 @@ mod tests {
             "name": "light",
             "label": "",
             "online": null,
-            "tags": [],
-            "fingerprint": { "vendor_id": null },
-            "devices": [{ "node": "0x1", "serial": "" }],
+            "devices": [{
+                "node": "0x1",
+                "serial": "",
+                "tags": [],
+                "fingerprint": { "vendor_id": null }
+            }],
             "count": 0,
             "remembered": false
         }));
@@ -1674,6 +1691,13 @@ mod tests {
                 "remembered": false
             })
         );
+    }
+
+    #[test]
+    fn compact_keeps_an_empty_answer() {
+        let value = compact(json!({ "result": "devices", "devices": [], "notice": null }));
+
+        assert_eq!(value, json!({ "result": "devices", "devices": [] }));
     }
 
     #[test]

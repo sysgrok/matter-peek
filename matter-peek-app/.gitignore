@@ -1,5 +1,1 @@
 /gen/schemas
-# The web UI's copy (build.rs, scripts/vendor-web.sh); the directory stays,
-# for the Tauri CLI, which looks for it before the build.
-/web-dist/*
-!/web-dist/.gitkeep

@@ -24,12 +24,12 @@ use base64::Engine as _;
 use clap::builder::BoolishValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::server::client::{self, Connection};
+use crate::client::Connection;
 use matter_peek_core::api::{self, display, query, wire};
 
 mod chat;
+mod client;
 mod mcp;
-mod server;
 
 /// Where `serve` listens by default, and where `--server` finds it.
 const DEFAULT_LISTEN: &str = "127.0.0.1:8087";
@@ -514,7 +514,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    match server::block_on(run(cli)) {
+    match matter_peek_server::block_on(run(cli)) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(e) => {
@@ -536,7 +536,7 @@ fn serve(listen: &str) -> ExitCode {
         );
     }
 
-    match server::run(listen, server::llm::model_from_env()) {
+    match matter_peek_server::run(listen, matter_peek_server::llm::model_from_env()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");

@@ -1,14 +1,15 @@
-//! The server: the matter-peek API over WebSocket/JSON, and the web UI.
+//! The matter-peek server: a [`Hub`], a controller and its assistant for the
+//! connections to them, and [`run`], which serves a hub's [`wire`] messages
+//! to WebSocket clients (the web UI, the CLI and the MCP server with
+//! `--server`) and the web UI's files ([`web`]), on one port. The executables
+//! embed it: `matter-peek` (`serve`, and its own connections without a
+//! server) and the app (its connections to the controller in it).
 //!
-//! [`run`] starts a [`MatterPeek`] and serves, on one port, its [`wire`]
-//! messages to WebSocket clients (the web UI, the CLI and the MCP server with
-//! `--server`) and the web UI's files ([`web`]). Those clients reach it, or a
-//! controller in their own process, through a [`client::Connection`]. It also
-//! runs the assistant: its chats, with the model kept in the store or set by
-//! the environment ([`llm`]).
+//! The assistant's chats keep the model in the store or take the one the
+//! environment sets ([`llm`]).
 //!
-//! The shells run on a single-threaded [`LocalExecutor`] (smol/async-io
-//! family); the controller runs on its own thread.
+//! It runs on a single-threaded [`LocalExecutor`] (smol/async-io family),
+//! driven by [`block_on`]; the controller runs on its own thread.
 //!
 //! [`wire`]: matter_peek_core::api::wire
 
@@ -19,11 +20,14 @@ use async_executor::LocalExecutor;
 
 use matter_peek_core::api::agent::ModelConfig;
 use matter_peek_core::api::platform::data_dir;
-use matter_peek_core::api::{MatterPeek, PeekConfig};
+use matter_peek_core::api::PeekConfig;
+
+pub use hub::{Hub, Session};
+pub use web::web_file;
 
 mod chats;
-pub mod client;
 mod http;
+mod hub;
 pub mod llm;
 mod web;
 
@@ -54,15 +58,13 @@ where
 /// Run the server: start the controller, then serve the API and the web UI on
 /// `addr`, with the assistant's model `env` sets, else the stored one.
 pub fn run(addr: &str, env: Option<ModelConfig>) -> std::io::Result<()> {
-    let peek = MatterPeek::start(PeekConfig {
+    let config = PeekConfig {
         store_dir: None,
         periodic_sync: true,
-    })
-    .map_err(std::io::Error::other)?;
+    };
+    let hub = Hub::start(config, env, data_dir().join("chats"))?;
 
-    let chats = chats::Chats::new(peek.clone(), env, data_dir().join("chats"));
-
-    block_on(http::serve(addr, peek, chats))
+    block_on(http::serve(addr, hub))
 }
 
 /// Handle to the thread-local executor.

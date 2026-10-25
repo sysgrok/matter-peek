@@ -24,12 +24,14 @@ a web UI, a command line, or an AI agent over MCP, all through one API.
 matter-peek-core/  the API (`MatterPeek`, its types, wire messages and MCP
                    tools) and the controller behind it (wraps rs-matter); also
                    the UniFFI bindings
-matter-peek/       the executable, `matter-peek`: the server (`serve`: the API
-                   over WebSocket/JSON and the web UI, on one port, and the
-                   assistant's chats), the command line, the MCP server for AI
-                   agents and the terminal chat
+matter-peek-server/ the server: a controller and its assistant for the
+                   connections to them (`Hub`), and the API over WebSocket/JSON
+                   with the web UI, on one port
+matter-peek/       the executable, `matter-peek`: the server (`serve`), the
+                   command line, the MCP server for AI agents and the terminal
+                   chat
 matter-peek-web/   the Yew/Wasm web UI (a WebSocket client; a separate wasm
-                   crate, built with trunk and taken into `matter-peek`)
+                   crate, built with trunk and taken into the server)
 matter-peek-app/   the web UI as a desktop and Android app (Tauri), on the
                    controller in the app or on a server
 ```
@@ -115,7 +117,8 @@ cargo install --path matter-peek-app      # or: (cd matter-peek-app && cargo tau
 (cd matter-peek-app && cargo tauri android build --apk --target aarch64)
 ```
 
-Both executables embed the web UI. A packaged crate has no `matter-peek-web`
+`matter-peek-server` embeds the web UI, for the server and for the app's
+window (`matter-peek://localhost/`). A packaged crate has no `matter-peek-web`
 next to it, so it carries a copy, which `scripts/vendor-web.sh` makes.
 
 ### MCP (AI agents)

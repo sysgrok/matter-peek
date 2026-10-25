@@ -52,9 +52,10 @@ controller serves the CLI, the MCP server and mobile apps.
 ```
   Web UI (Yew/Wasm) ──── WebSocket/JSON ───┐
   CLI (+ mcp) --server ─ WebSocket/JSON ───┤      matter-peek serve
-                                           │ ──►  (WireSession per connection)
+  app, on a server ───── WebSocket/JSON ───┤ ──►  (a Hub's Session per connection)
                                            │              │
-  CLI (+ mcp), no --server ─ in process ──┼──► WireSession┤
+  CLI (+ mcp), no --server ─ in process ──┼──► Hub Session┤
+  app, on this device ─── IPC ─────────────┤              │
   mobile apps ──────── UniFFI ─────────────┤              ▼
   Rust ─────────────── Rust ───────────────┴──►  ┌────────────────────────────────┐
                                                   │ matter-peek-core               │
@@ -110,8 +111,9 @@ The same methods serve every binding:
   reply is asked once more for its answer. Its model (`ModelConfig`: API
   address, model, key, think) is kept in the store; the API shows it as
   `AssistantInfo`, without the key. The assistant runs where the store is,
-  so the key never travels: the server's chat hub (`matter-peek/src/server/chats.rs`),
-  which `client::connect_in_process` also runs for the CLI on its own. The
+  so the key never travels: the chats of `matter-peek-server`'s `Hub` (a
+  controller and its assistant), which the server, the CLI on its own
+  (`client::connect_in_process`) and the app on its own controller run. The
   wire's `Chat…` requests list, open, ask, approve, stop and delete its chats,
   kept as JSON in the data directory, with what the model does as
   `Event::Chat`; `AssistantModels` and `AssistantTest` try a model before it
@@ -163,11 +165,12 @@ of it is private to `core`.
 | Front-end | Binary | Reaches the controller |
 |---|---|---|
 | Server | `matter-peek serve` | starts one; serves the API (`ws://127.0.0.1:8087/ws`) and the web UI (`http://127.0.0.1:8087/`) on one port |
-| Web UI (Yew/Wasm, Bulma) | taken into `matter-peek` at build time (`trunk serve` while working on it) | WebSocket, to the server that served it |
-| CLI | `matter-peek` | `--server <url>`, or a `WireSession` in process |
+| Web UI (Yew/Wasm, Bulma) | taken into `matter-peek-server` at build time (`trunk serve` while working on it) | WebSocket, to the server that served it |
+| CLI | `matter-peek` | `--server <url>`, or a `Hub` in process |
 | MCP server | `matter-peek mcp` | as the CLI (read-only unless `--allow-mutate`) |
 | Assistant (AI agent) | the server, or `matter-peek` without `--server` | runs where the store is, with the stored model (or `MATTER_PEEK_LLM_*`'s); the web UI and `matter-peek chat` ask it over the wire's `Chat…` requests |
-| Mobile apps | — | UniFFI, in process |
+| App (Tauri: desktop, Android) | `matter-peek-app`: the web UI in a window | IPC, to a `Hub` in the app; or WebSocket, to a server |
+| Native mobile apps | — | UniFFI, in process |
 
 
 ---
@@ -180,8 +183,9 @@ of it is private to `core`.
   terminal chat. `serve` answers, on one port, a request to upgrade to
   WebSocket with the API, and any other with a file of the web UI: it peeks
   at the request's head, so the WebSocket handshake reads it whole.
-- `build.rs` takes the web UI's files (`MATTER_PEEK_WEB_DIST`, else
-  `../matter-peek-web/dist`) into the executable, each gzipped; they go out
+- `matter-peek-server`'s `build.rs` takes the web UI's files
+  (`MATTER_PEEK_WEB_DIST`, else `../matter-peek-web/dist`, else the copy a
+  packaged crate carries, `web-dist`) into it, each gzipped; they go out
   as they are, with `Content-Encoding: gzip` (unpacked only for a client that
   takes no gzip). Without them, `/` says how to add them. An executable to
   hand out should take `trunk build --release`'s: the web crate's release
