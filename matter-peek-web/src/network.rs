@@ -175,8 +175,14 @@ impl Confirm {
     }
 }
 
-/// The popup of `view`, for the device titled `title`.
-pub fn view_modal(view: &NetworkView, title: &str, error: Option<&str>, link: &Scope<App>) -> Html {
+/// The popup of `view`, for the device titled `title`, in `state`.
+pub fn view_modal(
+    view: &NetworkView,
+    title: &str,
+    state: Html,
+    error: Option<&str>,
+    link: &Scope<App>,
+) -> Html {
     let busy = if view.changing {
         Some("Changing the networks of the device… When it has to reconnect, this takes up to a few minutes.")
     } else if view.loading && view.info.is_none() {
@@ -230,6 +236,8 @@ pub fn view_modal(view: &NetworkView, title: &str, error: Option<&str>, link: &S
                 <div class="modal-background"></div>
                 <div class="modal-card is-fullscreen">
                     { ui::modal_head("Network", title, html! {
+                        <>
+                        { state }
                         <button
                             class={classes!("button", "is-small", view.loading.then_some("is-loading"))}
                             title="Read the network again"
@@ -238,6 +246,7 @@ pub fn view_modal(view: &NetworkView, title: &str, error: Option<&str>, link: &S
                             <span class="icon is-small">{ icon(Icon::Refresh, 16) }</span>
                             <span>{ "Refresh" }</span>
                         </button>
+                        </>
                     }, link.callback(|_| Msg::CloseNetwork)) }
                     <section class="modal-card-body">
                         <div class="app container">

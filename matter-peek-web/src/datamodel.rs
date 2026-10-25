@@ -370,10 +370,6 @@ impl App {
             return html! {};
         };
         let title = self.device_title(view.node_id);
-        let live = matches!(
-            self.subs.get(&view.node_id).map(|sub| sub.conn),
-            Some(SubConn::Live { .. })
-        );
         let offline = matches!(
             self.subs.get(&view.node_id).map(|sub| sub.conn),
             Some(SubConn::Offline)
@@ -386,9 +382,7 @@ impl App {
                 <div class="modal-card is-fullscreen">
                     { ui::modal_head("Data model", &title, html! {
                         <>
-                        if live {
-                            { ui::pill("Live", Some("is-up"), Some("It reports what changes".into())) }
-                        }
+                        { self.device_state(view.node_id).1 }
                         <button
                             class={classes!("button", "is-small", view.loading.then_some("is-loading"))}
                             title="Read the cluster again"

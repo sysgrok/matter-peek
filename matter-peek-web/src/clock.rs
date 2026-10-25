@@ -101,7 +101,7 @@ impl App {
             <div class="modal is-active">
                 <div class="modal-background" onclick={link.callback(|_| clock(ClockMsg::Close))}></div>
                 <div class="modal-card clock-card">
-                    { ui::modal_head("Clock", &title, html! {},
+                    { ui::modal_head("Clock", &title, self.device_state(view.node_id).1,
                         link.callback(|_| clock(ClockMsg::Close))) }
                     <section class="modal-card-body">
                         if let Some(error) = &view.error {

@@ -152,6 +152,13 @@ html, body { background: var(--bulma-scheme-main-bis); min-height: 100vh; }
 .modal-card.is-fullscreen .modal-card-body { background: var(--bulma-scheme-main-bis); }
 .modal-title { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .modal-eyebrow { font-size: .7rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--bulma-text-weak); }
+.modal-head-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.modal-head-actions:empty { display: none; }
+@media screen and (max-width: 480px) {
+  /* The title and the close button on top; the buttons under them. */
+  .modal-card-head { flex-wrap: wrap; row-gap: .6rem; }
+  .modal-head-actions { order: 3; width: 100%; }
+}
 .modal-card.dialog { width: min(480px, calc(100vw - 32px)); margin: 0 auto; border-radius: var(--radius-card); overflow: hidden; }
 .dialog .modal-card-head { gap: .8rem; border-bottom: none; box-shadow: none; padding-bottom: .5rem; }
 .dialog .modal-card-title { font-size: 1.15rem; font-weight: 600; }
@@ -207,6 +214,18 @@ html, body { background: var(--bulma-scheme-main-bis); min-height: 100vh; }
 .device-actions-end { display: flex; gap: .15rem; margin-left: auto; }
 @media screen and (max-width: 480px) {
   .device-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* One card under another, each as tall as it is. */
+  .device-grid { grid-auto-rows: auto; }
+  /* The name gets the row; the state and the buttons go under it. */
+  .device-head { flex-wrap: wrap; row-gap: .6rem; }
+  .device-head-end { order: 3; width: 100%; padding-left: 3.6rem; }
+  .device-head-end > .pill { margin-right: auto; }
+  .health-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .4rem; }
+  .health-tile { padding: .45rem .55rem; }
+  .health-tile-icon { display: none; }
+  /* The actions in one flow, the delete button at the end of the last row. */
+  .device-actions { justify-content: flex-start; }
+  .device-actions-main { display: contents; }
 }
 
 /* A two-way switch (the side the cards show, a view), its thumb on the side picked. */
@@ -1044,3 +1063,14 @@ button.dm-chip:hover { border-color: var(--bulma-link); color: var(--bulma-link)
 .device-actions-main .button .icon:first-child:not(:last-child) { margin-right: .2em; }
 .dm-control-group { grid-column: 1 / -1; margin-top: .6rem; padding-top: .6rem; border-top: 1px solid var(--bulma-border-weak); font-size: .8rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--bulma-text-weak); }
 .dm-control > .dm-number { justify-self: start; grid-column: 2 / span 2; max-width: 10rem; }
+
+/* In the app: where matter-peek runs. */
+.connection-button { display: inline-flex; align-items: center; gap: .35rem; padding: .3rem .65rem; border: 1px solid var(--bulma-border-weak); border-radius: 999px; background: transparent; font: inherit; font-size: .8rem; color: var(--bulma-text-weak); cursor: pointer; white-space: nowrap; }
+.connection-button:hover { background: var(--bulma-background); color: var(--bulma-text-strong); }
+.connection-button.is-drawer { margin: .6rem .75rem 0; }
+.modal .modal-card.connection-card { width: min(480px, calc(100vw - 32px)); }
+.connection-text { margin-bottom: 1rem; font-size: .88rem; color: var(--bulma-text-weak); }
+@media screen and (max-width: 768px) {
+  .connection-button.is-appbar { display: none; }
+}
+

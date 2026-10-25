@@ -1,0 +1,33 @@
+[package]
+name = "matter-peek-app"
+description = "matter-peek as an app: the web UI in a window, on the core in-process or on a server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# The mobile builds take the library; the desktop one the binary.
+[lib]
+name = "matter_peek_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-log = "2"
+log = { workspace = true }
+serde_json = { workspace = true }
+async-channel = { workspace = true }
+async-executor = { workspace = true }
+futures-lite = { workspace = true }
+
+# The core, with the host's mDNS: Avahi on Linux, its own on Android.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+matter-peek-core = { path = "../matter-peek-core" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+matter-peek-core = { path = "../matter-peek-core", default-features = false, features = ["mdns-builtin"] }

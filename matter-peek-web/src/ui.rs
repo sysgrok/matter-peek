@@ -167,7 +167,7 @@ pub fn modal_head(
                 <span class="modal-eyebrow">{ eyebrow.to_string() }</span>
                 <span>{ title.to_string() }</span>
             </div>
-            { buttons }
+            <div class="modal-head-actions">{ buttons }</div>
             <button class="delete is-large ml-3" aria-label="close" onclick={on_close}></button>
         </header>
     }

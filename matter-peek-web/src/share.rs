@@ -151,7 +151,7 @@ impl App {
             <div class="modal is-active">
                 <div class="modal-background" onclick={link.callback(|_| share(ShareMsg::Close))}></div>
                 <div class="modal-card share-card">
-                    { ui::modal_head("Share with another app", &title, html! {},
+                    { ui::modal_head("Share with another app", &title, self.device_state(view.node_id).1,
                         link.callback(|_| share(ShareMsg::Close))) }
                     <section class="modal-card-body">
                         if let Some(error) = &view.error {

@@ -223,6 +223,7 @@ fn ipv6_route(line: &str) -> Option<(std::net::Ipv6Addr, u32)> {
 
 /// Whether the route to `dest/dest_len` covers `address/len`; a default
 /// route (length 0) leads to the internet, not to a Thread network.
+#[cfg(any(target_os = "linux", test))]
 fn covers(dest: std::net::Ipv6Addr, dest_len: u32, address: std::net::Ipv6Addr, len: u32) -> bool {
     if dest_len == 0 || dest_len > len || dest_len > 128 {
         return false;

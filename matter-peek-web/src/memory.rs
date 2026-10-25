@@ -89,6 +89,8 @@ impl App {
                 <div class="modal-background"></div>
                 <div class="modal-card is-fullscreen">
                     { ui::modal_head("Memory", &title, html! {
+                        <>
+                        { self.device_state(view.node_id).1 }
                         <button
                             class={classes!("button", "is-small", view.loading.then_some("is-loading"))}
                             title="Read them again"
@@ -97,6 +99,7 @@ impl App {
                             <span class="icon is-small">{ icon(Icon::Refresh, 16) }</span>
                             <span>{ "Refresh" }</span>
                         </button>
+                        </>
                     }, link.callback(|_| memory(MemoryMsg::Close))) }
                     <section class="modal-card-body">
                         <div class="app container">

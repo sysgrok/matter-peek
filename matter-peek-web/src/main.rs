@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 
 use futures::{SinkExt, StreamExt};
-use gloo_net::websocket::{futures::WebSocket, Message};
+use gloo_net::websocket::Message;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
@@ -23,6 +23,7 @@ mod assistant;
 mod camera;
 mod clock;
 mod commission;
+mod connection;
 mod datamodel;
 mod devices;
 mod fabrics;
@@ -33,23 +34,9 @@ mod network;
 mod our_fabrics;
 mod share;
 mod thread;
+mod transport;
 mod ui;
 mod updates;
-
-/// Where the API is: on the server that served the page, at `/ws`
-/// (`trunk serve` passes it on to the server, see `Trunk.toml`).
-fn ws_url() -> String {
-    let location = web_sys::window().map(|window| window.location());
-    let host = location
-        .as_ref()
-        .and_then(|location| location.host().ok())
-        .unwrap_or_else(|| "127.0.0.1:8087".into());
-    let secure = location
-        .and_then(|location| location.protocol().ok())
-        .is_some_and(|protocol| protocol == "https:");
-
-    format!("{}://{host}/ws", if secure { "wss" } else { "ws" })
-}
 
 #[derive(Clone, PartialEq)]
 struct StepLine {
@@ -308,6 +295,7 @@ enum Msg {
     SaveTags(u64),
     /// Filter the stored list by tag substring.
     Filter(filter::FilterMsg),
+    Connection(connection::ConnectionMsg),
     /// Fetch the stored OTA images.
     OtaImages,
     /// The user picked an OTA image file to upload.
@@ -383,6 +371,8 @@ struct App {
     /// Filter the device list to devices whose tags contain this substring.
     /// The device filter, as typed.
     filter: String,
+    /// In the app, the server typed into the connection popup, while open.
+    connection: Option<String>,
     filter_focus: bool,
     /// The completion picked with the arrow keys.
     filter_pick: usize,
@@ -522,6 +512,7 @@ impl Component for App {
             looking: false,
             tag_inputs: HashMap::new(),
             filter: String::new(),
+            connection: None,
             filter_focus: false,
             filter_pick: 0,
             steps: Vec::new(),
@@ -1426,6 +1417,7 @@ impl Component for App {
                 false
             }
             Msg::Filter(msg) => self.update_filter(msg),
+            Msg::Connection(msg) => self.update_connection(msg),
             Msg::SaveTags(node_id) => {
                 let tags = self
                     .tag_inputs
@@ -1633,14 +1625,19 @@ impl Component for App {
                 { self.view_clock_modal(link) }
                 { self.view_settings_modal(link) }
                 { self.view_network_modal(link) }
+                { self.view_connection_popup(link) }
                 { self.view_ask(link) }
             </>
         }
     }
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
-        // The app opens on the Devices tab; load it as if the user picked it.
-        if first_render {
+        // In the app, where matter-peek runs is chosen first.
+        if first_render && transport::endpoint() == transport::Endpoint::Unset {
+            ctx.link()
+                .send_message(Msg::Connection(connection::ConnectionMsg::Open));
+        } else if first_render {
+            // The app opens on the Devices tab; load it as if the user picked it.
             ctx.link()
                 .send_message(Msg::OurFabrics(our_fabrics::FabricsMsg::Load));
             ctx.link().send_message(Msg::SelectTab(Tab::Devices));
@@ -1824,14 +1821,14 @@ impl App {
             if delay_ms > 0 {
                 gloo_timers::future::TimeoutFuture::new(delay_ms).await;
             }
-            let ws = match WebSocket::open(&ws_url()) {
+            let ws = match transport::open() {
                 Ok(ws) => ws,
                 Err(_) => {
                     link.send_message(Msg::SubWsClosed(gen));
                     return;
                 }
             };
-            let (mut write, mut read) = ws.split();
+            let (mut write, mut read) = ws;
 
             // Outbound: a channel the UI writes request-JSON into; drain to the WS.
             let (out_tx, mut out_rx) = futures::channel::mpsc::unbounded::<String>();
@@ -2098,6 +2095,7 @@ impl App {
                             <span class="brand-name">{ "matter-peek" }</span>
                         </a>
                         { self.view_fabric_switcher(link) }
+                        { self.view_connection_button("is-appbar", link) }
                         <nav class="appbar-nav">
                             { for pages.into_iter().map(|page| link_to("appbar-link", page)) }
                             <a class={classes!("appbar-link", "is-assistant", assistant)}
@@ -2124,6 +2122,7 @@ impl App {
                             { self.view_fabric_choices(link) }
                         </div>
                     }
+                    { self.view_connection_button("is-drawer", link) }
                     <nav class="drawer-nav">
                         { for pages.into_iter().map(|page| link_to("drawer-link", page)) }
                     </nav>
@@ -2303,14 +2302,14 @@ fn request_loop(
     failed: impl Fn(String) -> Msg + 'static,
 ) {
     spawn_local(async move {
-        let ws = match WebSocket::open(&ws_url()) {
+        let ws = match transport::open() {
             Ok(ws) => ws,
             Err(e) => {
                 link.send_message(failed(format!("connect failed: {e}")));
                 return;
             }
         };
-        let (mut write, mut read) = ws.split();
+        let (mut write, mut read) = ws;
 
         let req_id: wire::ReqId = 1;
         let client_msg = wire::ClientMsg { req_id, request };
@@ -2380,8 +2379,8 @@ fn send_camera_frame(link: html::Scope<App>, image: String) {
 /// Send `request` on its own WS, answering with its response (events left
 /// out).
 async fn exchange(request: wire::Request) -> Result<wire::Response, String> {
-    let ws = WebSocket::open(&ws_url()).map_err(|e| e.to_string())?;
-    let (mut write, mut read) = ws.split();
+    let ws = transport::open().map_err(|e| e.to_string())?;
+    let (mut write, mut read) = ws;
 
     let json = serde_json::to_string(&wire::ClientMsg { req_id: 1, request })
         .map_err(|e| e.to_string())?;
@@ -2448,8 +2447,8 @@ fn send_ota_upload(link: html::Scope<App>, file: web_sys::File) {
 async fn ota_upload(link: &html::Scope<App>, file: gloo_file::File) -> Result<(), String> {
     use base64::Engine as _;
 
-    let ws = WebSocket::open(&ws_url()).map_err(|e| format!("connect failed: {e}"))?;
-    let (mut write, mut read) = ws.split();
+    let ws = transport::open().map_err(|e| format!("connect failed: {e}"))?;
+    let (mut write, mut read) = ws;
 
     let size = file.size();
     let mut req_id = 0;
@@ -2496,8 +2495,8 @@ async fn call<W, R>(
     request: wire::Request,
 ) -> Result<wire::Response, String>
 where
-    W: futures::Sink<Message, Error = gloo_net::websocket::WebSocketError> + Unpin,
-    R: futures::Stream<Item = Result<Message, gloo_net::websocket::WebSocketError>> + Unpin,
+    W: futures::Sink<Message, Error = String> + Unpin,
+    R: futures::Stream<Item = Result<Message, String>> + Unpin,
 {
     *req_id += 1;
     let json = serde_json::to_string(&wire::ClientMsg {
@@ -2545,11 +2544,11 @@ fn send_ota_update(link: html::Scope<App>, node_id: u64, name: String) {
             link.send_message(Msg::Error(Pending::None, message));
         };
 
-        let ws = match WebSocket::open(&ws_url()) {
+        let ws = match transport::open() {
             Ok(ws) => ws,
             Err(e) => return failed(format!("connect failed: {e}")),
         };
-        let (mut write, mut read) = ws.split();
+        let (mut write, mut read) = ws;
 
         let client_msg = wire::ClientMsg {
             req_id: 1,
@@ -2639,10 +2638,10 @@ fn read_ota_updates(link: html::Scope<App>, delay_ms: u32) {
 /// the server's cancel flag at a safepoint.
 fn send_cancel() {
     spawn_local(async move {
-        let Ok(ws) = WebSocket::open(&ws_url()) else {
+        let Ok(ws) = transport::open() else {
             return;
         };
-        let (mut write, _read) = ws.split();
+        let (mut write, _read) = ws;
         let client_msg = wire::ClientMsg {
             req_id: 1,
             request: wire::Request::Cancel,

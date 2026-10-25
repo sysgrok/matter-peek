@@ -177,41 +177,12 @@ impl App {
         let node_id = d.handle.node_id;
         let busy = self.device_busy(node_id);
         let live = self.subs.get(&node_id);
-
-        // Offline per its subscription; until that is live or offline, per the
-        // last sync. Only Refresh and the actions not needing the device remain.
-        let offline = match live.map(|sub| sub.conn) {
-            Some(SubConn::Live { .. }) => false,
-            Some(SubConn::Offline) => true,
-            _ => d.online == Some(false),
-        };
-
-        let (state, class, why) = match live.map(|sub| sub.conn) {
-            Some(SubConn::Live { max_int_secs }) => (
-                "Live",
-                Some("is-up"),
-                format!(
-                    "Subscribed: it reports at least every {max_int_secs} s ({} reports so far)",
-                    live.map_or(0, |sub| sub.updates)
-                ),
-            ),
-            Some(SubConn::Reconnecting) => (
-                "Reconnecting",
-                Some("is-warning"),
-                "Reconnecting to the server".to_string(),
-            ),
-            _ if offline => (
-                "Offline",
-                Some("is-danger"),
-                "Not answering; retrying. Refresh checks it now".to_string(),
-            ),
-            _ => ("Connecting", None, "Subscribing to its health".to_string()),
-        };
+        // Only Refresh and the actions not needing the device remain offline.
+        let (offline, pill) = self.device_state(node_id);
 
         let hardware = d.hardware_version().unwrap_or_else(|| "—".into());
         let software = d.software_version().unwrap_or_else(|| "—".into());
         let flipped = self.flipped.contains(&node_id);
-        let pill = ui::pill(state, class, Some(why));
 
         html! {
             <div class={classes!("flip-card", flipped.then_some("is-flipped"))}>
@@ -677,7 +648,8 @@ impl App {
             <div class="modal is-active">
                 <div class="modal-background"></div>
                 <div class="modal-card is-fullscreen">
-                    { ui::modal_head("Logs", &title, html! {}, link.callback(|_| Msg::CloseLogs)) }
+                    { ui::modal_head("Logs", &title, self.device_state(logs.node_id).1,
+                        link.callback(|_| Msg::CloseLogs)) }
                     <section class="modal-card-body">
                         <div class="app container">
                             if let Some(e) = &self.error {
@@ -718,9 +690,51 @@ impl App {
         network::view_modal(
             view,
             &self.device_title(view.node_id),
+            self.device_state(view.node_id).1,
             self.error.as_deref(),
             link,
         )
+    }
+
+    /// Whether a device is offline, and the pill its card and popups show:
+    /// per its subscription, or until that is live or offline, per the last
+    /// sync.
+    pub(crate) fn device_state(&self, node_id: u64) -> (bool, Html) {
+        let live = self.subs.get(&node_id);
+        let recorded = self
+            .stored
+            .iter()
+            .find(|d| d.handle.node_id == node_id)
+            .and_then(|d| d.online);
+        let offline = match live.map(|sub| sub.conn) {
+            Some(SubConn::Live { .. }) => false,
+            Some(SubConn::Offline) => true,
+            _ => recorded == Some(false),
+        };
+
+        let (state, class, why) = match live.map(|sub| sub.conn) {
+            Some(SubConn::Live { max_int_secs }) => (
+                "Live",
+                Some("is-up"),
+                format!(
+                    "Subscribed: it reports at least every {max_int_secs} s ({} reports so far)",
+                    live.map_or(0, |sub| sub.updates)
+                ),
+            ),
+            Some(SubConn::Reconnecting) => (
+                "Reconnecting",
+                Some("is-warning"),
+                "Reconnecting to the server".to_string(),
+            ),
+            _ if offline => (
+                "Offline",
+                Some("is-danger"),
+                "Not answering; retrying. Refresh checks it now".to_string(),
+            ),
+            _ => ("Connecting", None, "Subscribing to its health".to_string()),
+        };
+
+        (offline, ui::pill(state, class, Some(why)))
     }
 
     /// The title of a listed device, else its node ID.

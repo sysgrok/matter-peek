@@ -39,12 +39,15 @@ impl App {
                 <div class="modal-background" onclick={link.callback(|_| fabrics(FabricsMsg::Close))}></div>
                 <div class="modal-card fabrics-card">
                     { ui::modal_head("Fabrics", &title, html! {
+                        <>
+                        { self.device_state(node_id).1 }
                         <button class={classes!("button", "is-small", refreshing.then_some("is-loading"))}
                             title="Read them again" disabled={refreshing}
                             onclick={link.callback(move |_| Msg::Refresh(node_id))}>
                             <span class="icon is-small">{ icon(Icon::Refresh, 16) }</span>
                             <span>{ "Refresh" }</span>
                         </button>
+                        </>
                     }, link.callback(|_| fabrics(FabricsMsg::Close))) }
                     <section class="modal-card-body">
                         <p class="fabrics-intro">
