@@ -4,7 +4,10 @@ description = "A Matter controller for diagnostics, in one executable: the serve
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-publish = false
+publish = true
+license.workspace = true
+# The project's README, the crate's page on crates.io.
+readme = "../README.md"
 repository.workspace = true
 rust-version.workspace = true
 
@@ -14,9 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 # The API, its controller (with Avahi's mDNS, and BLE) and its messages.
-matter-peek-core = { path = "../matter-peek-core", features = ["ble"] }
+matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", features = ["ble"] }
 # `serve`, and a controller in this process: the server, and the web UI.
-matter-peek-server = { path = "../matter-peek-server" }
+matter-peek-server = { version = "0.1.0", path = "../matter-peek-server" }
 clap = { version = "4", features = ["derive", "env"] }
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }

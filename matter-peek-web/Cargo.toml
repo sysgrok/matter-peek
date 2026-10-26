@@ -4,7 +4,9 @@ description = "Yew/Wasm web UI for matter-peek (a WebSocket/JSON client of the A
 version = "0.1.0"
 edition = "2021"
 authors = ["Ivan Markov <ivan.markov@gmail.com>"]
-publish = false
+publish = true
+license = "MIT OR Apache-2.0"
+readme = "README.md"
 repository = "https://github.com/sysgrok/matter-peek"
 
 # Standalone wasm crate — excluded from the native workspace (see root Cargo.toml).
@@ -12,7 +14,7 @@ repository = "https://github.com/sysgrok/matter-peek"
 
 [dependencies]
 # The API's types and messages only, without the controller.
-matter-peek-core = { path = "../matter-peek-core", default-features = false }
+matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", default-features = false }
 
 yew = { version = "0.21", features = ["csr"] }
 gloo-net = { version = "0.6", features = ["websocket"] }

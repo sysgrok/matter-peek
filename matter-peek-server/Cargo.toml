@@ -4,16 +4,18 @@ description = "The matter-peek server: a controller and its assistant for the co
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-publish = false
+publish = true
+license.workspace = true
+readme = "README.md"
 repository.workspace = true
 rust-version.workspace = true
 build = "build.rs"
 # The web UI's copy goes into the package although git ignores it.
-include = ["/src", "/build.rs", "/web-dist"]
+include = ["/src", "/build.rs", "/web-dist", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
 [dependencies]
 # The API and its controller; the executable picks the mDNS backend.
-matter-peek-core = { path = "../matter-peek-core", default-features = false, features = ["std"] }
+matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", default-features = false, features = ["std"] }
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }
 log = { workspace = true }

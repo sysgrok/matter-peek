@@ -15,7 +15,7 @@ exclude = ["matter-peek-web"]
 version = "0.1.0"
 edition = "2021"
 authors = ["Ivan Markov <ivan.markov@gmail.com>"]
-publish = false
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/sysgrok/matter-peek"
 # A recent MSRV (latest stable is 1.96). Comfortably above rs-matter's own 1.87
 # and the 1.85 floor that edition-2024 transitive deps (e.g. zeroize) require.
@@ -49,7 +49,7 @@ nix = { version = "0.30", features = ["net"] }
 
 # TEMPORARY - remove once a released rs-matter has what this crate uses from
 # `main`: `Transport::browse`, the OTA Provider changes and the Commissioner's
-# PASE session reuse.
+# PASE session reuse. The published crates get no patch, so publishing waits too.
 [patch.crates-io]
 rs-matter = { git = "https://github.com/project-chip/rs-matter" }
 rs-matter-codegen = { git = "https://github.com/project-chip/rs-matter" }

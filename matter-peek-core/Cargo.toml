@@ -4,7 +4,9 @@ description = "The matter-peek API (MatterPeek) and the Matter controller behind
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-publish = false
+publish = true
+license.workspace = true
+readme = "README.md"
 repository.workspace = true
 rust-version.workspace = true
 
