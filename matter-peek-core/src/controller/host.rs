@@ -5,7 +5,7 @@ use core::net::SocketAddr;
 
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::sync::Arc;
 
 use std::fs::{File, TryLockError};
@@ -164,13 +164,14 @@ pub fn data_dir() -> PathBuf {
 
 /// Read the setup code out of a picture of a QR code (PNG or JPEG).
 pub(crate) fn read_qr_image(image: &[u8]) -> Result<String, PeekError> {
-    use rs_matter::pairing::qr::{scan, QrPayload};
+    use rs_matter::pairing::qr::{scan::QrLuma, QrPayload};
 
     let luma = image::load_from_memory(image)
         .map_err(|e| PeekError::failed(format!("cannot read the image: {e}")))?
         .to_luma8();
 
-    let text = scan::scan_luma(luma.width() as _, luma.height() as _, luma.as_raw())
+    let text = QrLuma::new(luma.as_raw(), luma.width() as _)
+        .scan()
         .map_err(|_| PeekError::failed("no Matter QR code found in the image"))?;
 
     // Only a Matter onboarding payload is a setup code.
@@ -178,7 +179,7 @@ pub(crate) fn read_qr_image(image: &[u8]) -> Result<String, PeekError> {
     QrPayload::parse(&text, &mut buf)
         .map_err(|_| PeekError::failed(format!("not a Matter QR code: {text}")))?;
 
-    Ok(text.to_string())
+    Ok(text)
 }
 
 /// Whether this host has a route to `prefix` (e.g. `fdac:bcdf:a3c9:1::/64`)

@@ -1214,9 +1214,12 @@ impl Component for App {
                 let Some(logs) = self.logs.as_mut() else {
                     return false;
                 };
+                // The same log again stays on screen until the new copy arrives.
+                if logs.intent != Some(intent) {
+                    logs.data = None;
+                }
                 logs.intent = Some(intent);
                 logs.loading = true;
-                logs.data = None;
                 self.error = None;
                 send_request(
                     ctx.link().clone(),

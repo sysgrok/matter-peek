@@ -677,7 +677,7 @@ impl App {
                                     }
                                 }) }
                             </div>
-                            { view_log(logs) }
+                            { view_log(logs, link) }
                         </div>
                     </section>
                 </div>
@@ -752,7 +752,7 @@ impl App {
 }
 
 /// A retrieved log: its text, or its size if it is binary, with a download.
-fn view_log(logs: &LogsView) -> Html {
+fn view_log(logs: &LogsView, link: &Scope<App>) -> Html {
     use base64::Engine as _;
 
     let (Some(intent), Some(data)) = (logs.intent, &logs.data) else {
@@ -773,6 +773,20 @@ fn view_log(logs: &LogsView) -> Html {
         };
     };
 
+    // Not the crash log: a device may delete it once it is retrieved.
+    let refresh = if intent == api::LogIntent::CrashLogs {
+        html! {}
+    } else {
+        html! {
+            <button class={classes!("button", "is-small", "is-soft", logs.loading.then_some("is-loading"))}
+                title="Retrieve it again" disabled={logs.loading}
+                onclick={link.callback(move |_| Msg::FetchLogs(intent))}>
+                <span class="icon is-small">{ icon(Icon::Refresh, 16) }</span>
+                <span>{ "Refresh" }</span>
+            </button>
+        }
+    };
+
     let log = base64::engine::general_purpose::STANDARD
         .decode(data)
         .unwrap_or_default();
@@ -784,7 +798,7 @@ fn view_log(logs: &LogsView) -> Html {
                 "The device has no {} log.",
                 log_intent_name(intent).to_lowercase()
             ),
-            html! {},
+            refresh,
         );
     }
 
@@ -825,11 +839,14 @@ fn view_log(logs: &LogsView) -> Html {
                     <span>{ format!("{} log", log_intent_name(intent)) }</span>
                     <span class="log-meta">{ meta }</span>
                 </div>
-                <a class="button is-small is-link is-light" download={file_name}
-                    href={format!("data:application/octet-stream;base64,{data}")}>
-                    <span class="icon is-small">{ icon(Icon::Download, 16) }</span>
-                    <span>{ "Download" }</span>
-                </a>
+                <div class="log-actions">
+                    { refresh }
+                    <a class="button is-small is-link is-light" download={file_name}
+                        href={format!("data:application/octet-stream;base64,{data}")}>
+                        <span class="icon is-small">{ icon(Icon::Download, 16) }</span>
+                        <span>{ "Download" }</span>
+                    </a>
+                </div>
             </div>
             { body }
         </div>
