@@ -22,7 +22,8 @@ pub(super) fn handle(handle: DeviceHandle) -> api::DeviceHandle {
 /// A listed device; `online` is whether it is reachable as far as we know
 /// (`None` before the first sync), `remembered` whether it has a record,
 /// `check_ins` whether we are registered for its Check-Ins, `awake_ms` how
-/// much longer it is awake if it sleeps long.
+/// much longer it is awake if it sleeps long, `stay_awake` whether it is kept
+/// so.
 pub(super) fn device(
     d: StoredDevice,
     fabric: alloc::string::String,
@@ -30,6 +31,7 @@ pub(super) fn device(
     remembered: bool,
     check_ins: bool,
     awake_ms: Option<u32>,
+    stay_awake: bool,
 ) -> api::DeviceInfo {
     api::DeviceInfo {
         handle: handle(d.handle),
@@ -52,6 +54,7 @@ pub(super) fn device(
         remembered,
         check_ins,
         awake_ms,
+        stay_awake,
         network: d.network,
         device_types: d.device_types,
         details: d.details,

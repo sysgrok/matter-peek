@@ -317,6 +317,13 @@ impl MatterPeek {
         self.call(|reply| Op::Remember { node_id, reply }).await
     }
 
+    /// Drop the record of a remembered device, and its tags, keeping it on our
+    /// fabric: it stays listed while the controller runs, as any device a
+    /// sync finds.
+    pub async fn forget(&self, node_id: u64) -> Result<DeviceList, PeekError> {
+        self.call(|reply| Op::Forget { node_id, reply }).await
+    }
+
     /// Replace the local tags of a remembered device.
     pub async fn set_tags(&self, node_id: u64, tags: Vec<String>) -> Result<DeviceList, PeekError> {
         self.call(|reply| Op::SetTags {
@@ -440,6 +447,26 @@ impl MatterPeek {
     /// that runs out to keep it awake longer.
     pub async fn wake_device(&self, node_id: u64) -> Result<u32, PeekError> {
         self.call(|reply| Op::Wake { node_id, reply }).await
+    }
+
+    /// Keep a listed device that sleeps long awake, so that it answers, for as
+    /// long as the returned handle lives, and 10 min at most: it is waited for
+    /// to wake up, then asked again and again to stay awake. See also
+    /// [`let_sleep`](Self::let_sleep).
+    pub async fn stay_awake(&self, node_id: u64) -> Result<Arc<StayAwake>, PeekError> {
+        let holder = self.call(|reply| Op::StayAwake { node_id, reply }).await?;
+
+        Ok(Arc::new(StayAwake {
+            node_id,
+            holder,
+            ops: self.ops.clone(),
+            stopped: AtomicBool::new(false),
+        }))
+    }
+
+    /// Let a listed device sleep again: stop keeping it awake, whoever asked.
+    pub async fn let_sleep(&self, node_id: u64) -> Result<(), PeekError> {
+        self.call(|reply| Op::LetSleep { node_id, reply }).await
     }
 
     /// Follow the health of a listed device live, until the returned
@@ -654,6 +681,40 @@ impl Subscription {
 }
 
 impl Drop for Subscription {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Keeping a device awake (see [`MatterPeek::stay_awake`]); stops when
+/// dropped.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
+pub struct StayAwake {
+    node_id: u64,
+    holder: u64,
+    ops: async_channel::Sender<Op>,
+    stopped: AtomicBool,
+}
+
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl StayAwake {
+    /// The device kept awake.
+    pub fn node_id(&self) -> u64 {
+        self.node_id
+    }
+
+    /// Stop keeping it awake, as far as this handle goes.
+    pub fn stop(&self) {
+        if !self.stopped.swap(true, Ordering::SeqCst) {
+            let _ = self.ops.try_send(Op::StayAwakeEnd {
+                node_id: self.node_id,
+                holder: self.holder,
+            });
+        }
+    }
+}
+
+impl Drop for StayAwake {
     fn drop(&mut self) {
         self.stop();
     }
@@ -878,6 +939,10 @@ pub(crate) enum Op {
         node_id: u64,
         reply: Reply<DeviceList>,
     },
+    Forget {
+        node_id: u64,
+        reply: Reply<DeviceList>,
+    },
     SetTags {
         node_id: u64,
         tags: Vec<String>,
@@ -920,6 +985,19 @@ pub(crate) enum Op {
     Wake {
         node_id: u64,
         reply: Reply<u32>,
+    },
+    /// Keep a device awake; answers the holder's ID.
+    StayAwake {
+        node_id: u64,
+        reply: Reply<u64>,
+    },
+    StayAwakeEnd {
+        node_id: u64,
+        holder: u64,
+    },
+    LetSleep {
+        node_id: u64,
+        reply: Reply<()>,
     },
     /// Add a listener to the device's subscription; answers with its ID.
     Watch {

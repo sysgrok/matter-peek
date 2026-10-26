@@ -44,6 +44,7 @@ const MUTATING_TOOLS: &[&str] = &[
     "register_check_ins",
     "unregister_check_ins",
     "remember",
+    "forget",
     "set_tags",
     "sync",
     "ota_upload",
@@ -67,7 +68,7 @@ const MUTATING_TOOLS: &[&str] = &[
 
 /// What an agent should know about the tools, for its instructions.
 pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-only tools \
-     (discover, list_devices, peek_device, read_model, read_events, read_network, retrieve_logs, identify, wake_device, \
+     (discover, list_devices, peek_device, read_model, read_events, read_network, retrieve_logs, identify, wake_device, stay_awake, \
      read_qr_image, ota_images, ota_updates, commissioning_window, \
      device_time, list_fabrics) are always available. The tools that change \
      devices or the stored state (commission, decommission, \
@@ -86,7 +87,7 @@ pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-o
 
 /// The tools that act on a device without changing what is stored: offered
 /// without [`Caps::allow_mutate`], but not read-only, so an agent asks first.
-const ACTING_TOOLS: &[&str] = &["identify", "wake_device"];
+const ACTING_TOOLS: &[&str] = &["identify", "wake_device", "stay_awake"];
 
 /// The mutating tools whose harm may be hard to undo: they cost a device its
 /// fabric, its network or its firmware, or lose an image.
@@ -370,7 +371,24 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "node_id": node_id_schema(),
-                    "secs": { "type": "integer", "description": "Blink duration in seconds (default 3)." }
+                    "secs": { "type": "integer", "description": "How long it identifies itself, in seconds (default 3)." }
+                },
+                "required": ["node_id"]
+            }),
+        ),
+        tool(
+            "stay_awake",
+            "Keep a listed device that sleeps long awake while this session lasts \
+             (10 min at most), or with on=false let it sleep again: once it \
+             wakes up, it is asked again and again to stay awake, so that \
+             several reads and actions reach it. list_devices tells whether it \
+             is (stay_awake) and for how long more (awake_ms). It drains a \
+             battery: let it sleep when done.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node_id": node_id_schema(),
+                    "on": { "type": "boolean", "description": "Keep it awake (default), or let it sleep." }
                 },
                 "required": ["node_id"]
             }),
@@ -575,6 +593,18 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
             "Keep a record of a listed device, so it can be tagged and stays \
              listed while offline and across restarts. MUTATING — changes the \
              stored device list.",
+            json!({
+                "type": "object",
+                "properties": { "node_id": node_id_schema() },
+                "required": ["node_id"]
+            }),
+        ));
+        tools.push(tool(
+            "forget",
+            "Drop the record of a remembered device, and its tags, keeping it on \
+             our fabric (that is decommission): it stays listed while the \
+             controller runs, as any device a sync finds. MUTATING — changes \
+             the stored device list.",
             json!({
                 "type": "object",
                 "properties": { "node_id": node_id_schema() },
@@ -1133,8 +1163,15 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
         "remember" => wire::Request::Remember {
             node_id: arg_node(args)?,
         },
+        "forget" => wire::Request::Forget {
+            node_id: arg_node(args)?,
+        },
         "wake_device" => wire::Request::WakeDevice {
             node_id: arg_node(args)?,
+        },
+        "stay_awake" => wire::Request::StayAwake {
+            node_id: arg_node(args)?,
+            on: args.get("on").and_then(Value::as_bool).unwrap_or(true),
         },
         "identify" => wire::Request::Identify {
             node_id: arg_node(args)?,

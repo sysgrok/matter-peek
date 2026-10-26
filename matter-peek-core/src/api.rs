@@ -15,7 +15,7 @@ pub use types::*;
 #[cfg(feature = "controller")]
 pub use peek::{
     CommissionListener, DevicesListener, DevicesSubscription, HealthListener, MatterPeek,
-    ModelListener, OtaListener, OtaUpload, Subscription,
+    ModelListener, OtaListener, OtaUpload, StayAwake, Subscription,
 };
 
 #[cfg(feature = "controller")]

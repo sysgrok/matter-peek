@@ -1,7 +1,5 @@
 //! Live health subscriptions: one per device, shared by all its listeners.
 
-use core::cell::Cell;
-
 use alloc::rc::Rc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -22,7 +20,7 @@ use crate::api::{
 use crate::datamodel::{self, AttrReport, EventReport};
 use crate::model::{DeviceHandle, DiagSet};
 use crate::ota::OtaImageStore;
-use crate::subscribe::{Coverage, ModelUpdate, Scope};
+use crate::subscribe::{Coverage, ModelUpdate, Scope, Sleepy};
 
 use super::{convert, Ctx};
 
@@ -35,8 +33,9 @@ pub(super) struct Watch {
     stop: async_channel::Sender<()>,
     /// Cuts the wait before the next attempt to re-establish it short.
     pub(super) retry: Rc<Notification>,
-    /// Whether the device sleeps long: we are registered for its Check-Ins.
-    pub(super) sleepy: Rc<Cell<bool>>,
+    /// Whether the device sleeps long (we are registered for its Check-Ins),
+    /// and when it is awake.
+    pub(super) sleepy: Rc<Sleepy>,
     /// The listeners, by ID.
     listeners: Vec<(u64, Arc<dyn HealthListener>)>,
     /// The listeners of the data model, by ID, with what each wants covered.
@@ -64,7 +63,7 @@ impl Watch {
         Self {
             stop,
             retry,
-            sleepy: Rc::new(Cell::new(sleepy)),
+            sleepy: Rc::new(Sleepy::new(sleepy)),
             listeners: Vec::new(),
             model_listeners: Vec::new(),
             scope: Rc::new(Scope::new()),
@@ -195,7 +194,7 @@ pub(super) struct SubJob {
     /// watch is still this subscription's.
     my_stop: async_channel::Sender<()>,
     retry: Rc<Notification>,
-    sleepy: Rc<Cell<bool>>,
+    sleepy: Rc<Sleepy>,
     scope: Rc<Scope>,
     /// Whether the device is on Thread.
     thread: bool,
@@ -366,7 +365,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             &sleepy,
             |mut health| {
                 // A report of a device that sleeps long: it is awake.
-                if woke.get() {
+                if woke.is_long() {
                     self.note_message_of(node_id);
                 }
                 self.mark_our_fabric(node_id, &mut health);

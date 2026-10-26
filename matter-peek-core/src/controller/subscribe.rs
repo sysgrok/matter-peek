@@ -43,7 +43,7 @@ use core::cell::{Cell, RefCell};
 use core::num::NonZeroU8;
 
 use embassy_futures::poll_once;
-use embassy_futures::select::{select, select4, Either, Either4};
+use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_time::{Duration, Instant, Timer};
 
 use log::{debug, info, warn};
@@ -141,6 +141,67 @@ impl ModelUpdate {
     fn extend(&mut self, report: &ReportDataResp<'_>) {
         self.attributes.extend(decoded(report));
         self.events.extend(datamodel::decode_events(report));
+    }
+}
+
+/// Whether the device of a subscription sleeps long, and when it is awake: a
+/// new attempt waits for that (see [`subscribe`]).
+pub struct Sleepy {
+    long: Cell<bool>,
+    awake_until: Cell<Instant>,
+    woke: Notification,
+}
+
+impl Sleepy {
+    pub const fn new(long: bool) -> Self {
+        Self {
+            long: Cell::new(long),
+            awake_until: Cell::new(Instant::MIN),
+            woke: Notification::new(),
+        }
+    }
+
+    /// Whether it sleeps long.
+    pub fn is_long(&self) -> bool {
+        self.long.get()
+    }
+
+    /// Note whether it sleeps long.
+    pub fn set_long(&self, long: bool) {
+        self.long.set(long);
+        self.woke.notify();
+    }
+
+    /// Note that it is awake until `until`, at least.
+    pub fn awake_until(&self, until: Instant) {
+        if until > self.awake_until.get() {
+            self.awake_until.set(until);
+            self.woke.notify();
+        }
+    }
+
+    /// Wait until it can be reached: at once unless it sleeps long and sleeps
+    /// now; else until it wakes up, or `retry`, or [`SLEEPY_WAIT`] passed.
+    async fn reachable(&self, node_id: u64, retry: &Notification) {
+        if self.asleep() {
+            info!("subscription 0x{node_id:016X}: waiting for the device to wake up");
+
+            let deadline = Instant::now() + SLEEPY_WAIT;
+            while self.asleep() {
+                match select3(self.woke.wait(), retry.wait(), Timer::at(deadline)).await {
+                    Either3::Second(()) => return,
+                    Either3::Third(()) => {
+                        info!("subscription 0x{node_id:016X}: no wake-up seen; trying anyway");
+                        return;
+                    }
+                    Either3::First(()) => {}
+                }
+            }
+        }
+    }
+
+    fn asleep(&self) -> bool {
+        self.long.get() && self.awake_until.get() <= Instant::now()
     }
 }
 
@@ -420,10 +481,10 @@ impl Drop for Registration<'_> {
 /// - `retry` cuts the backoff before the next attempt short, e.g. once the
 ///   device answered something else; it re-establishes a live subscription
 ///   too, e.g. once the device checked in, which it does when it lost it.
-/// - `sleepy` says the device sleeps long: then an attempt waits for it to
-///   wake up (`retry`, at most [`SLEEPY_WAIT`]) instead of a backoff, as one
-///   made while it sleeps waits out retransmissions paced by its idle
-///   interval.
+/// - `sleepy` says whether the device sleeps long, and when it is awake: then
+///   an attempt waits for it to be (or `retry`, at most [`SLEEPY_WAIT`])
+///   instead of a backoff, as one made while it sleeps waits out
+///   retransmissions paced by its idle interval.
 ///
 /// A change of `scope` re-establishes the subscription with the paths it
 /// needs. Over Thread (`thread`), `gate` lets a few at a time take the priming
@@ -444,7 +505,7 @@ pub async fn subscribe<C, FU, FM, FS>(
     which: DiagSet,
     scope: &Scope,
     retry: &Notification,
-    sleepy: &Cell<bool>,
+    sleepy: &Sleepy,
     mut on_update: FU,
     mut on_model: FM,
     mut on_state: FS,
@@ -485,11 +546,8 @@ where
     // The device said it is awake (`retry`): make the subscription now.
     let mut awake = false;
     loop {
-        if sleepy.get() && !awake {
-            info!("subscription 0x{node_id:016X}: waiting for the device to wake up");
-            if let Either::Second(()) = select(retry.wait(), Timer::after(SLEEPY_WAIT)).await {
-                info!("subscription 0x{node_id:016X}: no wake-up seen; trying anyway");
-            }
+        if !awake {
+            sleepy.reachable(node_id, retry).await;
         }
         awake = false;
 
@@ -500,7 +558,7 @@ where
                 Err(e) => {
                     warn!("subscribe(0x{node_id:016X}): no endpoints: {e:?}");
                     on_state(SubState::Offline);
-                    if !sleepy.get() {
+                    if !sleepy.long.get() {
                         backoff = back_off(backoff, retry).await;
                     }
                     continue;
@@ -530,6 +588,9 @@ where
                 which,
                 scope,
                 retry,
+                // Narrowing a subscription of a device that sleeps long would
+                // lose it until it wakes up: it stays as wide as it is.
+                !sleepy.is_long(),
                 coverage,
                 &paths,
                 &events,
@@ -551,7 +612,7 @@ where
             Ok(Pass::Ended) => {
                 // Stale or rescoped: re-establish. If the pass had been
                 // healthy, promptly; otherwise back off.
-                if !established.get() && !sleepy.get() {
+                if !established.get() && !sleepy.long.get() {
                     backoff = back_off(backoff, retry).await;
                 }
             }
@@ -564,7 +625,7 @@ where
                     backoff.as_secs()
                 );
                 on_state(SubState::Offline);
-                if !sleepy.get() {
+                if !sleepy.long.get() {
                     backoff = back_off(backoff, retry).await;
                 }
             }
@@ -637,6 +698,7 @@ async fn run_once<C, FU, FM, FS>(
     which: DiagSet,
     scope: &Scope,
     retry: &Notification,
+    narrow: bool,
     coverage: Coverage,
     paths: &[AttrPath],
     events: &[EventPath],
@@ -710,10 +772,10 @@ where
         }
 
         // A narrowing coming due wakes us too.
-        let wake = scope
-            .narrow_at
-            .get()
-            .map_or(deadline, |at| at.min(deadline));
+        let wake = match scope.narrow_at.get() {
+            Some(at) if narrow => at.min(deadline),
+            _ => deadline,
+        };
         match select4(
             slot.received.wait(),
             Timer::at(wake),
@@ -730,7 +792,7 @@ where
             _ => {}
         }
 
-        if scope.settle() || scope.current() != coverage {
+        if (narrow && scope.settle()) || scope.current() != coverage {
             info!(
                 "subscription 0x{node_id:016X}: covering {:?} from now on",
                 scope.current()

@@ -144,6 +144,9 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     /// Until when the devices that sleep long are awake, as far as we know, by
     /// node ID.
     awake: RefCell<BTreeMap<u64, Instant>>,
+    /// The devices kept awake: by node ID, who keeps each, and until when at
+    /// most, by holder ID.
+    stay_awake: RefCell<BTreeMap<u64, BTreeMap<u64, Instant>>>,
     /// The OTA image uploads in progress, by ID.
     uploads: RefCell<BTreeMap<u32, Upload<'a, C, O>>>,
     next_upload_id: Cell<u32>,
@@ -271,8 +274,12 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             | Op::Assistant(_)
             | Op::SetAssistant { .. }
             | Op::Remember { .. }
+            | Op::Forget { .. }
             | Op::SetTags { .. }
             | Op::Unwatch { .. }
+            | Op::StayAwake { .. }
+            | Op::StayAwakeEnd { .. }
+            | Op::LetSleep { .. }
             | Op::WatchDevices { .. }
             | Op::UnwatchDevices { .. }
             | Op::OtaImages(_)
@@ -478,6 +485,9 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             Op::Remember { node_id, reply } => {
                 let _ = reply.send(self.remember(node_id)).await;
             }
+            Op::Forget { node_id, reply } => {
+                let _ = reply.send(self.forget(node_id)).await;
+            }
             Op::SetTags {
                 node_id,
                 tags,
@@ -501,6 +511,14 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             }
             Op::Wake { node_id, reply } => {
                 let _ = reply.send(self.wake(node_id).await).await;
+            }
+            Op::StayAwake { node_id, reply } => {
+                let _ = reply.send(self.stay_awake(node_id)).await;
+            }
+            Op::StayAwakeEnd { node_id, holder } => self.end_stay_awake(node_id, holder),
+            Op::LetSleep { node_id, reply } => {
+                self.let_sleep(node_id);
+                let _ = reply.send(Ok(())).await;
             }
             Op::PeekDevice { node_id, reply } => {
                 let _ = reply.send(self.peek_device(node_id).await).await;
@@ -763,6 +781,7 @@ async fn run<'a, C, S, O, N, M>(
         ota_events,
         windows: RefCell::new(BTreeMap::new()),
         awake: RefCell::new(BTreeMap::new()),
+        stay_awake: RefCell::new(BTreeMap::new()),
         uploads: RefCell::new(BTreeMap::new()),
         next_upload_id: Cell::new(1),
         online: RefCell::new(None),
@@ -793,6 +812,7 @@ async fn run<'a, C, S, O, N, M>(
     let mut subs = pin!(ctx.run_subscriptions(sub_jobs_rx));
     let mut applies = pin!(ctx.run_apply_jobs(apply_jobs_rx));
     let mut taken = pin!(ctx.run_check_ins(check_ins_rx));
+    let mut keep_awake = pin!(ctx.run_stay_awake());
     // Operational resolves (re-addressing a listed device over CASE) need it;
     // without it the rest still works.
     let mut mdns = pin!(async {
@@ -808,7 +828,7 @@ async fn run<'a, C, S, O, N, M>(
     match select4(
         &mut pump,
         &mut ops,
-        select3(&mut subs, &mut applies, &mut taken),
+        select3(&mut subs, &mut applies, select(&mut taken, &mut keep_awake)),
         select(&mut mdns, &mut node),
     )
     .await
@@ -817,7 +837,10 @@ async fn run<'a, C, S, O, N, M>(
         Either4::Second(()) => info!("service: every handle dropped, exiting"),
         Either4::Third(Either3::First(())) => info!("service: subscription driver exited"),
         Either4::Third(Either3::Second(())) => info!("service: OTA apply driver exited"),
-        Either4::Third(Either3::Third(())) => info!("service: Check-In driver exited"),
+        Either4::Third(Either3::Third(Either::First(()))) => {
+            info!("service: Check-In driver exited")
+        }
+        Either4::Third(Either3::Third(Either::Second(never))) => match never {},
         Either4::Fourth(Either::First(())) => {}
         Either4::Fourth(Either::Second(r)) => error!("service: controller node exited: {r:?}"),
     }
@@ -862,6 +885,7 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             | Op::SetDefaultFabric { reply, .. }
             | Op::DeleteFabric { reply, .. } => refuse(reply, error).await,
             Op::Remember { reply, .. }
+            | Op::Forget { reply, .. }
             | Op::SetTags { reply, .. }
             | Op::Decommission { reply, .. } => refuse(reply, error).await,
             Op::PeekDevice { reply, .. } => refuse(reply, error).await,
@@ -873,6 +897,8 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             | Op::CheckIns { reply, .. }
             | Op::OtaUpdate { reply, .. } => refuse(reply, error).await,
             Op::Wake { reply, .. } => refuse(reply, error).await,
+            Op::StayAwake { reply, .. } => refuse(reply, error).await,
+            Op::LetSleep { reply, .. } => refuse(reply, error).await,
             Op::Watch { reply, .. } | Op::WatchModel { reply, .. } => refuse(reply, error).await,
             Op::OtaImages(reply) | Op::OtaUploadEnd { reply, .. } | Op::OtaDelete { reply, .. } => {
                 refuse(reply, error).await
@@ -890,7 +916,10 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             Op::ReadThreadMesh { reply, .. } => refuse(reply, error).await,
             Op::SetAssistant { reply, .. } => refuse(reply, error).await,
             Op::WatchDevices { reply, .. } => refuse(reply, error).await,
-            Op::Unwatch { .. } | Op::UnwatchDevices { .. } | Op::OtaUploadDiscard { .. } => {}
+            Op::Unwatch { .. }
+            | Op::UnwatchDevices { .. }
+            | Op::StayAwakeEnd { .. }
+            | Op::OtaUploadDiscard { .. } => {}
         }
     }
 }

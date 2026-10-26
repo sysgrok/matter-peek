@@ -13,7 +13,7 @@ use base64::Engine as _;
 
 use crate::api::peek::{
     CommissionListener, DevicesListener, DevicesSubscription, HealthListener, MatterPeek,
-    ModelListener, OtaListener, OtaUpload, Subscription,
+    ModelListener, OtaListener, OtaUpload, StayAwake, Subscription,
 };
 use crate::api::types::*;
 
@@ -32,6 +32,7 @@ pub struct WireSession {
     model_subscriptions: RefCell<BTreeMap<u64, (ModelScope, Arc<Subscription>)>>,
     devices_subscription: RefCell<Option<Arc<DevicesSubscription>>>,
     uploads: RefCell<BTreeMap<u32, Arc<OtaUpload>>>,
+    stay_awake: RefCell<BTreeMap<u64, Arc<StayAwake>>>,
 }
 
 impl WireSession {
@@ -44,6 +45,7 @@ impl WireSession {
             model_subscriptions: RefCell::new(BTreeMap::new()),
             devices_subscription: RefCell::new(None),
             uploads: RefCell::new(BTreeMap::new()),
+            stay_awake: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -215,6 +217,17 @@ impl WireSession {
                 .wake_device(node_id)
                 .await
                 .map(|ms| Response::Awake { node_id, ms }),
+            Request::StayAwake { node_id, on: true } => match peek.stay_awake(node_id).await {
+                Ok(holder) => {
+                    self.stay_awake.borrow_mut().insert(node_id, holder);
+                    Ok(Response::Ok)
+                }
+                Err(e) => Err(e),
+            },
+            Request::StayAwake { node_id, on: false } => {
+                self.stay_awake.borrow_mut().remove(&node_id);
+                peek.let_sleep(node_id).await.map(|()| Response::Ok)
+            }
             Request::OpenCommissioningWindow {
                 node_id,
                 timeout_secs,
@@ -265,6 +278,7 @@ impl WireSession {
             }
             Request::Sync { fabric } => peek.sync(fabric).await.map(devices),
             Request::Remember { node_id } => peek.remember(node_id).await.map(devices),
+            Request::Forget { node_id } => peek.forget(node_id).await.map(devices),
             Request::SetTags { node_id, tags } => peek.set_tags(node_id, tags).await.map(devices),
             Request::Cancel => {
                 peek.cancel_commission();

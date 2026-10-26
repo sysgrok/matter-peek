@@ -69,7 +69,10 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 let fabric = self.fabric_name(d.handle.fabric_index);
                 let check_ins = clients.iter().any(|c| c.handle == d.handle);
                 let awake_ms = self.awake_ms(node_id);
-                convert::device(d, fabric, online, remembered, check_ins, awake_ms)
+                let stay_awake = self.stays_awake(node_id);
+                convert::device(
+                    d, fabric, online, remembered, check_ins, awake_ms, stay_awake,
+                )
             })
             .collect();
 
@@ -598,6 +601,12 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             if commissioning() || (known && !refresh) {
                 continue;
             }
+            // One that sleeps long would keep the sync waiting for it to wake up:
+            // its subscription reads it once it does.
+            if known && self.asleep(handle) {
+                info!("sync: node 0x{node_id:016X} sleeps; not reading it again now");
+                continue;
+            }
 
             let ident = self.controller.read_basic_info(handle).await;
 
@@ -678,6 +687,34 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         };
 
         self.update_devices(|devices| adopt(devices, device.handle, &ident), None)
+    }
+
+    /// Drop the record of a remembered device, and its tags, keeping it on our
+    /// fabric: it stays listed, not remembered.
+    pub(super) fn forget(&self, node_id: u64) -> Result<DeviceList, PeekError> {
+        let mut record = None;
+        self.store
+            .load_devices()
+            .and_then(|mut devices| {
+                if let Some(i) = devices.iter().position(|d| d.handle.node_id == node_id) {
+                    record = Some(devices.remove(i));
+                    self.store.save_devices(&devices)?;
+                }
+                Ok(())
+            })
+            .map_err(|e| failed("cannot update the store", e))?;
+
+        let Some(mut device) = record else {
+            // Not remembered, or not listed at all.
+            self.lookup_device(node_id)?;
+            return self.list_devices(None);
+        };
+
+        device.tags.clear();
+        self.transient.borrow_mut().push(device);
+        self.tell_devices();
+
+        self.list_devices(None)
     }
 
     /// Replace a remembered device's local tags.

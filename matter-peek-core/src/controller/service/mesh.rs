@@ -20,7 +20,8 @@ const BORDER_ROUTERS_KEPT: Duration = Duration::from_secs(600);
 impl<C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'_, C, S, O> {
     /// Read the networking of our Thread devices on `fabric`, one after
     /// another, the Wi-Fi channels of our Wi-Fi devices there, and what the LAN
-    /// advertises, into the mesh. Devices known to be offline are not tried.
+    /// advertises, into the mesh. Devices known to be offline, or asleep, are not
+    /// tried.
     pub(super) async fn read_thread_mesh(
         &self,
         fabric: &FabricRef,
@@ -48,6 +49,17 @@ impl<C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'_, C, S, O> {
             let Ok(stored) = self.lookup_device(node_id) else {
                 continue;
             };
+            // One that sleeps long would keep the mesh waiting for it to wake up.
+            if self.asleep(stored.handle) {
+                if thread {
+                    input.unread.push(UnreadDevice {
+                        node_id,
+                        title: device.title(),
+                        reason: "asleep".into(),
+                    });
+                }
+                continue;
+            }
 
             match self.controller.read_network(stored.handle).await {
                 Ok(network) => {

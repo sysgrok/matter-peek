@@ -29,6 +29,14 @@ const DEFAULT_IDLE_SECS: u32 = 3600;
 /// How long a device stays awake after a message of its, if it does not say:
 /// the least a LIT may.
 const DEFAULT_ACTIVE_THRESHOLD_MS: u32 = 5000;
+/// How long a device is kept awake at most, unless asked again: a forgotten
+/// one would drain its battery.
+const STAY_AWAKE_FOR: Duration = Duration::from_secs(10 * 60);
+/// How long before a device kept awake would fall asleep it is asked again:
+/// the ask takes a round trip or two.
+const RENEW_BEFORE_MS: u32 = 10_000;
+/// How often the devices kept awake are looked at.
+const STAY_AWAKE_TICK: Duration = Duration::from_secs(1);
 
 impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// Keep a listed device awake for a while (see `MatterPeek::wake_device`):
@@ -36,24 +44,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     pub(super) async fn wake(&self, node_id: u64) -> Result<u32, PeekError> {
         let dev = self.lookup_device(node_id)?;
 
-        if self.has_icd_client(dev.handle) && self.awake_ms(node_id).is_none() {
-            let idle_secs = dev
-                .details
-                .icd
-                .as_ref()
-                .and_then(|icd| icd.idle_mode_secs)
-                .unwrap_or(DEFAULT_IDLE_SECS);
-            let deadline = Instant::now() + Duration::from_secs(idle_secs.into()) + WAKE_MARGIN;
-
-            info!("icd: waiting for node 0x{node_id:016X} to wake up");
-            while self.awake_ms(node_id).is_none() {
-                if Instant::now() >= deadline {
-                    return Err(PeekError::failed("it did not wake up"));
-                }
-
-                Timer::after(WAKE_POLL).await;
-            }
-        }
+        self.until_awake(node_id).await?;
 
         let promised = self
             .controller
@@ -65,6 +56,134 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         self.note_awake(node_id, promised);
 
         Ok(promised)
+    }
+
+    /// Wait until a listed device can be reached: at once unless it sleeps long
+    /// and sleeps now, else until it wakes up, at most its idle time.
+    async fn until_awake(&self, node_id: u64) -> Result<(), PeekError> {
+        let dev = self.lookup_device(node_id)?;
+        if !self.has_icd_client(dev.handle) || self.awake_ms(node_id).is_some() {
+            return Ok(());
+        }
+
+        let idle_secs = dev
+            .details
+            .icd
+            .as_ref()
+            .and_then(|icd| icd.idle_mode_secs)
+            .unwrap_or(DEFAULT_IDLE_SECS);
+        let deadline = Instant::now() + Duration::from_secs(idle_secs.into()) + WAKE_MARGIN;
+
+        info!("icd: waiting for node 0x{node_id:016X} to wake up");
+        while self.awake_ms(node_id).is_none() {
+            if Instant::now() >= deadline {
+                return Err(PeekError::failed("it did not wake up"));
+            }
+
+            Timer::after(WAKE_POLL).await;
+        }
+
+        Ok(())
+    }
+
+    /// Keep a listed device awake (see `MatterPeek::stay_awake`); answers the
+    /// holder's ID.
+    pub(super) fn stay_awake(&self, node_id: u64) -> Result<u64, PeekError> {
+        self.lookup_device(node_id)?;
+
+        let holder = self.next_watcher.get();
+        self.next_watcher.set(holder + 1);
+
+        self.stay_awake
+            .borrow_mut()
+            .entry(node_id)
+            .or_default()
+            .insert(holder, Instant::now() + STAY_AWAKE_FOR);
+        info!("icd: keeping node 0x{node_id:016X} awake");
+
+        self.tell_devices();
+
+        Ok(holder)
+    }
+
+    /// Stop keeping a device awake, as far as `holder` goes.
+    pub(super) fn end_stay_awake(&self, node_id: u64, holder: u64) {
+        let ended = {
+            let mut stay_awake = self.stay_awake.borrow_mut();
+            let Some(holders) = stay_awake.get_mut(&node_id) else {
+                return;
+            };
+            holders.remove(&holder);
+            let ended = holders.is_empty();
+            if ended {
+                stay_awake.remove(&node_id);
+            }
+            ended
+        };
+
+        if ended {
+            info!("icd: letting node 0x{node_id:016X} sleep");
+            self.tell_devices();
+        }
+    }
+
+    /// Let a device sleep again, whoever kept it awake.
+    pub(super) fn let_sleep(&self, node_id: u64) {
+        if self.stay_awake.borrow_mut().remove(&node_id).is_some() {
+            info!("icd: letting node 0x{node_id:016X} sleep");
+            self.tell_devices();
+        }
+    }
+
+    /// Whether a device is kept awake.
+    pub(super) fn stays_awake(&self, node_id: u64) -> bool {
+        self.stay_awake.borrow().contains_key(&node_id)
+    }
+
+    /// Keep the devices asked to stay awake so: ask each again before it would
+    /// fall asleep, once it is awake. Never returns.
+    pub(super) async fn run_stay_awake(&self) -> core::convert::Infallible {
+        loop {
+            Timer::after(STAY_AWAKE_TICK).await;
+
+            let now = Instant::now();
+            let mut expired = Vec::new();
+            self.stay_awake.borrow_mut().retain(|node_id, holders| {
+                holders.retain(|_, until| *until > now);
+                if holders.is_empty() {
+                    expired.push(*node_id);
+                }
+                !holders.is_empty()
+            });
+            for node_id in &expired {
+                info!("icd: kept node 0x{node_id:016X} awake long enough; letting it sleep");
+            }
+            if !expired.is_empty() {
+                self.tell_devices();
+            }
+
+            let kept: Vec<u64> = self.stay_awake.borrow().keys().copied().collect();
+            for node_id in kept {
+                // Asleep, it is asked once it wakes up.
+                let due = self
+                    .awake_ms(node_id)
+                    .is_some_and(|ms| ms < RENEW_BEFORE_MS);
+                let Some(dev) = due.then(|| self.lookup_device(node_id).ok()).flatten() else {
+                    continue;
+                };
+
+                match self.controller.stay_active(dev.handle, STAY_AWAKE_MS).await {
+                    Ok(promised) => self.note_awake(node_id, promised),
+                    Err(e) => warn!("icd: node 0x{node_id:016X} did not stay awake: {e:?}"),
+                }
+            }
+        }
+    }
+
+    /// Whether a device sleeps long and sleeps now, as far as we know: it does
+    /// not answer.
+    pub(super) fn asleep(&self, handle: DeviceHandle) -> bool {
+        self.has_icd_client(handle) && self.awake_ms(handle.node_id).is_none()
     }
 
     /// How much longer a device that sleeps long is awake, as far as we know.
@@ -89,6 +208,10 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         };
 
         if longer {
+            // Its subscription, if waiting for it, can be made now.
+            if let Some(watch) = self.subs.borrow().get(&node_id) {
+                watch.sleepy.awake_until(until);
+            }
             self.tell_devices();
         }
     }
@@ -182,6 +305,9 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         let dev = self.lookup_device(node_id)?;
         let our_node_id = self.our_node_id(dev.handle)?;
 
+        // It hears us only while awake.
+        self.until_awake(node_id).await?;
+
         if register {
             let (key, start_counter) = self
                 .controller
@@ -213,7 +339,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
 
         // Its subscription waits for it to wake up from now on, or no longer.
         if let Some(watch) = self.subs.borrow().get(&node_id) {
-            watch.sleepy.set(register);
+            watch.sleepy.set_long(register);
         }
 
         let ident = self.controller.read_basic_info(dev.handle).await;

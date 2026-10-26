@@ -527,6 +527,10 @@ pub struct DeviceInfo {
     /// while it sleeps.
     #[serde(default)]
     pub awake_ms: Option<u32>,
+    /// Whether it is kept awake (see
+    /// [`MatterPeek::stay_awake`](super::MatterPeek::stay_awake)).
+    #[serde(default)]
+    pub stay_awake: bool,
     /// The kind of network it is on, if known.
     #[serde(default)]
     pub network: Option<NetworkKind>,

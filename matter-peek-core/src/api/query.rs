@@ -1070,6 +1070,7 @@ mod tests {
             remembered: true,
             check_ins: false,
             awake_ms: None,
+            stay_awake: false,
             network: Some(NetworkKind::Thread),
             device_types: vec![0x0072],
             details: DeviceDetails {

@@ -722,6 +722,7 @@ mod tests {
             remembered: false,
             check_ins: false,
             awake_ms: None,
+            stay_awake: false,
             network: Some(NetworkKind::Thread),
             device_types: Vec::new(),
             details: DeviceDetails {

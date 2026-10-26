@@ -134,6 +134,9 @@ enum Command {
     Cancel,
     /// Keep a record of a listed device, so it can be tagged.
     Remember { node: Node },
+    /// Drop the record of a remembered device, and its tags, keeping it on our
+    /// fabric (that is `decommission`).
+    Forget { node: Node },
     /// Replace the tags of a remembered device (none clears them).
     Tag {
         node: Node,
@@ -476,6 +479,9 @@ enum Icd {
     /// Keep it awake for a while, so that it answers: if it sleeps long and
     /// sleeps now, wait for it to wake up (or wake it, as its hint says).
     Wake { node: Node },
+    /// Keep it awake until interrupted (10 min at most): once it wakes up, ask
+    /// it again and again to stay awake.
+    StayAwake { node: Node },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -784,6 +790,10 @@ async fn run(cli: Cli) -> io::Result<bool> {
         Command::Remember { node } => devices(
             &out,
             call(&conn, &out, wire::Request::Remember { node_id: node.0 }).await?,
+        ),
+        Command::Forget { node } => devices(
+            &out,
+            call(&conn, &out, wire::Request::Forget { node_id: node.0 }).await?,
         ),
         Command::Tag { node, tags } => {
             let tags = tags
@@ -1151,6 +1161,23 @@ async fn run(cli: Cli) -> io::Result<bool> {
             .await?,
             "Unregistered from its Check-Ins.",
         ),
+        Command::Icd(Icd::StayAwake { node }) => {
+            let request = wire::Request::StayAwake {
+                node_id: node.0,
+                on: true,
+            };
+            let response = call(&conn, &out, request).await?;
+            if response.is_none() {
+                return Ok(false);
+            }
+            if !out.json {
+                println!("Keeping it awake once it wakes up; Ctrl-C to let it sleep.");
+            }
+
+            // The connection holds it awake: until interrupted.
+            core::future::pending::<()>().await;
+            Ok(true)
+        }
         Command::Icd(Icd::Wake { node }) => {
             let request = wire::Request::WakeDevice { node_id: node.0 };
             match call(&conn, &out, request).await? {

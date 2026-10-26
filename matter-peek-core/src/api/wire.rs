@@ -157,6 +157,10 @@ pub enum Request {
     UnregisterCheckIns { node_id: u64 },
     /// See `MatterPeek::wake_device`. Answered with [`Response::Awake`].
     WakeDevice { node_id: u64 },
+    /// Keep a device awake while this connection lasts (see
+    /// `MatterPeek::stay_awake`), or with `!on` let it sleep, whoever kept
+    /// it (`MatterPeek::let_sleep`). Answered with [`Response::Ok`].
+    StayAwake { node_id: u64, on: bool },
     /// See `MatterPeek::open_commissioning_window`. Answered with
     /// [`Response::CommissioningWindow`].
     OpenCommissioningWindow {
@@ -206,6 +210,8 @@ pub enum Request {
     },
     /// See `MatterPeek::remember`. Answered with [`Response::Devices`].
     Remember { node_id: u64 },
+    /// See `MatterPeek::forget`. Answered with [`Response::Devices`].
+    Forget { node_id: u64 },
     /// See `MatterPeek::set_tags`. Answered with [`Response::Devices`].
     SetTags { node_id: u64, tags: Vec<String> },
     /// See `MatterPeek::cancel_commission`. Answered at once with

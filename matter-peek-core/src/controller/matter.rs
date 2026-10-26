@@ -446,7 +446,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
         which: DiagSet,
         scope: &crate::subscribe::Scope,
         retry: &Notification,
-        sleepy: &core::cell::Cell<bool>,
+        sleepy: &crate::subscribe::Sleepy,
         on_update: impl FnMut(DeviceHealth),
         on_model: impl FnMut(crate::subscribe::ModelUpdate, bool),
         on_state: impl FnMut(crate::subscribe::SubState),

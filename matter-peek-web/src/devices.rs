@@ -218,16 +218,18 @@ impl App {
                 </dl>
 
                 { self.view_fabrics_row(node_id, live, link) }
-                { view_check_ins(d, busy || unreachable, link) }
+                { view_check_ins(d, busy || offline, link) }
                 { self.view_health(live, offline) }
                 { self.view_tags(d, link) }
                 { self.view_device_update(d, offline, link) }
 
                 <footer class="device-actions">
                     <div class="device-actions-main">
-                        { self.view_wake(d, busy || offline, link) }
+                    if self.asleep(d) && !offline {
+                        { self.view_asleep(d) }
+                    } else {
                         { ui::icon_button(Icon::Identify, "Identify", classes!("is-small", "is-soft"),
-                            busy || unreachable, Some("Make it blink for 3 s"),
+                            busy || unreachable, Some("Make it identify itself for 3 s, as it can: a light, a beep, a display…"),
                             link.callback(move |_| Msg::Identify(node_id))) }
                         { ui::icon_button(kind_icon(d.network).unwrap_or(Icon::Globe), "Network",
                             classes!("is-small", "is-soft"), unreachable, Some("Its networks and interfaces"),
@@ -247,9 +249,16 @@ impl App {
                         { ui::icon_button(Icon::Share, "Share", classes!("is-small", "is-soft"), unreachable,
                             Some("Let another app (Google Home, Home Assistant, …) commission it too"),
                             link.callback(move |_| Msg::Share(crate::share::ShareMsg::Open(node_id)))) }
+                    }
                     </div>
                     <div class="device-actions-end">
-                        if !d.remembered {
+                        if d.remembered {
+                            <button class="icon-action is-on" disabled={busy}
+                                title="Remembered: forget it, and its tags; it stays on our fabric"
+                                onclick={link.callback(move |_| Msg::Ask(Ask::Forget(node_id)))}>
+                                { icon(Icon::Remember, 18) }
+                            </button>
+                        } else {
                             <button class="icon-action" disabled={busy}
                                 title="Remember it: keep a record, so it can be tagged and stays listed while offline"
                                 onclick={link.callback(move |_| Msg::Remember(node_id))}>
@@ -270,52 +279,67 @@ impl App {
         }
     }
 
-    /// How a device sleeps, as a pill: one that sleeps long shows whether it
-    /// is awake, and for how long more.
-    fn sleep_pill(&self, d: &api::DeviceInfo, sleep: display::Sleep) -> Html {
-        if !sleep.long {
-            return ui::pill(&sleep.label, Some("is-sit"), Some(sleep.text));
-        }
+    /// Whether a device that sleeps long is kept awake, as a two-state switch
+    /// in a pill, which says how long it sleeps, or that it is awake.
+    fn view_stay_awake(
+        &self,
+        d: &api::DeviceInfo,
+        sleep: display::Sleep,
+        link: &Scope<Self>,
+    ) -> Html {
+        let node_id = d.handle.node_id;
+        let on = d.stay_awake;
+        let awake = self.awake_secs(node_id);
+        let hint = wake_hint(d)
+            .map(|hint| format!(" To wake it now: {hint}."))
+            .unwrap_or_default();
 
-        match self.awake_secs(d.handle.node_id) {
-            Some(secs) => ui::pill(&format!("Awake {secs} s"), Some("is-up"), Some(sleep.text)),
-            None => ui::pill(&sleep.label, Some("is-lit"), Some(sleep.text)),
+        let label = match (on, awake) {
+            (true, Some(_)) => "Awake".to_string(),
+            (true, None) => "Waking…".to_string(),
+            (false, Some(secs)) => format!("Awake {secs} s"),
+            (false, None) => sleep.label,
+        };
+        let title = if on {
+            format!("Kept awake, 10 min at most: turn it off to let it sleep.{hint}")
+        } else {
+            format!(
+                "{}. Turn it on to keep it awake once it wakes up, 10 min at most.{hint}",
+                sleep.text
+            )
+        };
+
+        html! {
+            <button class={classes!("pill", "stay-awake", if awake.is_some() { "is-up" } else { "is-lit" },
+                on.then_some("is-on"))}
+                role="switch" aria-checked={on.to_string()} {title}
+                onclick={link.callback(move |_| Msg::StayAwake(node_id, !on))}>
+                <span class="stay-awake-track"><span class="stay-awake-knob"></span></span>
+                { label }
+            </button>
         }
     }
 
-    /// The button keeping a device that sleeps long awake, so that the other
-    /// actions reach it.
-    fn view_wake(&self, d: &api::DeviceInfo, disabled: bool, link: &Scope<Self>) -> Html {
-        if d.details.icd.as_ref().and_then(|icd| icd.mode) != Some(api::IcdMode::Lit) {
-            return html! {};
-        }
-
-        let node_id = d.handle.node_id;
-        let waking = self.waking(node_id);
-        let hint = d
+    /// What a card says instead of its actions while the device sleeps long.
+    fn view_asleep(&self, d: &api::DeviceInfo) -> Html {
+        let every = d
             .details
             .icd
             .as_ref()
-            .and_then(|icd| icd.wake_hint())
-            .map(|hint| format!(" To wake it now: {hint}."))
+            .and_then(|icd| icd.idle_mode_secs)
+            .map(|secs| format!(" · wakes up every {}", display::short_duration(secs.into())))
             .unwrap_or_default();
-        let (label, title) = if self.asleep(d) {
-            (
-                "Wake",
-                format!("It sleeps: keep it awake once it wakes up, so that it answers.{hint}"),
-            )
-        } else {
-            ("Keep awake", "Keep it awake for 30 s more".to_string())
-        };
+        let hint = wake_hint(d)
+            .map(|hint| format!(" · to wake it now: {hint}"))
+            .unwrap_or_default();
+        let what = if d.stay_awake { "Waking" } else { "Asleep" };
 
-        ui::icon_button(
-            Icon::Sun,
-            label,
-            classes!("is-small", "is-soft", waking.then_some("is-loading")),
-            disabled || waking,
-            Some(&title),
-            link.callback(move |_| Msg::Wake(node_id)),
-        )
+        html! {
+            <p class="device-asleep">
+                { icon(Icon::Clock, 16) }
+                <span>{ format!("{what}{every}{hint}") }</span>
+            </p>
+        }
     }
 
     /// A device card's header, the same on both faces; Refresh re-reads what
@@ -367,7 +391,12 @@ impl App {
                                 ui::pill("Test vendor", Some("is-warning"), None), link) }
                         }
                         if let Some(sleep) = d.sleep() {
-                            { self.filter_chip(sleep_term(d), self.sleep_pill(d, sleep), link) }
+                            if sleep.long {
+                                { self.view_stay_awake(d, sleep, link) }
+                            } else {
+                                { self.filter_chip(sleep_term(d),
+                                    ui::pill(&sleep.label, Some("is-sit"), Some(sleep.text)), link) }
+                            }
                         }
                     </p>
                 </div>
@@ -415,10 +444,19 @@ impl App {
 
         let body = match model {
             _ if !flipped => html! {},
+            None if self.asleep(d) => html! {
+                <div class="card-controls-state">
+                    { icon(Icon::Clock, 16) }
+                    <span>{ format!("Asleep: its controls are read once it wakes up{}.", wakes_every(d)) }</span>
+                </div>
+            },
+            None if offline => html! {
+                <p class="card-controls-state">{ "No controls while it is offline." }</p>
+            },
             None => html! {
                 <div class="card-controls-state">
                     <span class="loader"></span>
-                    <span>{ if offline { "Not answering; trying again…" } else { "Reading its controls…" } }</span>
+                    <span>{ "Reading its controls…" }</span>
                 </div>
             },
             Some(_) if endpoints.is_empty() => html! {
@@ -836,6 +874,21 @@ fn view_check_ins(d: &api::DeviceInfo, disabled: bool, link: &Scope<App>) -> Htm
             </span>
         </label>
     }
+}
+
+/// How often `d` wakes up on its own, if it says: ` (every 5m)`.
+fn wakes_every(d: &api::DeviceInfo) -> String {
+    d.details
+        .icd
+        .as_ref()
+        .and_then(|icd| icd.idle_mode_secs)
+        .map(|secs| format!(" (every {})", display::short_duration(secs.into())))
+        .unwrap_or_default()
+}
+
+/// How a user wakes `d` up now, as it says.
+fn wake_hint(d: &api::DeviceInfo) -> Option<String> {
+    d.details.icd.as_ref().and_then(|icd| icd.wake_hint())
 }
 
 /// The filter for devices that sleep as `d` does.

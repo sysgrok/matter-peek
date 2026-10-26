@@ -149,6 +149,8 @@ enum Network {
 #[derive(Clone, PartialEq)]
 enum Ask {
     Decommission(u64),
+    /// Drop the record of a remembered device.
+    Forget(u64),
     /// Another controller's fabric on a device: its index, and its name.
     RemoveFabric(u64, u8, String),
     /// A fabric of ours, and what becomes of its devices.
@@ -239,6 +241,8 @@ enum Msg {
     Identify(u64),
     /// Keep a record of a device, so it can be tagged.
     Remember(u64),
+    /// Drop the record of a remembered device, keeping it on our fabric.
+    Forget(u64),
     /// Decommission a device (RemoveFabric + drop it from the list).
     Decommission(u64),
     /// Open the logs popup of a device.
@@ -254,6 +258,8 @@ enum Msg {
     /// A second passed while a device is awake: its countdown, and keeping
     /// the one whose popup is open awake.
     AwakeTick,
+    /// Keep a device that sleeps long awake (`true`), or let it sleep.
+    StayAwake(u64, bool),
     /// Open the network popup of a device, reading its networking.
     OpenNetwork(u64),
     /// Read the networking of the device whose network popup is open again.
@@ -491,6 +497,11 @@ struct App {
     waking: HashSet<u64>,
     /// Whether an `AwakeTick` is due.
     awake_ticking: bool,
+    /// The devices this page keeps awake, over the subscription WS: the server
+    /// lets them sleep once it closes.
+    kept_awake: HashSet<u64>,
+    /// What the status line says once the request in flight is answered `Ok`.
+    status_on_ok: Option<String>,
     /// The Assistant page.
     assistant: Assistant,
     /// Its conversation, which scrolls.
@@ -590,6 +601,8 @@ impl Component for App {
             awake: HashMap::new(),
             waking: HashSet::new(),
             awake_ticking: false,
+            kept_awake: HashSet::new(),
+            status_on_ok: None,
             assistant: Assistant::default(),
             chat_scroll: NodeRef::default(),
             scroll_chat: false,
@@ -656,6 +669,7 @@ impl Component for App {
                     Some(Ask::Decommission(node_id)) => {
                         ctx.link().send_message(Msg::Decommission(node_id))
                     }
+                    Some(Ask::Forget(node_id)) => ctx.link().send_message(Msg::Forget(node_id)),
                     Some(Ask::DeleteFabric(index, deletion)) => {
                         ctx.link()
                             .send_message(Msg::OurFabrics(our_fabrics::FabricsMsg::Deleted(
@@ -1102,6 +1116,16 @@ impl Component for App {
                 );
                 true
             }
+            Msg::Forget(node_id) => {
+                let pending = self.start_device_op(node_id, false);
+                self.error = None;
+                send_request(
+                    ctx.link().clone(),
+                    pending,
+                    wire::Request::Forget { node_id },
+                );
+                true
+            }
             Msg::OpenLogs(node_id) => {
                 self.error = None;
                 self.logs = Some(LogsView {
@@ -1255,15 +1279,33 @@ impl Component for App {
             }
             Msg::CheckIns(node_id, register) => {
                 let pending = self.start_device_op(node_id, false);
-                self.set_status(Some(format!(
-                    "{} the Check-Ins of node {}…",
+                let asleep = self
+                    .stored
+                    .iter()
+                    .find(|d| d.handle.node_id == node_id)
+                    .is_some_and(|d| self.asleep(d));
+                // It hears us only once it wakes up.
+                self.set_status(Some(if asleep {
+                    self.waiting_status(node_id)
+                } else {
+                    format!(
+                        "{} the Check-Ins of node {}…",
+                        if register {
+                            "Registering for"
+                        } else {
+                            "Unregistering from"
+                        },
+                        display::hex_u64(node_id)
+                    )
+                }));
+                self.status_on_ok = Some(
                     if register {
-                        "Registering for"
+                        "Registered for its Check-Ins: it sleeps long now."
                     } else {
-                        "Unregistering from"
-                    },
-                    display::hex_u64(node_id)
-                )));
+                        "Unregistered from its Check-Ins: it idles short now."
+                    }
+                    .into(),
+                );
                 self.error = None;
                 let request = if register {
                     wire::Request::RegisterCheckIns { node_id }
@@ -1285,6 +1327,17 @@ impl Component for App {
                         wire::Request::WakeDevice { node_id },
                     );
                 }
+                true
+            }
+            Msg::StayAwake(node_id, on) => {
+                // Over the subscription WS: it holds the device awake while open.
+                if on {
+                    self.kept_awake.insert(node_id);
+                } else {
+                    self.kept_awake.remove(&node_id);
+                }
+                self.error = None;
+                self.sub_send(&wire::Request::StayAwake { node_id, on });
                 true
             }
             Msg::AwakeTick => {
@@ -1312,6 +1365,8 @@ impl Component for App {
                     "Asking node {} to identify itself…",
                     display::hex_u64(node_id)
                 )));
+                self.status_on_ok =
+                    Some("Identify acknowledged: it identifies itself for 3 s, as it can.".into());
                 self.error = None;
                 send_request(
                     ctx.link().clone(),
@@ -1404,6 +1459,12 @@ impl Component for App {
                     self.sub_send(&wire::Request::SubscribeModel {
                         node_id: *node_id,
                         scope: *scope,
+                    });
+                }
+                for node_id in &self.kept_awake {
+                    self.sub_send(&wire::Request::StayAwake {
+                        node_id: *node_id,
+                        on: true,
                     });
                 }
                 true
@@ -1604,9 +1665,8 @@ impl Component for App {
                         self.subs.entry(node_id).or_default().health.merge(health);
                     }
                     wire::Response::Ok => {
-                        self.set_status(Some(
-                            "Identify acknowledged: the device should blink.".into(),
-                        ));
+                        let status = self.status_on_ok.take();
+                        self.set_status(status);
                     }
                     // `Subscribed` / streamed subscription frames arrive on the
                     // dedicated persistent subscription WS, not this one-shot path.
@@ -1847,11 +1907,6 @@ impl App {
     pub(crate) fn asleep(&self, d: &api::DeviceInfo) -> bool {
         let long = d.details.icd.as_ref().and_then(|icd| icd.mode) == Some(api::IcdMode::Lit);
         long && self.awake_secs(d.handle.node_id).is_none()
-    }
-
-    /// Whether a request keeps the device awake now.
-    pub(crate) fn waking(&self, node_id: u64) -> bool {
-        self.waking.contains(&node_id)
     }
 
     /// What the status line says while we wait for a device to wake up.
@@ -2407,6 +2462,14 @@ impl App {
         };
 
         let (title, text, action) = match ask {
+            Ask::Forget(node_id) => (
+                format!("Forget {}?", self.device_title(*node_id)),
+                "We drop our record of it, and its tags. It stays on our fabric and in this list \
+                 while the controller runs, as any device a sync finds; remember it again to keep \
+                 it."
+                    .to_string(),
+                "Forget",
+            ),
             Ask::Decommission(node_id) => {
                 let title = self
                     .stored

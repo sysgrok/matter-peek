@@ -282,7 +282,7 @@ fn tools_as_the_caps_allow() {
         .map(|tool| tool.name.as_str())
         .collect();
     // Offered without changing anything, but acting on a device: asked first.
-    assert_eq!(asked, ["identify"]);
+    assert_eq!(asked, ["identify", "stay_awake", "wake_device"]);
     assert!(read_only
         .tools()
         .iter()
