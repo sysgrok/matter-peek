@@ -18,7 +18,6 @@ use rs_matter::acl::{AclEntry, AuthMode, Target};
 use rs_matter::bdx::{Bdx, PROTO_ID_BDX};
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _, DescHandler};
-use rs_matter::dm::clusters::net_comm::{DummyNetworks, NetworkType};
 use rs_matter::dm::clusters::ota_prov::{
     self, OtaBdxHandler, OtaImages, OtaImagesRegistry, OtaProviderHandler,
 };
@@ -26,7 +25,6 @@ use rs_matter::dm::clusters::ota_req;
 use rs_matter::dm::clusters::time_sync::{self, GranularityEnum, TimeSyncHandler};
 use rs_matter::dm::devices::DEV_TYPE_OTA_PROVIDER;
 use rs_matter::dm::endpoints::ROOT_ENDPOINT_ID;
-use rs_matter::dm::networks::wireless::NoopWirelessNetCtl;
 use rs_matter::dm::{
     Async, AttrChangeNotifier, Cluster, Dataver, EmptyHandler, Endpoint, Node, Privilege,
 };
@@ -101,8 +99,7 @@ where
         );
 
     let buffers: MatterBuffers = MatterBuffers::new();
-    let state: InteractionModelState<DummyNetworks, 3, 1024> =
-        InteractionModelState::new(DummyNetworks);
+    let state: InteractionModelState<3, 1024> = InteractionModelState::new();
     let kv = matter.kv(DummyKvBlobStore);
 
     let im = InteractionModel::new_with_reports(
@@ -111,7 +108,6 @@ where
         &buffers,
         (NODE, handler),
         &kv,
-        NoopWirelessNetCtl::new(NetworkType::Ethernet),
         reports,
         &state,
     );
