@@ -792,6 +792,19 @@ impl<'a, C: Crypto> Controller<'a, C> {
         Ok((key, counter))
     }
 
+    /// Ask the device to stay active for `duration_ms` more; returns how long
+    /// it promises to.
+    pub async fn stay_active(&self, dev: DeviceHandle, duration_ms: u32) -> Result<u32, Error> {
+        crate::icd::stay_active(
+            self.matter,
+            self.crypto,
+            dev.fabric_index,
+            dev.node_id,
+            duration_ms,
+        )
+        .await
+    }
+
     /// Drop our registration for the Check-Ins of the device.
     pub async fn unregister_check_ins(
         &self,

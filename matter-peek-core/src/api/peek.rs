@@ -433,6 +433,15 @@ impl MatterPeek {
         .await
     }
 
+    /// Keep a listed device awake for a while, so that it answers: one that
+    /// sleeps long and sleeps now is waited for, until it wakes up on its own
+    /// (at most its idle time) or a user wakes it (see its `user_trigger`).
+    /// Answers how long it promises to stay awake, in ms; ask again before
+    /// that runs out to keep it awake longer.
+    pub async fn wake_device(&self, node_id: u64) -> Result<u32, PeekError> {
+        self.call(|reply| Op::Wake { node_id, reply }).await
+    }
+
     /// Follow the health of a listed device live, until the returned
     /// subscription is stopped or dropped. `listener` first gets the health and
     /// state known so far, if any. One device subscription serves all of a
@@ -907,6 +916,10 @@ pub(crate) enum Op {
         node_id: u64,
         register: bool,
         reply: Reply<()>,
+    },
+    Wake {
+        node_id: u64,
+        reply: Reply<u32>,
     },
     /// Add a listener to the device's subscription; answers with its ID.
     Watch {

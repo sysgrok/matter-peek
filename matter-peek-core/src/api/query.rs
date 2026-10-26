@@ -1069,6 +1069,7 @@ mod tests {
             online: Some(true),
             remembered: true,
             check_ins: false,
+            awake_ms: None,
             network: Some(NetworkKind::Thread),
             device_types: vec![0x0072],
             details: DeviceDetails {

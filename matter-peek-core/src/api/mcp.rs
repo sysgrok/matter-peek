@@ -67,7 +67,7 @@ const MUTATING_TOOLS: &[&str] = &[
 
 /// What an agent should know about the tools, for its instructions.
 pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-only tools \
-     (discover, list_devices, peek_device, read_model, read_events, read_network, retrieve_logs, identify, \
+     (discover, list_devices, peek_device, read_model, read_events, read_network, retrieve_logs, identify, wake_device, \
      read_qr_image, ota_images, ota_updates, commissioning_window, \
      device_time, list_fabrics) are always available. The tools that change \
      devices or the stored state (commission, decommission, \
@@ -86,7 +86,7 @@ pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-o
 
 /// The tools that act on a device without changing what is stored: offered
 /// without [`Caps::allow_mutate`], but not read-only, so an agent asks first.
-const ACTING_TOOLS: &[&str] = &["identify"];
+const ACTING_TOOLS: &[&str] = &["identify", "wake_device"];
 
 /// The mutating tools whose harm may be hard to undo: they cost a device its
 /// fabric, its network or its firmware, or lose an image.
@@ -372,6 +372,21 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
                     "node_id": node_id_schema(),
                     "secs": { "type": "integer", "description": "Blink duration in seconds (default 3)." }
                 },
+                "required": ["node_id"]
+            }),
+        ),
+        tool(
+            "wake_device",
+            "Keep a listed device awake for a while, so that it answers. One \
+             that sleeps long (details.icd.mode lit) answers only while awake: \
+             this waits for it to wake up, up to its idle time (minutes; \
+             details.icd.idle_mode_secs), unless the user wakes it as its \
+             wake-up hint says, then keeps it awake for about 30 s. Use it \
+             before reading or acting on such a device; call it again to keep \
+             it awake longer.",
+            json!({
+                "type": "object",
+                "properties": { "node_id": node_id_schema() },
                 "required": ["node_id"]
             }),
         ),
@@ -1116,6 +1131,9 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
             },
         },
         "remember" => wire::Request::Remember {
+            node_id: arg_node(args)?,
+        },
+        "wake_device" => wire::Request::WakeDevice {
             node_id: arg_node(args)?,
         },
         "identify" => wire::Request::Identify {

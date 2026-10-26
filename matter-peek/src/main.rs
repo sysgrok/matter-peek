@@ -473,6 +473,9 @@ enum Icd {
     /// Drop our registration for its Check-Ins: with no other client, it idles
     /// short again, reachable within seconds.
     Unregister { node: Node },
+    /// Keep it awake for a while, so that it answers: if it sleeps long and
+    /// sleeps now, wait for it to wake up (or wake it, as its hint says).
+    Wake { node: Node },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -1148,6 +1151,16 @@ async fn run(cli: Cli) -> io::Result<bool> {
             .await?,
             "Unregistered from its Check-Ins.",
         ),
+        Command::Icd(Icd::Wake { node }) => {
+            let request = wire::Request::WakeDevice { node_id: node.0 };
+            match call(&conn, &out, request).await? {
+                Some(wire::Response::Awake { ms, .. }) if !out.json => {
+                    println!("Awake for {} s.", ms.div_ceil(1000));
+                    Ok(true)
+                }
+                response => Ok(response.is_some()),
+            }
+        }
         Command::Assistant { action } => assistant(&conn, &out, action).await,
         Command::Thread { view } => {
             let response = call(&conn, &out, wire::Request::ReadThreadMesh { fabric }).await?;

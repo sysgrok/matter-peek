@@ -155,6 +155,8 @@ pub enum Request {
     RegisterCheckIns { node_id: u64 },
     /// See `MatterPeek::unregister_check_ins`. Answered with [`Response::Ok`].
     UnregisterCheckIns { node_id: u64 },
+    /// See `MatterPeek::wake_device`. Answered with [`Response::Awake`].
+    WakeDevice { node_id: u64 },
     /// See `MatterPeek::open_commissioning_window`. Answered with
     /// [`Response::CommissioningWindow`].
     OpenCommissioningWindow {
@@ -384,6 +386,11 @@ pub enum Response {
     },
     CommissioningWindow {
         window: CommissioningWindow,
+    },
+    /// The device is awake for `ms` more.
+    Awake {
+        node_id: u64,
+        ms: u32,
     },
     DeviceTime {
         time: DeviceTime,

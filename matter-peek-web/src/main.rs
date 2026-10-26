@@ -100,6 +100,8 @@ enum Pending {
     Network(u64),
     /// The logs popup of a device.
     Logs(u64),
+    /// Keeping a device that sleeps long awake.
+    Wake(u64),
     Discover,
     Commission,
     /// An OTA image upload.
@@ -122,6 +124,9 @@ const CAMERA_FRAME_MS: u32 = 500;
 const SUB_WS_RETRY_MS: u32 = 2_000;
 /// How long to wait before subscribing again to a device the server refused.
 const SUBSCRIBE_RETRY_MS: u32 = 5_000;
+/// How few seconds before a device that sleeps long falls asleep while its
+/// popup is open it is asked to stay awake: the ask takes a round trip.
+const KEEP_AWAKE_SECS: u32 = 10;
 /// How often the running OTA updates are read again, while there are any.
 const OTA_UPDATES_POLL_MS: u32 = 5_000;
 
@@ -243,6 +248,12 @@ enum Msg {
     FetchLogs(api::LogIntent),
     /// Register for the Check-Ins of a device (`true`), or unregister.
     CheckIns(u64, bool),
+    /// Keep a device that sleeps long awake for a while, waiting for it to
+    /// wake up first if it sleeps.
+    Wake(u64),
+    /// A second passed while a device is awake: its countdown, and keeping
+    /// the one whose popup is open awake.
+    AwakeTick,
     /// Open the network popup of a device, reading its networking.
     OpenNetwork(u64),
     /// Read the networking of the device whose network popup is open again.
@@ -474,6 +485,12 @@ struct App {
     thread: thread::ThreadPage,
     /// The network popup, when open.
     network_view: Option<NetworkView>,
+    /// Until when the devices that sleep long are awake (`Date.now()` ms).
+    awake: HashMap<u64, f64>,
+    /// The devices being kept awake, by a request in flight.
+    waking: HashSet<u64>,
+    /// Whether an `AwakeTick` is due.
+    awake_ticking: bool,
     /// The Assistant page.
     assistant: Assistant,
     /// Its conversation, which scrolls.
@@ -570,6 +587,9 @@ impl Component for App {
             manage: None,
             thread: Default::default(),
             network_view: None,
+            awake: HashMap::new(),
+            waking: HashSet::new(),
+            awake_ticking: false,
             assistant: Assistant::default(),
             chat_scroll: NodeRef::default(),
             scroll_chat: false,
@@ -1253,6 +1273,39 @@ impl Component for App {
                 send_request(ctx.link().clone(), pending, request);
                 true
             }
+            Msg::Wake(node_id) => {
+                if self.waking.insert(node_id) {
+                    if self.awake_secs(node_id).is_none() {
+                        self.set_status(Some(self.waiting_status(node_id)));
+                    }
+                    self.error = None;
+                    send_request(
+                        ctx.link().clone(),
+                        Pending::Wake(node_id),
+                        wire::Request::WakeDevice { node_id },
+                    );
+                }
+                true
+            }
+            Msg::AwakeTick => {
+                self.awake_ticking = false;
+
+                let now = js_sys::Date::now();
+                self.awake.retain(|_, until| *until > now);
+
+                // Its popup open: keep it awake before it runs out.
+                if let Some(node_id) = self.popup_device() {
+                    let ending = self
+                        .awake_secs(node_id)
+                        .is_some_and(|secs| secs <= KEEP_AWAKE_SECS);
+                    if ending && !self.waking.contains(&node_id) {
+                        ctx.link().send_message(Msg::Wake(node_id));
+                    }
+                }
+
+                self.tick_awake(ctx);
+                true
+            }
             Msg::Identify(node_id) => {
                 let pending = self.start_device_op(node_id, false);
                 self.set_status(Some(format!(
@@ -1608,6 +1661,18 @@ impl Component for App {
                             }
                         }
                     }
+                    wire::Response::Awake { node_id, ms } => {
+                        self.awake
+                            .insert(node_id, js_sys::Date::now() + f64::from(ms));
+                        if self.stored_status.as_deref() == Some(&self.waiting_status(node_id)) {
+                            self.set_status(Some(format!(
+                                "{} is awake for {} s.",
+                                self.device_title(node_id),
+                                ms.div_ceil(1000)
+                            )));
+                        }
+                        self.tick_awake(ctx);
+                    }
                     wire::Response::Logs { node_id, data, .. } => {
                         if let Some(logs) = self.logs.as_mut().filter(|l| l.node_id == node_id) {
                             logs.data = Some(data);
@@ -1750,6 +1815,13 @@ impl App {
     /// them. Each tag-edit buffer is seeded from the (normalized) tags, but
     /// that of a device whose tags are being edited.
     fn take_devices(&mut self, ctx: &Context<Self>, devices: Vec<api::DeviceInfo>) {
+        let now = js_sys::Date::now();
+        self.awake = devices
+            .iter()
+            .filter_map(|d| Some((d.handle.node_id, now + f64::from(d.awake_ms?))))
+            .collect();
+        self.tick_awake(ctx);
+
         let editing = self
             .editing_tags
             .and_then(|node_id| Some((node_id, self.tag_inputs.remove(&node_id)?)));
@@ -1763,6 +1835,74 @@ impl App {
         // A dashboard watches everything: auto-subscribe every listed device
         // of the fabric shown (and drop panels for any that vanished).
         self.set_devices(ctx, devices);
+    }
+
+    /// How many seconds more a device that sleeps long is awake, if it is.
+    pub(crate) fn awake_secs(&self, node_id: u64) -> Option<u32> {
+        let left = self.awake.get(&node_id)? - js_sys::Date::now();
+        (left > 0.0).then(|| (left / 1000.0).ceil() as u32)
+    }
+
+    /// Whether a device sleeps long and sleeps now: it does not answer.
+    pub(crate) fn asleep(&self, d: &api::DeviceInfo) -> bool {
+        let long = d.details.icd.as_ref().and_then(|icd| icd.mode) == Some(api::IcdMode::Lit);
+        long && self.awake_secs(d.handle.node_id).is_none()
+    }
+
+    /// Whether a request keeps the device awake now.
+    pub(crate) fn waking(&self, node_id: u64) -> bool {
+        self.waking.contains(&node_id)
+    }
+
+    /// What the status line says while we wait for a device to wake up.
+    fn waiting_status(&self, node_id: u64) -> String {
+        let device = self.stored.iter().find(|d| d.handle.node_id == node_id);
+        let icd = device.and_then(|d| d.details.icd.as_ref());
+        let every = icd
+            .and_then(|icd| icd.idle_mode_secs)
+            .map(|secs| {
+                format!(
+                    ": it wakes up every {}",
+                    display::short_duration(secs.into())
+                )
+            })
+            .unwrap_or_default();
+        let hint = icd
+            .and_then(|icd| icd.wake_hint())
+            .map(|hint| format!(". To wake it now: {hint}"))
+            .unwrap_or_default();
+
+        format!(
+            "Waiting for {} to wake up{every}{hint}.",
+            self.device_title(node_id)
+        )
+    }
+
+    /// The device whose popup is open, if any.
+    fn popup_device(&self) -> Option<u64> {
+        self.logs
+            .as_ref()
+            .map(|view| view.node_id)
+            .or(self.memory.as_ref().map(|view| view.node_id))
+            .or(self.model_view.as_ref().map(|view| view.node_id))
+            .or(self.share.as_ref().map(|view| view.node_id))
+            .or(self.clock.as_ref().map(|view| view.node_id))
+            .or(self.network_view.as_ref().map(|view| view.node_id))
+            .or(self.fabrics_of)
+    }
+
+    /// Tick each second while a device is awake.
+    fn tick_awake(&mut self, ctx: &Context<Self>) {
+        if self.awake_ticking || self.awake.is_empty() {
+            return;
+        }
+
+        self.awake_ticking = true;
+        let link = ctx.link().clone();
+        spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(1_000).await;
+            link.send_message(Msg::AwakeTick);
+        });
     }
 
     /// Note an operation on a device, for its request.
@@ -1815,6 +1955,9 @@ impl App {
                 if let Some(logs) = self.logs.as_mut().filter(|l| l.node_id == node_id) {
                     logs.loading = false;
                 }
+            }
+            Pending::Wake(node_id) => {
+                self.waking.remove(&node_id);
             }
             Pending::Discover => self.discovering = false,
             Pending::Commission => self.running = false,

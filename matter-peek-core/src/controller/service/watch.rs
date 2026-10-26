@@ -354,6 +354,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             }
         };
 
+        let woke = sleepy.clone();
         let subscription = self.controller.subscribe(
             &self.reports,
             &self.model_gate,
@@ -364,6 +365,10 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             &retry,
             &sleepy,
             |mut health| {
+                // A report of a device that sleeps long: it is awake.
+                if woke.get() {
+                    self.note_message_of(node_id);
+                }
                 self.mark_our_fabric(node_id, &mut health);
                 with_watch(&mut |watch| watch.report(node_id, health.clone()))
             },

@@ -179,6 +179,8 @@ impl App {
         let live = self.subs.get(&node_id);
         // Only Refresh and the actions not needing the device remain offline.
         let (offline, pill) = self.device_state(node_id);
+        // What needs the device to answer: not while it sleeps long.
+        let unreachable = offline || self.asleep(d);
 
         let hardware = d.hardware_version().unwrap_or_else(|| "—".into());
         let software = d.software_version().unwrap_or_else(|| "—".into());
@@ -216,32 +218,33 @@ impl App {
                 </dl>
 
                 { self.view_fabrics_row(node_id, live, link) }
-                { view_check_ins(d, busy || offline, link) }
+                { view_check_ins(d, busy || unreachable, link) }
                 { self.view_health(live, offline) }
                 { self.view_tags(d, link) }
                 { self.view_device_update(d, offline, link) }
 
                 <footer class="device-actions">
                     <div class="device-actions-main">
+                        { self.view_wake(d, busy || offline, link) }
                         { ui::icon_button(Icon::Identify, "Identify", classes!("is-small", "is-soft"),
-                            busy || offline, Some("Make it blink for 3 s"),
+                            busy || unreachable, Some("Make it blink for 3 s"),
                             link.callback(move |_| Msg::Identify(node_id))) }
                         { ui::icon_button(kind_icon(d.network).unwrap_or(Icon::Globe), "Network",
-                            classes!("is-small", "is-soft"), offline, Some("Its networks and interfaces"),
+                            classes!("is-small", "is-soft"), unreachable, Some("Its networks and interfaces"),
                             link.callback(move |_| Msg::OpenNetwork(node_id))) }
-                        { ui::icon_button(Icon::Logs, "Logs", classes!("is-small", "is-soft"), offline,
+                        { ui::icon_button(Icon::Logs, "Logs", classes!("is-small", "is-soft"), unreachable,
                             Some("Retrieve its diagnostic logs"),
                             link.callback(move |_| Msg::OpenLogs(node_id))) }
-                        { ui::icon_button(Icon::Chip, "Memory", classes!("is-small", "is-soft"), offline,
+                        { ui::icon_button(Icon::Chip, "Memory", classes!("is-small", "is-soft"), unreachable,
                             Some("Its heap, and the stacks of its tasks"),
                             link.callback(move |_| Msg::Memory(crate::memory::MemoryMsg::Open(node_id)))) }
-                        { ui::icon_button(Icon::Model, "Model", classes!("is-small", "is-soft"), offline,
+                        { ui::icon_button(Icon::Model, "Model", classes!("is-small", "is-soft"), unreachable,
                             Some("Its endpoints, clusters, attributes and commands"),
                             link.callback(move |_| Msg::Model(crate::datamodel::ModelMsg::Open(node_id)))) }
-                        { ui::icon_button(Icon::Clock, "Clock", classes!("is-small", "is-soft"), offline,
+                        { ui::icon_button(Icon::Clock, "Clock", classes!("is-small", "is-soft"), unreachable,
                             Some("Its clock; set it from ours"),
                             link.callback(move |_| Msg::Clock(crate::clock::ClockMsg::Open(node_id)))) }
-                        { ui::icon_button(Icon::Share, "Share", classes!("is-small", "is-soft"), offline,
+                        { ui::icon_button(Icon::Share, "Share", classes!("is-small", "is-soft"), unreachable,
                             Some("Let another app (Google Home, Home Assistant, …) commission it too"),
                             link.callback(move |_| Msg::Share(crate::share::ShareMsg::Open(node_id)))) }
                     </div>
@@ -261,10 +264,58 @@ impl App {
                     </div>
                 </footer>
             </article>
-            { self.view_device_back(d, flipped, offline, pill, link) }
+            { self.view_device_back(d, flipped, unreachable, pill, link) }
             </div>
             </div>
         }
+    }
+
+    /// How a device sleeps, as a pill: one that sleeps long shows whether it
+    /// is awake, and for how long more.
+    fn sleep_pill(&self, d: &api::DeviceInfo, sleep: display::Sleep) -> Html {
+        if !sleep.long {
+            return ui::pill(&sleep.label, Some("is-sit"), Some(sleep.text));
+        }
+
+        match self.awake_secs(d.handle.node_id) {
+            Some(secs) => ui::pill(&format!("Awake {secs} s"), Some("is-up"), Some(sleep.text)),
+            None => ui::pill(&sleep.label, Some("is-lit"), Some(sleep.text)),
+        }
+    }
+
+    /// The button keeping a device that sleeps long awake, so that the other
+    /// actions reach it.
+    fn view_wake(&self, d: &api::DeviceInfo, disabled: bool, link: &Scope<Self>) -> Html {
+        if d.details.icd.as_ref().and_then(|icd| icd.mode) != Some(api::IcdMode::Lit) {
+            return html! {};
+        }
+
+        let node_id = d.handle.node_id;
+        let waking = self.waking(node_id);
+        let hint = d
+            .details
+            .icd
+            .as_ref()
+            .and_then(|icd| icd.wake_hint())
+            .map(|hint| format!(" To wake it now: {hint}."))
+            .unwrap_or_default();
+        let (label, title) = if self.asleep(d) {
+            (
+                "Wake",
+                format!("It sleeps: keep it awake once it wakes up, so that it answers.{hint}"),
+            )
+        } else {
+            ("Keep awake", "Keep it awake for 30 s more".to_string())
+        };
+
+        ui::icon_button(
+            Icon::Sun,
+            label,
+            classes!("is-small", "is-soft", waking.then_some("is-loading")),
+            disabled || waking,
+            Some(&title),
+            link.callback(move |_| Msg::Wake(node_id)),
+        )
     }
 
     /// A device card's header, the same on both faces; Refresh re-reads what
@@ -316,9 +367,7 @@ impl App {
                                 ui::pill("Test vendor", Some("is-warning"), None), link) }
                         }
                         if let Some(sleep) = d.sleep() {
-                            { self.filter_chip(sleep_term(d),
-                                ui::pill(sleep.label, Some(if sleep.long { "is-lit" } else { "is-sit" }),
-                                    Some(sleep.text)), link) }
+                            { self.filter_chip(sleep_term(d), self.sleep_pill(d, sleep), link) }
                         }
                     </p>
                 </div>

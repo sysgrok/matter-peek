@@ -78,6 +78,7 @@ pub enum Icon {
     Braces,
     Play,
     Bolt,
+    Sun,
 }
 
 pub fn icon(glyph: Icon, size: u32) -> Html {
@@ -96,6 +97,12 @@ pub fn icon(glyph: Icon, size: u32) -> Html {
         },
         Icon::Play => html! { <path d="M6 4l14 8-14 8z" /> },
         Icon::Bolt => html! { <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" /> },
+        Icon::Sun => html! {
+            <>
+                <circle cx="12" cy="12" r="4" />
+                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+            </>
+        },
         Icon::Wifi => html! {
             <>
                 <path d="M2 8.5a15 15 0 0 1 20 0" />

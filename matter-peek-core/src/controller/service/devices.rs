@@ -68,7 +68,8 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 let online = online.as_ref().map(|o| o.contains(&node_id));
                 let fabric = self.fabric_name(d.handle.fabric_index);
                 let check_ins = clients.iter().any(|c| c.handle == d.handle);
-                convert::device(d, fabric, online, remembered, check_ins)
+                let awake_ms = self.awake_ms(node_id);
+                convert::device(d, fabric, online, remembered, check_ins, awake_ms)
             })
             .collect();
 

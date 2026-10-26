@@ -12,9 +12,10 @@
 
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use super::types::{
-    DeviceFabric, DeviceInfo, DeviceTime, IcdMode, NetworkKind, NetworkStatus, ThreadRole,
+    DeviceFabric, DeviceInfo, DeviceTime, IcdInfo, IcdMode, NetworkKind, NetworkStatus, ThreadRole,
     TimeGranularity, WifiSecurity, WifiVersion,
 };
 
@@ -112,7 +113,7 @@ impl DeviceInfo {
         let Some(icd) = &details.icd else {
             return (details.thread_role == Some(ThreadRole::SleepyEndDevice)).then(|| Sleep {
                 long: false,
-                label: "Sleepy",
+                label: "Sleepy".into(),
                 text: "A sleepy end device: it wakes to poll its Thread parent, so it answers \
                        a little later"
                     .into(),
@@ -126,7 +127,10 @@ impl DeviceInfo {
                 .unwrap_or_default();
             Sleep {
                 long: true,
-                label: "Sleeps long",
+                label: match icd.idle_mode_secs {
+                    Some(secs) => format!("Sleeps {}", short_duration(secs.into())),
+                    None => "Sleeps long".into(),
+                },
                 text: format!(
                     "Long idle time (LIT): it sleeps{idle} at a time, and checks in with its \
                      registered clients when it wakes. While it sleeps it does not answer"
@@ -142,10 +146,80 @@ impl DeviceInfo {
             }
             Sleep {
                 long: false,
-                label: "Sleepy",
+                label: "Sleepy".into(),
                 text,
             }
         })
+    }
+}
+
+impl IcdInfo {
+    /// How a user wakes the device up now, as it says (its
+    /// UserActiveModeTriggerHint and instruction): e.g. `Hold its reset
+    /// button for 5 s`.
+    pub fn wake_hint(&self) -> Option<String> {
+        const POWER_CYCLE: u32 = 0x1;
+        const SETTINGS_MENU: u32 = 0x2;
+        const CUSTOM_INSTRUCTION: u32 = 0x4;
+        const DEVICE_MANUAL: u32 = 0x8;
+        const ACTUATE_SENSOR: u32 = 0x10;
+        const RESET_BUTTON: u32 = 0x100;
+        const SETUP_BUTTON: u32 = 0x1000;
+        const APP_DEFINED_BUTTON: u32 = 0x10000;
+
+        let hint = self.user_trigger?;
+        let instruction = self.user_trigger_instruction.trim();
+
+        // Each of these, then: the bit, the bits with their instruction for
+        // seconds, lights blinking and times, and what to do.
+        let actions: [(u32, [u32; 3], &str); 3] = [
+            (RESET_BUTTON, [0x400, 0x200, 0x800], "its reset button"),
+            (SETUP_BUTTON, [0x2000, 0x4000, 0x8000], "its setup button"),
+            (ACTUATE_SENSOR, [0x20, 0x80, 0x40], "its sensor"),
+        ];
+
+        if hint & CUSTOM_INSTRUCTION != 0 && !instruction.is_empty() {
+            return Some(instruction.to_string());
+        }
+
+        for (bit, [seconds, blink, times], what) in actions {
+            let verb = if bit == ACTUATE_SENSOR {
+                "Actuate"
+            } else {
+                "Press"
+            };
+
+            if hint & seconds != 0 {
+                return Some(format!("Hold {what} for {instruction} s"));
+            }
+            if hint & times != 0 {
+                return Some(format!("{verb} {what} {instruction} times"));
+            }
+            if hint & blink != 0 {
+                return Some(format!("Hold {what} until its light blinks {instruction}"));
+            }
+            if hint & bit != 0 {
+                return Some(format!("{verb} {what}"));
+            }
+        }
+
+        let text = if hint & APP_DEFINED_BUTTON != 0 {
+            if instruction.is_empty() {
+                "Press its button".into()
+            } else {
+                format!("Press its {instruction} button")
+            }
+        } else if hint & POWER_CYCLE != 0 {
+            "Power it off and on".into()
+        } else if hint & SETTINGS_MENU != 0 {
+            "Use its settings menu".into()
+        } else if hint & DEVICE_MANUAL != 0 {
+            "See its manual".into()
+        } else {
+            return None;
+        };
+
+        Some(text)
     }
 }
 
@@ -154,8 +228,8 @@ impl DeviceInfo {
 pub struct Sleep {
     /// Long idle time (LIT): it does not answer while asleep.
     pub long: bool,
-    /// A word for it: `Sleepy`, `Sleeps long`.
-    pub label: &'static str,
+    /// A word for it: `Sleepy`, or how long it sleeps, `Sleeps 5m`.
+    pub label: String,
     /// What it means for reaching it.
     pub text: String,
 }
@@ -430,6 +504,32 @@ pub fn duration(secs: u64) -> String {
     out
 }
 
+/// A duration in short, e.g. `5m`, `1h 30m`, `45s`: its largest two units
+/// present, without the zero ones.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn short_duration(secs: u64) -> String {
+    const UNITS: [(u64, &str); 4] = [(24 * 3600, "d"), (3600, "h"), (60, "m"), (1, "s")];
+
+    let mut parts = Vec::new();
+    let mut rest = secs;
+
+    for (unit, suffix) in UNITS {
+        let count = rest / unit;
+        rest %= unit;
+
+        if count > 0 {
+            parts.push(format!("{count}{suffix}"));
+        }
+    }
+
+    if parts.is_empty() {
+        return "0s".into();
+    }
+
+    parts.truncate(2);
+    parts.join(" ")
+}
+
 /// A moment, `2026-10-23 14:05:09 UTC`, from milliseconds since the Unix
 /// epoch.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
@@ -621,6 +721,7 @@ mod tests {
             online: None,
             remembered: false,
             check_ins: false,
+            awake_ms: None,
             network: Some(NetworkKind::Thread),
             device_types: Vec::new(),
             details: DeviceDetails {
@@ -646,7 +747,7 @@ mod tests {
 
         let sleep = device(Some(lit), None).sleep().unwrap();
         assert!(sleep.long);
-        assert_eq!(sleep.label, "Sleeps long");
+        assert_eq!(sleep.label, "Sleeps 5m");
         assert!(sleep.text.contains("up to 5m 0s"));
 
         let sleep = device(Some(sit), None).sleep().unwrap();
@@ -661,6 +762,45 @@ mod tests {
         assert!(sleep.text.contains("sleepy end device"));
 
         assert_eq!(device(None, Some(ThreadRole::Router)).sleep(), None);
+    }
+
+    #[test]
+    fn wake_hints() {
+        let hint = |bits: u32, instruction: &str| {
+            IcdInfo {
+                user_trigger: Some(bits),
+                user_trigger_instruction: instruction.into(),
+                ..Default::default()
+            }
+            .wake_hint()
+        };
+
+        assert_eq!(
+            hint(0x4, "Pull GPIO4 low to wake the device").as_deref(),
+            Some("Pull GPIO4 low to wake the device")
+        );
+        assert_eq!(
+            hint(0x400, "5").as_deref(),
+            Some("Hold its reset button for 5 s")
+        );
+        assert_eq!(
+            hint(0x8000, "3").as_deref(),
+            Some("Press its setup button 3 times")
+        );
+        assert_eq!(hint(0x10, "").as_deref(), Some("Actuate its sensor"));
+        assert_eq!(hint(0x1, "").as_deref(), Some("Power it off and on"));
+        assert_eq!(hint(0, ""), None);
+        assert_eq!(IcdInfo::default().wake_hint(), None);
+    }
+
+    #[test]
+    fn short_durations() {
+        assert_eq!(short_duration(0), "0s");
+        assert_eq!(short_duration(45), "45s");
+        assert_eq!(short_duration(300), "5m");
+        assert_eq!(short_duration(330), "5m 30s");
+        assert_eq!(short_duration(5400), "1h 30m");
+        assert_eq!(short_duration(3 * 86400 + 3600 + 1), "3d 1h");
     }
 
     #[test]

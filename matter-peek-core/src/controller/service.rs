@@ -141,6 +141,9 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     ota_updates: Rc<RefCell<BTreeMap<u64, TrackedUpdate>>>,
     /// The commissioning windows we opened, by node ID.
     windows: RefCell<BTreeMap<u64, OpenedWindow>>,
+    /// Until when the devices that sleep long are awake, as far as we know, by
+    /// node ID.
+    awake: RefCell<BTreeMap<u64, Instant>>,
     /// The OTA image uploads in progress, by ID.
     uploads: RefCell<BTreeMap<u32, Upload<'a, C, O>>>,
     next_upload_id: Cell<u32>,
@@ -292,6 +295,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             | Op::ReadNetwork { node_id, .. }
             | Op::RetrieveLogs { node_id, .. }
             | Op::Identify { node_id, .. }
+            | Op::Wake { node_id, .. }
             | Op::Watch { node_id, .. }
             | Op::WatchModel { node_id, .. }
             | Op::Window { node_id, .. }
@@ -494,6 +498,9 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 reply,
             } => {
                 let _ = reply.send(self.check_ins(node_id, register).await).await;
+            }
+            Op::Wake { node_id, reply } => {
+                let _ = reply.send(self.wake(node_id).await).await;
             }
             Op::PeekDevice { node_id, reply } => {
                 let _ = reply.send(self.peek_device(node_id).await).await;
@@ -755,6 +762,7 @@ async fn run<'a, C, S, O, N, M>(
         ota_updates,
         ota_events,
         windows: RefCell::new(BTreeMap::new()),
+        awake: RefCell::new(BTreeMap::new()),
         uploads: RefCell::new(BTreeMap::new()),
         next_upload_id: Cell::new(1),
         online: RefCell::new(None),
@@ -864,6 +872,7 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             Op::Identify { reply, .. }
             | Op::CheckIns { reply, .. }
             | Op::OtaUpdate { reply, .. } => refuse(reply, error).await,
+            Op::Wake { reply, .. } => refuse(reply, error).await,
             Op::Watch { reply, .. } | Op::WatchModel { reply, .. } => refuse(reply, error).await,
             Op::OtaImages(reply) | Op::OtaUploadEnd { reply, .. } | Op::OtaDelete { reply, .. } => {
                 refuse(reply, error).await

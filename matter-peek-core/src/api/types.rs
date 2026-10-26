@@ -521,6 +521,12 @@ pub struct DeviceInfo {
     /// [`MatterPeek::register_check_ins`](super::MatterPeek::register_check_ins)).
     #[serde(default)]
     pub check_ins: bool,
+    /// For a device that sleeps long: how much longer it is awake, in ms, as
+    /// far as we know as of this list (see
+    /// [`MatterPeek::wake_device`](super::MatterPeek::wake_device)); `None`
+    /// while it sleeps.
+    #[serde(default)]
+    pub awake_ms: Option<u32>,
     /// The kind of network it is on, if known.
     #[serde(default)]
     pub network: Option<NetworkKind>,

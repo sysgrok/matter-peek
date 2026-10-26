@@ -211,6 +211,10 @@ impl WireSession {
                 .unregister_check_ins(node_id)
                 .await
                 .map(|()| Response::Ok),
+            Request::WakeDevice { node_id } => peek
+                .wake_device(node_id)
+                .await
+                .map(|ms| Response::Awake { node_id, ms }),
             Request::OpenCommissioningWindow {
                 node_id,
                 timeout_secs,

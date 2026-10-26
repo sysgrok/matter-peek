@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 
 use embassy_futures::select::{select, Either};
+use embassy_time::{Duration, Instant, Timer};
 
 use log::{info, warn};
 
@@ -17,7 +18,94 @@ use crate::ota::OtaImageStore;
 
 use super::{failed, Ctx};
 
+/// How long a wake-up asks a device to stay awake: the most it guarantees.
+const STAY_AWAKE_MS: u32 = 30_000;
+/// How long past its idle time a wake-up waits for a device to wake up.
+const WAKE_MARGIN: Duration = Duration::from_secs(30);
+/// How often a wake-up looks whether the device woke up meanwhile.
+const WAKE_POLL: Duration = Duration::from_millis(200);
+/// The idle time of a device that does not say: the most CHIP LIT devices use.
+const DEFAULT_IDLE_SECS: u32 = 3600;
+/// How long a device stays awake after a message of its, if it does not say:
+/// the least a LIT may.
+const DEFAULT_ACTIVE_THRESHOLD_MS: u32 = 5000;
+
 impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
+    /// Keep a listed device awake for a while (see `MatterPeek::wake_device`):
+    /// one that sleeps long and sleeps now is waited for first.
+    pub(super) async fn wake(&self, node_id: u64) -> Result<u32, PeekError> {
+        let dev = self.lookup_device(node_id)?;
+
+        if self.has_icd_client(dev.handle) && self.awake_ms(node_id).is_none() {
+            let idle_secs = dev
+                .details
+                .icd
+                .as_ref()
+                .and_then(|icd| icd.idle_mode_secs)
+                .unwrap_or(DEFAULT_IDLE_SECS);
+            let deadline = Instant::now() + Duration::from_secs(idle_secs.into()) + WAKE_MARGIN;
+
+            info!("icd: waiting for node 0x{node_id:016X} to wake up");
+            while self.awake_ms(node_id).is_none() {
+                if Instant::now() >= deadline {
+                    return Err(PeekError::failed("it did not wake up"));
+                }
+
+                Timer::after(WAKE_POLL).await;
+            }
+        }
+
+        let promised = self
+            .controller
+            .stay_active(dev.handle, STAY_AWAKE_MS)
+            .await
+            .map_err(|e| failed("it did not stay awake", e))?;
+        info!("icd: node 0x{node_id:016X} stays awake for {promised} ms");
+
+        self.note_awake(node_id, promised);
+
+        Ok(promised)
+    }
+
+    /// How much longer a device that sleeps long is awake, as far as we know.
+    pub(super) fn awake_ms(&self, node_id: u64) -> Option<u32> {
+        let until = *self.awake.borrow().get(&node_id)?;
+        let left = until.checked_duration_since(Instant::now())?.as_millis();
+
+        (left > 0).then(|| left.min(u32::MAX.into()) as u32)
+    }
+
+    /// Note that a device that sleeps long is awake, for `ms` at least.
+    pub(super) fn note_awake(&self, node_id: u64, ms: u32) {
+        let until = Instant::now() + Duration::from_millis(ms.into());
+
+        let longer = {
+            let mut awake = self.awake.borrow_mut();
+            let longer = awake.get(&node_id).is_none_or(|known| *known < until);
+            if longer {
+                awake.insert(node_id, until);
+            }
+            longer
+        };
+
+        if longer {
+            self.tell_devices();
+        }
+    }
+
+    /// Note that a device that sleeps long is awake, for as long as it stays
+    /// so after one of its messages: its active threshold.
+    pub(super) fn note_message_of(&self, node_id: u64) {
+        let threshold = self
+            .lookup_device(node_id)
+            .ok()
+            .and_then(|dev| dev.details.icd)
+            .and_then(|icd| icd.active_threshold_ms)
+            .map_or(DEFAULT_ACTIVE_THRESHOLD_MS, u32::from);
+
+        self.note_awake(node_id, threshold);
+    }
+
     /// Take the Check-Ins from `payloads`, until the channel closes, and the
     /// reports for subscriptions we lost: either says that a device is awake,
     /// and without our subscription.
@@ -31,6 +119,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                         "icd: node 0x{node_id:016X} reported for a subscription we lost; \
                          subscribing again"
                     );
+                    self.note_message_of(node_id);
                     self.resubscribe(node_id);
                 }
             }
@@ -75,6 +164,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         info!("icd: node 0x{node_id:016X} checked in (counter {counter})");
 
         self.set_online(node_id, true);
+        self.note_message_of(node_id);
         self.resubscribe(node_id);
 
         // Half its counter values are used: a fresh key, while it is awake.
