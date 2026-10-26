@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use crate::api::{
     BorderRouter, FindingKind, FindingSeverity, IcdInfo, IcdMode, LanFabric, LanNode, LinkSignal,
     MeshCounts, MeshFinding, MeshLink, MeshNetwork, MeshNode, MeshNodeKind, MeshRoute, MeshSleep,
-    NetworkInfo, NetworkKind, ThreadDiag, ThreadMesh, ThreadRole, UnreadDevice,
+    NetworkInfo, NetworkKind, ThreadDiag, ThreadMesh, ThreadRole, ThreadRoute, UnreadDevice,
 };
 use crate::mdns::MatterHost;
 
@@ -194,11 +194,15 @@ impl Builder {
 
         let leader = diag.leader_router_id;
         for route in diag.routes.iter().filter(|route| route.allocated) {
-            if route.ext_address == ext {
+            // Its own entry, which may lack its extended address.
+            if route.ext_address == ext || Some(route.rloc16) == diag.rloc16 {
                 continue;
             }
+            let Some(to) = self.router_address(route) else {
+                continue;
+            };
 
-            let other = self.node(route.ext_address);
+            let other = self.node(to);
             other.rloc16 = other.rloc16.or(Some(route.rloc16));
             other.extended_pan_id = other.extended_pan_id.or(xpan);
             other.partition_id = other.partition_id.or(diag.partition_id);
@@ -207,7 +211,7 @@ impl Builder {
             if route.link_established {
                 self.hears(
                     ext,
-                    route.ext_address,
+                    to,
                     LinkSignal {
                         quality: Some(quality(route.lqi_in)),
                         rssi: None,
@@ -215,7 +219,7 @@ impl Builder {
                     false,
                 );
                 self.hears(
-                    route.ext_address,
+                    to,
                     ext,
                     LinkSignal {
                         quality: Some(quality(route.lqi_out)),
@@ -228,16 +232,29 @@ impl Builder {
                     .routes
                     .iter()
                     .find(|hop| hop.allocated && hop.router_id == route.next_hop)
-                    .map(|hop| hop.ext_address)
-                    .filter(|via| *via != route.ext_address);
+                    .and_then(|hop| self.router_address(hop))
+                    .filter(|via| *via != to);
                 self.routes.push(MeshRoute {
                     from: ext,
-                    to: route.ext_address,
+                    to,
                     via,
                     path_cost: route.path_cost,
                 });
             }
         }
+    }
+
+    /// The extended address of a route's router, or of the node with its
+    /// RLOC16 where the route lacks it.
+    fn router_address(&self, route: &ThreadRoute) -> Option<u64> {
+        if route.ext_address != 0 {
+            return Some(route.ext_address);
+        }
+
+        self.nodes
+            .values()
+            .find(|node| node.rloc16 == Some(route.rloc16))
+            .map(|node| node.ext_address)
     }
 
     /// The cheapest route to each router no link is known to.
@@ -291,6 +308,20 @@ impl Builder {
             if input.our_fabrics.contains(&host.compressed_fabric_id) {
                 let ours = MeshNodeKind::Device {
                     node_id: host.node_id,
+                };
+                if let Some(node) = self.nodes.values_mut().find(|node| node.kind == ours) {
+                    merge_sleep(&mut node.sleep, sleep);
+                }
+                continue;
+            }
+            // One of ours, on another fabric too.
+            if let Some(device) = input
+                .devices
+                .iter()
+                .find(|device| has_address(&device.network, &host.address))
+            {
+                let ours = MeshNodeKind::Device {
+                    node_id: device.node_id,
                 };
                 if let Some(node) = self.nodes.values_mut().find(|node| node.kind == ours) {
                     merge_sleep(&mut node.sleep, sleep);
@@ -1037,6 +1068,19 @@ fn on_thread(address: &str, prefixes: &[(u128, u32)]) -> bool {
     })
 }
 
+/// Whether a device has the IPv6 `address` on one of its interfaces.
+fn has_address(network: &NetworkInfo, address: &str) -> bool {
+    let Ok(address) = address.parse::<core::net::Ipv6Addr>() else {
+        return false;
+    };
+
+    network
+        .interfaces
+        .iter()
+        .flat_map(|iface| &iface.ipv6_addresses)
+        .any(|own| own.parse::<core::net::Ipv6Addr>() == Ok(address))
+}
+
 /// A device's own extended address: from its Thread diagnostics, else its
 /// Thread interface's hardware address.
 fn own_address(network: &NetworkInfo, diag: &ThreadDiag) -> Option<u64> {
@@ -1577,5 +1621,55 @@ mod tests {
         assert_eq!(hardware_address("00:00:00:00:00:00:00:00"), None);
         assert_eq!(quality(200), 3);
         assert_eq!(thread_mhz(15), Some(2425));
+    }
+
+    #[test]
+    fn routes_without_extended_addresses() {
+        let mut input = healthy();
+        let router = input.devices[0].network.thread.as_mut().unwrap();
+        router.rloc16 = Some(12 << 10);
+        router.neighbors[1].rloc16 = (12 << 10) | 1;
+        // Its own entry and the hub's, without their extended addresses: the
+        // hub is known by its RLOC16, from the neighbor table.
+        router.routes = vec![route(0, 16, 3, 3), route(0, 12, 0, 0)];
+
+        let mesh = build(input);
+
+        let labels: Vec<&str> = mesh.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["ACME Test", "Door sensor", "Google Nest Hub #9206"]
+        );
+        assert_eq!(mesh.links.len(), 2);
+    }
+
+    #[test]
+    fn our_device_on_another_fabric_is_not_a_stranger() {
+        let mut input = healthy();
+        input.border_routers[0].omr_prefix = Some("fdac:bcdf:a3c9:1::/64".into());
+        input.devices[0].network.interfaces = vec![crate::api::NetworkInterfaceInfo {
+            name: "ot1".into(),
+            kind: NetworkKind::Thread,
+            operational: true,
+            hardware_address: "EA:87:02:65:6C:D6:3E:20".into(),
+            ipv4_addresses: Vec::new(),
+            ipv6_addresses: vec!["FDAC:BCDF:A3C9:0001:C3FE:B236:F78E:75F7".into()],
+            off_premise_ipv4: None,
+            off_premise_ipv6: None,
+        }];
+        input.hosts = vec![MatterHost {
+            compressed_fabric_id: 0x095B_A2B5_25E1_16BE,
+            node_id: 0x85F0_9903,
+            host: "E88702FFFE656CD6.local".into(),
+            address: "fdac:bcdf:a3c9:1:c3fe:b236:f78e:75f7".into(),
+            idle_interval_ms: Some(2000),
+            active_interval_ms: Some(300),
+            active_threshold_ms: None,
+            long_idle: None,
+        }];
+
+        let mesh = build(input);
+
+        assert!(mesh.lan_nodes.is_empty());
     }
 }

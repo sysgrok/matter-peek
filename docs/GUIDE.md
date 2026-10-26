@@ -1,147 +1,223 @@
 # Using matter-peek
 
-The web UI (`matter-peek serve`, or the app) has a page for each job:
-**Devices**, **Commission**, **Updates**, **Thread** and the **Assistant**.
-The CLI and the MCP tools do the same: `matter-peek --help` lists the
-commands, and [AI.md](AI.md) the tools.
+The web UI is served by `matter-peek serve`, and is also shown by the app. It
+has one page for each task: **Devices**, **Commission**, **Updates**,
+**Thread** and **Assistant**. The CLI and the MCP tools offer the same
+functions. `matter-peek --help` lists the CLI commands, and [AI.md](AI.md)
+lists the MCP tools.
 
-## Getting devices in
+## Adding devices
 
-Commission a new device over IP, or over Bluetooth LE, handing it the Wi-Fi or
-Thread network to join: from the Commission page, or `matter-peek commission
-<code> --ip <addr>` / `--ble [--wifi <ssid> --wifi-password <pw> |
---thread-dataset <hex>]`. The code can be the passcode, the manual pairing code
-or the QR code's `MT:` payload. The web UI can also scan the QR code with a
-camera (over https or on localhost), and `matter-peek qr <picture>` reads it
-from an image. `matter-peek discover` lists the commissionable devices around.
+New devices can be commissioned over IP, or over Bluetooth LE. When a device is
+commissioned over Bluetooth LE, matter-peek also gives it the Wi-Fi or Thread
+network it should join.
 
-A device already on another controller joins ours through multi-admin: have
-that controller open a pairing window (Google Home: *Linked Matter apps &
-services*; Apple Home: *Turn On Pairing Mode*; Home Assistant: *Share device*)
-and commission it with the code it shows. `matter-peek advertised` lists the
-commissioned devices the network advertises, ours and others'.
+- In the web UI, use the **Commission** page.
+- In the CLI, use `matter-peek commission <code> --ip <addr>`, or
+  `matter-peek commission <code> --ble`. With `--ble`, the network to join is
+  given with `--wifi <ssid> --wifi-password <pw>` or with
+  `--thread-dataset <hex>`.
 
-Bluetooth commissioning needs BlueZ: it works on Linux, but not in the
-Android app yet.
+The code can be the passcode, the manual pairing code or the `MT:` payload of
+the QR code. The web UI can also scan the QR code with a camera; this works
+over https or on localhost. In the CLI, `matter-peek qr <picture>` reads the QR
+code from an image, and `matter-peek discover` lists the commissionable
+devices nearby.
+
+A device that is already used with another controller can be added through
+multi-admin. First, have that controller open a pairing window for the device
+(Google Home: *Linked Matter apps & services*; Apple Home: *Turn On Pairing
+Mode*; Home Assistant: *Share device*). Then commission the device with the
+code that the controller shows. `matter-peek advertised` lists the
+commissioned devices that are advertised on the network, both ours and those of
+other controllers.
+
+Bluetooth commissioning needs BlueZ. It works on Linux, but not yet in the
+Android app.
 
 ## Health, logs and updates
 
-Each device card on the Devices page follows its device live: uptime, reboots
-and operating hours, plus the networks, memory (heap and the tasks' stack
-headroom) and logs one click away. In the terminal, use `matter-peek peek
-<node>` and `matter-peek watch <node>`. `matter-peek logs <node>
-[crash|support|network]` retrieves a diagnostic log, and `matter-peek network
-<node>` shows the networks a device knows and changes them.
+On the **Devices** page, each device has a card that is updated live. It shows
+the uptime, the reboots and the operating hours. From the card you can also
+open the device's networks, its memory (the heap, and how much stack each task
+has left) and its logs.
 
-matter-peek is its devices' OTA Provider. Drop an image on the Updates page
-(or `matter-peek ota upload <file>`), and the cards of the devices it fits
-offer the update and follow its progress (`matter-peek ota update <node>
-<image>`).
+In the CLI:
+
+- `matter-peek peek <node>` reads the health of a device, and
+  `matter-peek watch <node>` follows it live.
+- `matter-peek logs <node> [crash|support|network]` retrieves a diagnostic log.
+- `matter-peek network <node>` shows the networks a device knows, and can
+  change them.
+
+matter-peek acts as the OTA Provider for its devices. To update a device, add
+an image on the **Updates** page, or with `matter-peek ota upload <file>`. The
+cards of the devices that the image is meant for then offer the update, and
+show its progress. In the CLI, `matter-peek ota update <node> <image>` starts
+the update.
 
 ## Filtering devices
 
-One filter language for the web UI's filter box, `matter-peek list <filter>`
-and MCP's `list_devices` `filter`: words match the start of a word of
-anything known of a device (tags, names, the facets' values), and
-`key:value` terms match one facet: `net:thread is:offline`,
-`-eco:google cluster:on-off`, `type:light spec:>=1.4`, `uptime:<1h`,
-`tag:"ground floor"`. `key:a,b` takes either value and `-term` negates.
-`matter-peek filters` lists the facets (network, SSID and Thread network,
-device type, vendor, product, clusters, power, ICD, versions, the other
-controllers it is on, uptime, heap, update, ...) and the `is:` states
-(online, shared, fabrics-full, updatable, sleepy, ...). The web box completes
-the last term, with how many devices have each value; a card's network icon,
-type, vendor and tags add their term.
+The filter box of the web UI, `matter-peek list <filter>` and the `filter`
+argument of the MCP tool `list_devices` all use the same filter language:
+
+- A plain word matches a device if anything known about it has a word that
+  starts with it: its tags, its names, or the values of its facets.
+- A `key:value` term matches one facet, for example `net:thread is:offline`,
+  `-eco:google cluster:on-off`, `type:light spec:>=1.4`, `uptime:<1h` or
+  `tag:"ground floor"`.
+- `key:a,b` matches either value, and `-term` negates a term.
+
+`matter-peek filters` lists the facets and the `is:` states. The facets include
+the network, the SSID and Thread network, the device type, vendor, product,
+clusters, power, ICD, versions, the other controllers the device is on,
+uptime, heap and update. The states include online, shared, fabrics-full,
+updatable and sleepy.
+
+The filter box in the web UI completes the last term, and shows how many
+devices have each value. A card's network icon, device type, vendor and tags
+add their term to the filter.
 
 ## Fabrics: several homes
 
-matter-peek keeps devices on fabrics of its own, each with a root CA of its
-own and a name: homes, customers, or test and production apart. One is the
-default, and can't be deleted. The web UI shows one fabric at a time (picked
-at the top, remembered by the browser): its devices, the Thread mesh of its
-devices, and the fabric a commission puts a device into. The CLI works in
-`--fabric <name|#index|all>` (or `MATTER_PEEK_FABRIC`), else the default, and
-manages them with `matter-peek fabric list|create|rename|default|delete`
-(`delete --decommission` or `--forget` for a fabric with devices); MCP has
-`list_fabrics` and `create/rename/set_default/delete_fabric`, and a `fabric`
-argument on the tools that list or commission (`mcp --fabric` sets the
-default). Devices keep their node IDs unique across fabrics, so every tool
-about one device names it by node ID alone.
+matter-peek keeps its devices on fabrics of its own. Each fabric has its own
+root CA and a name. Fabrics can be used to keep homes, customers, or test and
+production devices apart. One fabric is the default one, and it cannot be
+deleted.
+
+The web UI shows one fabric at a time. You pick it at the top of the page, and
+the browser remembers the choice. The selected fabric decides which devices and
+which Thread mesh are shown, and which fabric a newly commissioned device is
+added to.
+
+In the CLI, commands work on the fabric given with `--fabric <name|#index|all>`
+or with the `MATTER_PEEK_FABRIC` environment variable, and otherwise on the
+default fabric. Fabrics are managed with
+`matter-peek fabric list|create|rename|default|delete`. To delete a fabric that
+still has devices, add `--decommission` or `--forget`.
+
+Over MCP, there are the tools `list_fabrics`, `create_fabric`, `rename_fabric`,
+`set_default_fabric` and `delete_fabric`. The tools that list or commission
+devices take a `fabric` argument, and `matter-peek mcp --fabric` sets its
+default.
+
+Node IDs are unique across all fabrics. Every command or tool that works on a
+single device therefore identifies it by its node ID alone.
 
 ## Sharing a device with another ecosystem
 
-A device on our fabric can join another controller's too (Google Home, Home
-Assistant, Apple Home, ...): the card's Share button, `matter-peek share
-<node> [--minutes 3..15]` (`--status`, `--close`) and the MCP tools
-`open_commissioning_window` / `close_commissioning_window` /
-`commissioning_window` open an enhanced commissioning window on it, with a
-passcode made for that window, and show the code to commission it with: the
-11-digit manual pairing code and the QR code (drawn in the web UI and the
-terminal). The window closes after 15 minutes (3 to 15), or when closed; the
-code works only while it is open. A device with no free fabric is refused.
+A device on our fabric can also be added to another controller, such as Google
+Home, Home Assistant or Apple Home. For this, matter-peek opens an enhanced
+commissioning window on the device, with a passcode created for that window
+only. It then shows the code to commission with: the 11-digit manual pairing
+code and the QR code. The QR code is drawn both in the web UI and in the
+terminal.
 
-The fabrics a device is on (the controllers it belongs to: ours, Google,
-Apple, Home Assistant, ... by their vendor, or the label their controller set)
-come with its health: live on the device card (a click shows each one's
-vendor, fabric ID and the device's node ID there), in `matter-peek peek
-<node>` and in the MCP tool `peek_device`. Another controller's fabric can be
-removed from a device (the popup, `matter-peek remove-fabric <node> <index>`,
-MCP `remove_device_fabric`); ours is removed by decommissioning.
+- In the web UI, use the **Share** button on the device card.
+- In the CLI, use `matter-peek share <node> [--minutes 3..15]`. `--status`
+  shows the state of the window, and `--close` closes it.
+- Over MCP, use `open_commissioning_window`, `close_commissioning_window` and
+  `commissioning_window`.
+
+The window closes after 15 minutes (any time from 3 to 15 minutes can be
+chosen), or when it is closed. The code only works while the window is open. A
+device that has no free fabric is refused.
+
+The fabrics a device is on are shown together with its health. These are the
+controllers the device belongs to: ours, Google, Apple, Home Assistant and
+others, named by their vendor or by the label their controller set. They are
+shown live on the device card, where a click shows each fabric's vendor, its
+fabric ID and the device's node ID on it. They are also shown by
+`matter-peek peek <node>` and by the MCP tool `peek_device`.
+
+Another controller's fabric can be removed from a device: in the pop-up, with
+`matter-peek remove-fabric <node> <index>`, or with the MCP tool
+`remove_device_fabric`. Our own fabric is removed by decommissioning the
+device.
 
 ## Time: a time source for our devices
 
-matter-peek serves this host's clock to the devices on its fabrics (the Time
-Synchronization cluster on its node), and sets their clocks from it: their UTC
-time; their time zone and daylight saving times, from this host's zone, if
-they keep them; and itself as their trusted time source, if they take their
-time from a Matter node, which they then read it from. It does so once a
-device is commissioned (leaving another controller's time source in place),
-and on demand: the card's Clock button, `matter-peek time <node> [--set]`, and
-the MCP tools `device_time` / `set_device_time`. Reading a device's clock
-shows its time and how far it is from ours, its accuracy and source, its zone,
-DST and local time.
+matter-peek serves this host's clock to the devices on its fabrics, through the
+Time Synchronization cluster on its own node. It also sets the clocks of the
+devices:
+
+- their UTC time;
+- their time zone and daylight saving times, taken from this host's time zone,
+  if the device keeps them;
+- matter-peek itself as their trusted time source, if the device takes its
+  time from a Matter node. The device then reads the time from matter-peek.
+
+matter-peek does this once a device is commissioned, but it leaves another
+controller's time source in place. It can also be done on demand: with the
+**Clock** button on the device card, with `matter-peek time <node> [--set]`,
+or with the MCP tools `device_time` and `set_device_time`.
+
+Reading a device's clock shows its time and how far it is from ours, its
+accuracy and its time source, its time zone, its DST offset and its local
+time.
 
 ## Thread mesh
 
-The Thread page of the web UI, `matter-peek thread` (`thread findings` for the
-findings alone) and the MCP tools `thread_mesh` / `thread_findings` show the
-Thread mesh as our Thread devices see it, from Matter data only (no Thread
-credentials): each device's Thread Network Diagnostics (its neighbour and
-route tables), merged into one graph, labelled with the border routers' MeshCoP
-adverts (`_meshcop._udp`). The nodes are counted by role, and the links show
-the link quality (0–3) and signal each way. How a node sleeps comes from its
-role, our devices' ICD Management cluster and the `_matter._tcp` adverts
-(`SII`/`SAI`/`ICD`); whether a sleepy node uses CSL is not visible. Other
-fabrics' Matter nodes whose address is in a border router's prefix are listed
-as seen on the LAN, with their fabrics and how they sleep: no table we read
-places them in the mesh. The findings, in plain words: several
-networks on the LAN, a split network, weak or one-way links, routers some of
-our devices depend on, a single border router, devices that keep changing
-their parent or losing the network, a Thread channel within a Wi-Fi channel
-our Wi-Fi devices use, OpenThread's default credentials, and no route from
-this machine to a network's prefix (Linux). It reads the devices one after
-another, so it takes a few seconds; only the links our devices report are
-known.
+The **Thread** page of the web UI, `matter-peek thread` and the MCP tool
+`thread_mesh` show the Thread mesh as our Thread devices see it.
+`matter-peek thread findings` and the MCP tool `thread_findings` show only the
+findings.
+
+The mesh is built from Matter data only, so no Thread credentials are needed.
+matter-peek reads the Thread Network Diagnostics of each device (its neighbour
+and route tables), merges them into one graph, and labels it with the border
+routers' MeshCoP adverts (`_meshcop._udp`). The nodes are counted by role. For
+each link, the link quality (0–3) and the signal are shown in both directions.
+
+How a node sleeps is taken from its role, from the ICD Management cluster of
+our devices, and from the `_matter._tcp` adverts (`SII`, `SAI` and `ICD`).
+Whether a sleepy node uses CSL cannot be seen.
+
+Matter nodes of other fabrics whose address is in a border router's prefix are
+listed as seen on the LAN, together with their fabrics and how they sleep. They
+are not placed in the mesh, because none of the tables that matter-peek reads
+places them there.
+
+The findings are described in plain words. matter-peek looks for:
+
+- several Thread networks on the LAN;
+- a network that is split;
+- weak or one-way links;
+- routers that some of our devices depend on;
+- a single border router;
+- devices that keep changing their parent, or keep losing the network;
+- a Thread channel within a Wi-Fi channel that our Wi-Fi devices use;
+- OpenThread's default credentials;
+- no route from this machine to a network's prefix (on Linux).
+
+matter-peek reads the devices one after another, so this takes a few seconds.
+Only the links that our devices report are known.
 
 ## The data model
 
-Every endpoint, cluster, attribute and command of a device, by name, with
-values as JSON (enums by name, bitmaps as bit names, structs by field name):
-the card's Model button (a tree of endpoints and clusters; writable attributes
-edited in place, commands invoked with a form of their fields), `matter-peek
-model <node> [--endpoint N] [--cluster C] [--live]`, `matter-peek write` /
-`invoke`, and the MCP tools `read_model` / `write_attribute` /
-`invoke_command`. Any cluster in rs-matter's IDL works, with no code per
-cluster.
+matter-peek shows every endpoint, cluster, attribute and command of a device
+by name. Values are shown as JSON: enums by name, bitmaps as the names of their
+bits, and structs by field name. Any cluster in rs-matter's IDL works, without
+code for each cluster.
 
-Its events too (switch presses, alarms, faults, boots, state changes), with
-their fields by name: the popup's Events timeline and each cluster's events,
-`matter-peek events <node> [--endpoint N] [--cluster C] [--live]`, and the
-MCP tool `read_events`.
+- In the web UI, the **Model** button on the device card opens a tree of
+  endpoints and clusters. Writable attributes can be edited in place, and
+  commands are invoked with a form for their fields.
+- In the CLI, use
+  `matter-peek model <node> [--endpoint N] [--cluster C] [--live]`,
+  `matter-peek write` and `matter-peek invoke`.
+- Over MCP, use `read_model`, `write_attribute` and `invoke_command`.
 
-A device card turns over to the controls of its application endpoints
-(switches, sliders, choices, buttons and readings, with colour pickers for
-lights, lock and charger switches, remotes for TVs) and their latest event;
-the Health | Controls switch on the Devices page turns all the cards shown.
-The controls, the events and the Model popup follow the device live, through
-the same subscription as its health.
+Events are shown too, such as switch presses, alarms, faults, boots and state
+changes, with their fields by name. In the web UI they appear in the pop-up's
+**Events** timeline and with each cluster. In the CLI, use
+`matter-peek events <node> [--endpoint N] [--cluster C] [--live]`, and over
+MCP, `read_events`.
+
+A device card can also be turned over to show the controls of its application
+endpoints, together with their latest event. The controls are switches,
+sliders, choices, buttons and readings, with colour pickers for lights, lock
+and charger switches, and remotes for TVs. The **Health | Controls** switch on
+the Devices page turns all the shown cards at once. The controls, the events
+and the Model pop-up follow the device live, through the same subscription as
+its health.

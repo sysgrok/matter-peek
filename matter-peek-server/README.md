@@ -1,14 +1,15 @@
 # matter-peek-server
 
-The server of [matter-peek](https://github.com/sysgrok/matter-peek): a `Hub` (a
-controller and its assistant, for the connections to them) and the API over
-WebSocket/JSON with the web UI, on one port. The `matter-peek` executable
-(`matter-peek serve`) and `matter-peek-app` embed it.
+This crate is the server of [matter-peek](https://github.com/sysgrok/matter-peek).
+It contains a `Hub`, which is a controller and its assistant, shared by the
+connections to them. It also serves the API over WebSocket/JSON together with
+the web UI, on one port. The `matter-peek` executable (`matter-peek serve`) and
+`matter-peek-app` embed it.
 
-The web UI (`matter-peek-web`) is built into the library, gzipped: from
-`MATTER_PEEK_WEB_DIST` if set, else from `../matter-peek-web/dist` in the
-repository, else from `web-dist`, the copy kept in git and in the published
-crate.
+The web UI (`matter-peek-web`) is built into the library, with each file
+gzipped. It is taken from `MATTER_PEEK_WEB_DIST` if that is set, otherwise from
+`../matter-peek-web/dist` in the repository, and otherwise from `web-dist`, the
+copy that is kept in git and in the published crate.
 
 ## License
 

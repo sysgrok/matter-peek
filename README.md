@@ -1,30 +1,37 @@
 # matter-peek
 
-**The Matter health & diagnostics sidekick your controller never came with.**
+**A health and diagnostics tool for Matter devices, to use next to your existing controller.**
 
 [![CI](https://github.com/sysgrok/matter-peek/actions/workflows/ci.yml/badge.svg)](https://github.com/sysgrok/matter-peek/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-Google Home, Apple Home and Alexa tell you that a device is *not responding*. **matter-peek tells you why.**
+When Google Home, Apple Home or Alexa report a device as *not responding*, they usually don't say why. matter-peek can help you find out.
 
-It joins your Matter devices as one more admin, next to the controller you already use, and shows you what they know about themselves: uptime and reboots, Wi-Fi signal and Thread mesh links, free heap and stack, crash logs.
+It is added to your Matter devices as an additional admin, next to the controller you already use, and shows what the devices report about themselves: uptime and reboots, Wi-Fi signal and Thread mesh links, free heap and stack, and crash logs.
 
-It commissions devices, opens up their whole data model and updates their firmware. When you'd rather ask than click, an AI assistant digs through all of it for you.
+It can also commission devices, show and edit their full data model, and update their firmware. Optionally, an AI assistant can look through all of this for you and answer your questions about it.
 
-It runs on your LAN and needs no account. It is one self-contained executable, written in Rust on [rs-matter](https://github.com/project-chip/rs-matter).
+It runs locally on your network and does not need an account. It is a single self-contained executable, written in Rust and built on [rs-matter](https://github.com/project-chip/rs-matter).
 
-<!-- TODO: a screenshot or a short screen recording of the web UI -->
+<a href="https://github.com/sysgrok/matter-peek/blob/main/docs/SCREENSHOTS.md">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/devices-dark.png">
+    <img alt="The Devices page: a card per device with its live health" src="docs/screenshots/devices.png">
+  </picture>
+</a>
 
-## Highlights
+See the [screenshots](https://github.com/sysgrok/matter-peek/blob/main/docs/SCREENSHOTS.md) for more.
 
-- **Live health and crash logs.** Uptime, reboots, network faults, heap and stacks, followed live; crash and diagnostic logs pulled over BDX.
-- **Commission and share.** Over IP or Bluetooth LE, onto Wi-Fi or Thread. Adopt devices from other ecosystems, or share yours with them.
-- **The whole data model.** Every cluster, attribute, command and event, by name and live, with ready-made controls on top.
-- **The Thread mesh, from Matter alone.** No Thread credentials needed, with what's wrong in plain words.
-- **OTA updates.** matter-peek is your devices' OTA Provider: drop in an image and push it.
-- **AI included.** An MCP server for Claude, Cursor & co., and a built-in assistant on any OpenAI-compatible model, local ones included.
+## Features
 
-And more: [several fabrics, network management, a time source, one filter language](https://github.com/sysgrok/matter-peek/blob/main/docs/GUIDE.md), plus a web UI, a CLI and an app, all on one API.
+- **Health and logs.** Uptime, reboots, network faults, and heap and stack usage, updated live. Crash and diagnostic logs are retrieved over BDX.
+- **Commissioning and sharing.** Commissioning over IP or Bluetooth LE, onto Wi-Fi or Thread. Devices can be added from other ecosystems, or shared with them.
+- **Data model.** All clusters, attributes, commands and events, by name and updated live, with controls for common device types.
+- **Thread mesh.** A view of the Thread mesh built from Matter data only, without Thread credentials. Problems it detects are described in plain words.
+- **OTA updates.** matter-peek acts as the OTA Provider for your devices: upload an image, then start the update.
+- **AI.** An MCP server for Claude, Cursor and other MCP clients, and a built-in assistant that works with any OpenAI-compatible model, including local ones.
+
+Other features include [multiple fabrics, network management, a time source and a common filter language](https://github.com/sysgrok/matter-peek/blob/main/docs/GUIDE.md). The web UI, the CLI and the app all use the same API.
 
 ## Status
 
@@ -40,24 +47,21 @@ Until then, build it from GIT, as below.
 
 ## Install
 
-matter-peek comes as two executables:
+matter-peek consists of two executables:
 
-- **`matter-peek`**: the server with its web UI, the CLI, the MCP server and the
-  terminal chat, in one file. It is at home on headless boxes too: a Raspberry
-  Pi, a NAS, a container.
-- **`matter-peek-app`**: the web UI as a desktop app, with a controller of its
-  own inside or connected to a `matter-peek` server.
+- **`matter-peek`**: the server with the web UI, the CLI, the MCP server and the terminal chat, in a single file. It also runs on headless machines, such as a Raspberry Pi, a NAS or a container.
+- **`matter-peek-app`**: the web UI as a desktop app. It either runs its own controller, or connects to a `matter-peek` server.
 
-Both build on Linux (x86_64 or aarch64) with Rust 1.91 or newer: the distribution's, or [rustup](https://rustup.rs)'s.
+Both can be built on Linux (x86_64 or aarch64) with Rust 1.91 or newer. You can use the Rust packaged by your distribution, or install it with [rustup](https://rustup.rs).
 
 ```sh
-# The distribution's Rust, which brings the C toolchain Rust links with
+# Option 1: Rust from your distribution (this also installs the C toolchain Rust needs for linking)
 sudo apt install cargo                          # Ubuntu 26.04, Debian testing
 sudo apt install -t trixie-backports cargo      # Debian 13, Raspberry Pi OS (backports enabled)
-sudo apt install cargo-1.91                     # Ubuntu 24.04: then `cargo-1.91` instead of `cargo`
+sudo apt install cargo-1.91                     # Ubuntu 24.04: then use `cargo-1.91` instead of `cargo`
 
-# ... or rustup's
-sudo apt install build-essential                # the C toolchain Rust links with
+# Option 2: Rust from rustup
+sudo apt install build-essential                # the C toolchain Rust needs for linking
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh    # then open a new shell
 ```
 
@@ -74,9 +78,13 @@ sudo apt install pkg-config libwebkit2gtk-4.1-dev libdbus-1-dev
 cargo install --locked --git https://github.com/sysgrok/matter-peek matter-peek-app
 ```
 
-`cargo install` puts them in `~/.cargo/bin`, which rustup adds to `PATH`; with the distribution's Rust, add it yourself. The packages are Debian's, Ubuntu's and Raspberry Pi OS's; other distributions have them under their own names. At run time, both find devices through Avahi and commission over Bluetooth through BlueZ, which most desktops already run (else `sudo apt install avahi-daemon bluez`).
+Notes:
 
-Static and Raspberry Pi builds, and the Android app, are covered in [Building](https://github.com/sysgrok/matter-peek/blob/main/docs/BUILDING.md).
+- `cargo install` puts the executables in `~/.cargo/bin`. rustup adds that directory to your `PATH` automatically. If you installed Rust from your distribution, that is not the case, and you need to add it to your `PATH` yourself.
+- The package names above are for Debian, Ubuntu and Raspberry Pi OS. Other distributions provide the same packages under their own names.
+- At run time, both executables use Avahi to find devices and BlueZ to commission over Bluetooth. Most desktop systems already run both. If yours does not, install them with `sudo apt install avahi-daemon bluez`.
+
+Static builds, Raspberry Pi builds and the Android app are described in [Building](https://github.com/sysgrok/matter-peek/blob/main/docs/BUILDING.md).
 
 ## Quick start
 
@@ -84,39 +92,37 @@ Static and Raspberry Pi builds, and the Android app, are covered in [Building](h
 matter-peek serve        # then open http://127.0.0.1:8087
 ```
 
-To get your devices in, commission a new one from the **Commission** page, or
-adopt one you already have. Have its current controller share it (Google Home:
-*Linked Matter apps & services*; Apple Home: *Turn On Pairing Mode*; Home
-Assistant: *Share device*), then commission it with the code it shows.
+To add devices, either commission a new device from the **Commission** page, or add a device you already use with another controller. For the latter, first share the device from that controller (Google Home: *Linked Matter apps & services*; Apple Home: *Turn On Pairing Mode*; Home Assistant: *Share device*), then commission it with the code it shows.
 
 The same from the command line:
 
 ```sh
-matter-peek discover                         # commissionable devices nearby
+matter-peek discover                         # list the commissionable devices nearby
 matter-peek commission 34970112332 --ble --wifi Home --wifi-password '...'
-matter-peek list net:thread is:offline       # the filter language
-matter-peek peek 0x1B67B                     # a device's health
-matter-peek logs 0x1B67B crash               # its crash log
-matter-peek thread findings                  # what is wrong with the mesh
+matter-peek list net:thread is:offline       # list the devices matching a filter
+matter-peek peek 0x1B67B                     # show a device's health
+matter-peek logs 0x1B67B crash               # retrieve its crash log
+matter-peek thread findings                  # show the problems found in the Thread mesh
 matter-peek --help
 ```
 
-With a server running, the CLI goes through it: add `--server
-ws://127.0.0.1:8087`. Without a server, the CLI runs a controller of its own.
+If a server is running, pass `--server ws://127.0.0.1:8087` so that the CLI uses it. Without a server, the CLI runs its own controller.
 
-With AI:
+Using AI:
 
 ```sh
-# Claude Code, or any MCP client: read-only unless you add --allow-mutate
+# Claude Code, or any other MCP client (read-only unless you add --allow-mutate)
 claude mcp add matter-peek -- matter-peek --server ws://127.0.0.1:8087 mcp
 
-# The built-in assistant, here on a local model
+# The built-in assistant, here with a local model
 matter-peek assistant set --url http://localhost:11434/v1 --model qwen3.5:9b
 matter-peek chat "Which of my Thread devices have weak links?"
 ```
 
 ## Documentation
 
+- [Screenshots](https://github.com/sysgrok/matter-peek/blob/main/docs/SCREENSHOTS.md):
+  the pages and pop-ups of the web UI
 - [User guide](https://github.com/sysgrok/matter-peek/blob/main/docs/GUIDE.md):
   devices and filters, fabrics, sharing, time, the Thread mesh, the data model
 - [AI](https://github.com/sysgrok/matter-peek/blob/main/docs/AI.md): the MCP
