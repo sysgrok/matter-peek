@@ -14,7 +14,9 @@
 //! *inbound* IM exchanges over the same CASE session. The controller node's one
 //! responder ([`crate::node::run`]) takes them, and [`Reports`] routes each to its
 //! subscription by publisher and subscription ID, as a [`DeviceHealth`] delta.
-//! A report for no subscription of ours is refused, so the device drops it.
+//! A report for no subscription of ours is refused, so the device drops it;
+//! with none of that device at all, it is noted as a stray (see
+//! [`Reports::wait_stray`]): the device is awake, and lost ours.
 //!
 //! ## Liveness: watchdog + auto re-establish
 //!
@@ -81,6 +83,10 @@ const MODEL_MIN_INTERVAL_FLOOR_SECS: u16 = 2;
 /// How long a subscription keeps a wider coverage than its listeners want: a
 /// view opened again soon needs no new priming report.
 const NARROW_GRACE: Duration = Duration::from_secs(3 * 60);
+
+/// How long a subscription of a device that sleeps long waits for it to wake up
+/// before it tries anyway: in case its Check-Ins go astray.
+const SLEEPY_WAIT: Duration = Duration::from_secs(30 * 60);
 
 /// The Descriptor cluster's list of a node's endpoints, on the root endpoint.
 const DESCRIPTOR: u32 = 0x001D;
@@ -253,12 +259,29 @@ pub enum SubState {
 #[derive(Default)]
 pub struct Reports {
     slots: RefCell<Vec<Rc<Slot>>>,
+    /// The devices that reported for no subscription of ours, not yet taken.
+    strays: RefCell<Vec<u64>>,
+    stray: Notification,
 }
 
 impl Reports {
     pub const fn new() -> Self {
         Self {
             slots: RefCell::new(Vec::new()),
+            strays: RefCell::new(Vec::new()),
+            stray: Notification::new(),
+        }
+    }
+
+    /// The next device that reported for a subscription of ours we no longer
+    /// have, with no other of it: it is awake now.
+    pub async fn wait_stray(&self) -> u64 {
+        loop {
+            if let Some(node_id) = self.strays.borrow_mut().pop() {
+                return node_id;
+            }
+
+            self.stray.wait().await;
         }
     }
 
@@ -316,6 +339,19 @@ impl ReportDataHandler for Reports {
                 "report for no subscription of ours: sub_id={:?} peer=0x{:016X}",
                 sub.subscription_id, sub.peer_node_id
             );
+
+            let peer = sub.peer_node_id;
+            let ours = self
+                .slots
+                .borrow()
+                .iter()
+                .any(|slot| slot.peer_node_id == peer);
+            let mut strays = self.strays.borrow_mut();
+            if !ours && !strays.contains(&peer) {
+                strays.push(peer);
+                self.stray.notify();
+            }
+
             return Err(IMStatusCode::InvalidSubscription);
         };
 
@@ -384,6 +420,10 @@ impl Drop for Registration<'_> {
 /// - `retry` cuts the backoff before the next attempt short, e.g. once the
 ///   device answered something else; it re-establishes a live subscription
 ///   too, e.g. once the device checked in, which it does when it lost it.
+/// - `sleepy` says the device sleeps long: then an attempt waits for it to
+///   wake up (`retry`, at most [`SLEEPY_WAIT`]) instead of a backoff, as one
+///   made while it sleeps waits out retransmissions paced by its idle
+///   interval.
 ///
 /// A change of `scope` re-establishes the subscription with the paths it
 /// needs. Over Thread (`thread`), `gate` lets a few at a time take the priming
@@ -404,6 +444,7 @@ pub async fn subscribe<C, FU, FM, FS>(
     which: DiagSet,
     scope: &Scope,
     retry: &Notification,
+    sleepy: &Cell<bool>,
     mut on_update: FU,
     mut on_model: FM,
     mut on_state: FS,
@@ -441,7 +482,17 @@ where
     // table, turning a transient failure into a permanent one. A successful pass
     // resets the backoff.
     let mut backoff = REESTABLISH_BACKOFF_MIN;
+    // The device said it is awake (`retry`): make the subscription now.
+    let mut awake = false;
     loop {
+        if sleepy.get() && !awake {
+            info!("subscription 0x{node_id:016X}: waiting for the device to wake up");
+            if let Either::Second(()) = select(retry.wait(), Timer::after(SLEEPY_WAIT)).await {
+                info!("subscription 0x{node_id:016X}: no wake-up seen; trying anyway");
+            }
+        }
+        awake = false;
+
         let coverage = scope.current();
         if coverage == Coverage::Application && endpoints.is_none() {
             match app_endpoints(matter, crypto, dev).await {
@@ -449,7 +500,9 @@ where
                 Err(e) => {
                     warn!("subscribe(0x{node_id:016X}): no endpoints: {e:?}");
                     on_state(SubState::Offline);
-                    backoff = back_off(backoff, retry).await;
+                    if !sleepy.get() {
+                        backoff = back_off(backoff, retry).await;
+                    }
                     continue;
                 }
             }
@@ -494,10 +547,11 @@ where
         }
 
         match outcome {
-            Ok(()) => {
+            Ok(Pass::Renew) => awake = true,
+            Ok(Pass::Ended) => {
                 // Stale or rescoped: re-establish. If the pass had been
                 // healthy, promptly; otherwise back off.
-                if !established.get() {
+                if !established.get() && !sleepy.get() {
                     backoff = back_off(backoff, retry).await;
                 }
             }
@@ -510,7 +564,9 @@ where
                     backoff.as_secs()
                 );
                 on_state(SubState::Offline);
-                backoff = back_off(backoff, retry).await;
+                if !sleepy.get() {
+                    backoff = back_off(backoff, retry).await;
+                }
             }
         }
     }
@@ -559,10 +615,17 @@ async fn back_off(backoff: Duration, retry: &Notification) -> Duration {
     }
 }
 
-/// One establish-and-watch pass. Returns `Ok(())` when the subscription went
-/// stale or its scope changed (caller should re-establish immediately), or
-/// `Err` on an establishment/transport failure (caller should back off then
-/// retry).
+/// How an establish-and-watch pass ended without an error.
+enum Pass {
+    /// The subscription went stale, or its scope changed.
+    Ended,
+    /// The device lost it (`retry`), and is awake: make it again now.
+    Renew,
+}
+
+/// One establish-and-watch pass. Returns how it ended (caller should
+/// re-establish immediately), or `Err` on an establishment/transport failure
+/// (caller should back off then retry).
 #[allow(clippy::too_many_arguments)]
 async fn run_once<C, FU, FM, FS>(
     matter: &Matter<'_>,
@@ -581,7 +644,7 @@ async fn run_once<C, FU, FM, FS>(
     on_update: &mut FU,
     on_model: &mut FM,
     on_state: &mut FS,
-) -> Result<(), Error>
+) -> Result<Pass, Error>
 where
     C: Crypto + Copy,
     FU: FnMut(DeviceHealth),
@@ -643,7 +706,7 @@ where
                 (now - slot.last_report.get()).as_secs()
             );
             on_state(SubState::Offline);
-            return Ok(());
+            return Ok(Pass::Ended);
         }
 
         // A narrowing coming due wakes us too.
@@ -662,7 +725,7 @@ where
             Either4::Third(()) => debug!("subscription 0x{node_id:016X}: scope changed"),
             Either4::Fourth(()) => {
                 info!("subscription 0x{node_id:016X}: the device lost it; re-establishing");
-                return Ok(());
+                return Ok(Pass::Renew);
             }
             _ => {}
         }
@@ -672,7 +735,7 @@ where
                 "subscription 0x{node_id:016X}: covering {:?} from now on",
                 scope.current()
             );
-            return Ok(());
+            return Ok(Pass::Ended);
         }
     }
 }

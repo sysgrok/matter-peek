@@ -2,6 +2,8 @@
 
 use alloc::vec::Vec;
 
+use embassy_futures::select::{select, Either};
+
 use log::{info, warn};
 
 use rs_matter::crypto::Crypto;
@@ -16,10 +18,30 @@ use crate::ota::OtaImageStore;
 use super::{failed, Ctx};
 
 impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
-    /// Take the Check-Ins from `payloads`, until the channel closes.
+    /// Take the Check-Ins from `payloads`, until the channel closes, and the
+    /// reports for subscriptions we lost: either says that a device is awake,
+    /// and without our subscription.
     pub(super) async fn run_check_ins(&self, payloads: async_channel::Receiver<Vec<u8>>) {
-        while let Ok(payload) = payloads.recv().await {
-            self.take_check_in(&payload).await;
+        loop {
+            match select(payloads.recv(), self.reports.wait_stray()).await {
+                Either::First(Ok(payload)) => self.take_check_in(&payload).await,
+                Either::First(Err(_)) => break,
+                Either::Second(node_id) => {
+                    info!(
+                        "icd: node 0x{node_id:016X} reported for a subscription we lost; \
+                         subscribing again"
+                    );
+                    self.resubscribe(node_id);
+                }
+            }
+        }
+    }
+
+    /// Make our subscription of a device again now, if we have one: it is
+    /// awake, and lost it.
+    fn resubscribe(&self, node_id: u64) {
+        if let Some(watch) = self.subs.borrow().get(&node_id) {
+            watch.retry.notify();
         }
     }
 
@@ -53,9 +75,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         info!("icd: node 0x{node_id:016X} checked in (counter {counter})");
 
         self.set_online(node_id, true);
-        if let Some(watch) = self.subs.borrow().get(&node_id) {
-            watch.retry.notify();
-        }
+        self.resubscribe(node_id);
 
         // Half its counter values are used: a fresh key, while it is awake.
         if refresh {
@@ -101,6 +121,11 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             self.forget_icd_client(dev.handle)?;
         }
 
+        // Its subscription waits for it to wake up from now on, or no longer.
+        if let Some(watch) = self.subs.borrow().get(&node_id) {
+            watch.sleepy.set(register);
+        }
+
         let ident = self.controller.read_basic_info(dev.handle).await;
         self.refresh_listed(node_id, ident);
 
@@ -123,6 +148,14 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             Ok(()) => info!("service: registered for the Check-Ins of node 0x{node_id:016X}"),
             Err(e) => warn!("service: node 0x{node_id:016X} idles long, but {e}"),
         }
+    }
+
+    /// Whether we are registered for the Check-Ins of `handle`: then it sleeps
+    /// long.
+    pub(super) fn has_icd_client(&self, handle: DeviceHandle) -> bool {
+        self.store
+            .load_icd_clients()
+            .is_ok_and(|clients| clients.iter().any(|c| c.handle == handle))
     }
 
     /// Drop our registration for the Check-Ins of `handle`, if any.

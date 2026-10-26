@@ -1,5 +1,7 @@
 //! Live health subscriptions: one per device, shared by all its listeners.
 
+use core::cell::Cell;
+
 use alloc::rc::Rc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -33,6 +35,8 @@ pub(super) struct Watch {
     stop: async_channel::Sender<()>,
     /// Cuts the wait before the next attempt to re-establish it short.
     pub(super) retry: Rc<Notification>,
+    /// Whether the device sleeps long: we are registered for its Check-Ins.
+    pub(super) sleepy: Rc<Cell<bool>>,
     /// The listeners, by ID.
     listeners: Vec<(u64, Arc<dyn HealthListener>)>,
     /// The listeners of the data model, by ID, with what each wants covered.
@@ -56,10 +60,11 @@ impl Watch {
         &self.health
     }
 
-    fn new(stop: async_channel::Sender<()>, retry: Rc<Notification>) -> Self {
+    fn new(stop: async_channel::Sender<()>, retry: Rc<Notification>, sleepy: bool) -> Self {
         Self {
             stop,
             retry,
+            sleepy: Rc::new(Cell::new(sleepy)),
             listeners: Vec::new(),
             model_listeners: Vec::new(),
             scope: Rc::new(Scope::new()),
@@ -190,6 +195,7 @@ pub(super) struct SubJob {
     /// watch is still this subscription's.
     my_stop: async_channel::Sender<()>,
     retry: Rc<Notification>,
+    sleepy: Rc<Cell<bool>>,
     scope: Rc<Scope>,
     /// Whether the device is on Thread.
     thread: bool,
@@ -245,13 +251,15 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         }
 
         let (stop, stop_rx) = async_channel::bounded(1);
-        let watch = Watch::new(stop.clone(), Rc::new(Notification::new()));
+        let sleepy = self.has_icd_client(dev.handle);
+        let watch = Watch::new(stop.clone(), Rc::new(Notification::new()), sleepy);
         let job = SubJob {
             node_id,
             handle: dev.handle,
             stop_rx,
             my_stop: stop,
             retry: watch.retry.clone(),
+            sleepy: watch.sleepy.clone(),
             scope: watch.scope.clone(),
             thread: dev.network == Some(NetworkKind::Thread),
         };
@@ -329,6 +337,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             stop_rx,
             my_stop,
             retry,
+            sleepy,
             scope,
             thread,
         } = job;
@@ -353,6 +362,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             DiagSet::LIVE,
             &scope,
             &retry,
+            &sleepy,
             |mut health| {
                 self.mark_our_fabric(node_id, &mut health);
                 with_watch(&mut |watch| watch.report(node_id, health.clone()))

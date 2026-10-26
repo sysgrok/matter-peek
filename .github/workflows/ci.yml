@@ -20,6 +20,9 @@ env:
   CARGO_TERM_COLOR: always
   # Fail the build on any rustc/cargo warning, not just clippy lints.
   RUSTFLAGS: -Dwarnings
+  # No debug info: it is half of a target dir (and of its cache), and the
+  # runners' disks are small.
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
   # Native workspace (matter-peek-core, matter-peek-server, matter-peek), on

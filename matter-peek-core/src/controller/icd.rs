@@ -145,6 +145,31 @@ pub async fn unregister<C: Crypto>(
         .await
 }
 
+/// Ask the device to stay active for `duration_ms` more; returns how long it
+/// promises to (it may cap the request at 30 s, or promise longer).
+pub async fn stay_active<C: Crypto>(
+    matter: &Matter<'_>,
+    crypto: C,
+    fab_idx: NonZeroU8,
+    node_id: u64,
+    duration_ms: u32,
+) -> Result<u32, Error> {
+    let exchange = Exchange::initiate(matter, crypto, fab_idx, node_id).await?;
+    let handle = exchange
+        .icd_management()
+        .stay_active_request(ROOT_ENDPOINT_ID, |req| {
+            req.stay_active_duration(duration_ms)?.end()
+        })
+        .await?;
+
+    let promised = handle
+        .response()
+        .and_then(|resp| resp.promised_active_duration());
+    handle.complete().await?;
+
+    promised
+}
+
 /// Which of `clients` sent the Check-In `payload`, if any: its index, and the
 /// counter of the Check-In.
 pub fn whose<C: Crypto>(crypto: C, clients: &[IcdClient], payload: &[u8]) -> Option<(usize, u32)> {
