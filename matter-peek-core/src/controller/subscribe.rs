@@ -40,7 +40,8 @@
 use core::cell::{Cell, RefCell};
 use core::num::NonZeroU8;
 
-use embassy_futures::select::{select, select3, Either, Either3};
+use embassy_futures::poll_once;
+use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_time::{Duration, Instant, Timer};
 
 use log::{debug, info, warn};
@@ -381,7 +382,8 @@ impl Drop for Registration<'_> {
 ///   (re-)establishment, `Offline` when the subscription went stale or could not
 ///   be established. The UI uses these to show "live" vs. "offline".
 /// - `retry` cuts the backoff before the next attempt short, e.g. once the
-///   device answered something else.
+///   device answered something else; it re-establishes a live subscription
+///   too, e.g. once the device checked in, which it does when it lost it.
 ///
 /// A change of `scope` re-establishes the subscription with the paths it
 /// needs. Over Thread (`thread`), `gate` lets a few at a time take the priming
@@ -474,6 +476,7 @@ where
                 thread,
                 which,
                 scope,
+                retry,
                 coverage,
                 &paths,
                 &events,
@@ -570,6 +573,7 @@ async fn run_once<C, FU, FM, FS>(
     thread: bool,
     which: DiagSet,
     scope: &Scope,
+    retry: &Notification,
     coverage: Coverage,
     paths: &[AttrPath],
     events: &[EventPath],
@@ -611,6 +615,9 @@ where
         max_int_secs: max_int,
     });
 
+    // A renewal asked for before this subscription was made is moot.
+    let _ = poll_once(retry.wait());
+
     let window = Duration::from_secs(max_int as u64)
         + report_round_trip(matter, fab_idx, node_id) * ROUND_TRIPS;
     info!(
@@ -644,10 +651,20 @@ where
             .narrow_at
             .get()
             .map_or(deadline, |at| at.min(deadline));
-        if let Either3::Third(()) =
-            select3(slot.received.wait(), Timer::at(wake), scope.changed.wait()).await
+        match select4(
+            slot.received.wait(),
+            Timer::at(wake),
+            scope.changed.wait(),
+            retry.wait(),
+        )
+        .await
         {
-            debug!("subscription 0x{node_id:016X}: scope changed");
+            Either4::Third(()) => debug!("subscription 0x{node_id:016X}: scope changed"),
+            Either4::Fourth(()) => {
+                info!("subscription 0x{node_id:016X}: the device lost it; re-establishing");
+                return Ok(());
+            }
+            _ => {}
         }
 
         if scope.settle() || scope.current() != coverage {

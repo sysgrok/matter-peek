@@ -409,6 +409,30 @@ impl MatterPeek {
         .await
     }
 
+    /// Register for the Check-Ins of a listed device that can idle long: it
+    /// then sleeps long between its active periods, and checks in with us when
+    /// it wakes and our subscription is gone. A commission registers by itself.
+    pub async fn register_check_ins(&self, node_id: u64) -> Result<(), PeekError> {
+        self.call(|reply| Op::CheckIns {
+            node_id,
+            register: true,
+            reply,
+        })
+        .await
+    }
+
+    /// Drop our registration for the Check-Ins of a listed device: with no
+    /// other client registered, it idles short again, reachable within
+    /// seconds.
+    pub async fn unregister_check_ins(&self, node_id: u64) -> Result<(), PeekError> {
+        self.call(|reply| Op::CheckIns {
+            node_id,
+            register: false,
+            reply,
+        })
+        .await
+    }
+
     /// Follow the health of a listed device live, until the returned
     /// subscription is stopped or dropped. `listener` first gets the health and
     /// state known so far, if any. One device subscription serves all of a
@@ -877,6 +901,11 @@ pub(crate) enum Op {
     Identify {
         node_id: u64,
         secs: u16,
+        reply: Reply<()>,
+    },
+    CheckIns {
+        node_id: u64,
+        register: bool,
         reply: Reply<()>,
     },
     /// Add a listener to the device's subscription; answers with its ID.

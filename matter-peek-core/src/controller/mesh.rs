@@ -1325,6 +1325,7 @@ mod tests {
             idle_mode_secs: Some(3600),
             active_mode_ms: Some(300),
             active_threshold_ms: Some(5000),
+            ..Default::default()
         });
         let host =
             |fabric: u64, node_id: u64, name: &str, address: &str, sii: Option<u32>| MatterHost {

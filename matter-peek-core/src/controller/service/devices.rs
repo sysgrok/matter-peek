@@ -11,6 +11,7 @@ use embassy_time::{with_timeout, Duration, Instant, Timer};
 use log::{info, warn};
 
 use rs_matter::crypto::Crypto;
+use rs_matter::dm::clusters::decl::icd_management::FULL_CLUSTER as ICD_MANAGEMENT_CLUSTER;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::persist::KvBlobStore;
 
@@ -20,7 +21,7 @@ use crate::api::{
     PeekError, SubscriptionState,
 };
 use crate::model::{
-    match_device, DeviceHandle, DeviceIdentity, DiagSet, MatchResult, StoredDevice,
+    match_device, DeviceDetails, DeviceHandle, DeviceIdentity, DiagSet, MatchResult, StoredDevice,
 };
 use crate::ota::OtaImageStore;
 
@@ -56,6 +57,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             .store
             .load_devices()
             .map_err(|e| failed("cannot load the devices", e))?;
+        let clients = self.store.load_icd_clients().unwrap_or_default();
 
         let devices = remembered
             .into_iter()
@@ -65,7 +67,8 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 let node_id = d.handle.node_id;
                 let online = online.as_ref().map(|o| o.contains(&node_id));
                 let fabric = self.fabric_name(d.handle.fabric_index);
-                convert::device(d, fabric, online, remembered)
+                let check_ins = clients.iter().any(|c| c.handle == d.handle);
+                convert::device(d, fabric, online, remembered, check_ins)
             })
             .collect();
 
@@ -469,6 +472,13 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             .borrow_mut()
             .retain(|d| d.handle.node_id != node_id);
 
+        // Its registrations went with our fabric.
+        if removed {
+            if let Err(e) = self.forget_icd_client(dev.handle) {
+                warn!("decommission node 0x{node_id:016X}: {e}");
+            }
+        }
+
         let notice = (!removed && !force).then(|| {
             format!(
                 "Device 0x{node_id:016X} could not be reached, so it was only removed from the \
@@ -582,7 +592,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             let listed = self.lookup_device(node_id);
             let known = listed
                 .as_ref()
-                .is_ok_and(|device| !device.details.clusters.is_empty());
+                .is_ok_and(|device| has_details(&device.details));
             let listed = listed.is_ok();
             if commissioning() || (known && !refresh) {
                 continue;
@@ -773,6 +783,17 @@ fn refresh_identity(device: &mut StoredDevice, ident: DeviceIdentity) {
     if !ident.details.clusters.is_empty() {
         device.details = ident.details;
     }
+}
+
+/// Whether `details` are all there: read, and with the ICD details of an ICD
+/// (a record from before they were read has only its mode).
+fn has_details(details: &DeviceDetails) -> bool {
+    !details.clusters.is_empty()
+        && (!details.clusters.contains(&ICD_MANAGEMENT_CLUSTER.id)
+            || details
+                .icd
+                .as_ref()
+                .is_some_and(|icd| icd.idle_mode_secs.is_some()))
 }
 
 /// Add a record for a device on our fabric. A record of the same unit under

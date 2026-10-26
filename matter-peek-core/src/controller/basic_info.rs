@@ -20,9 +20,7 @@ use log::debug;
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::decl::basic_information::{self, BasicInformationAttrResponses as _};
 use rs_matter::dm::clusters::decl::descriptor::{self, DescriptorAttrResponses as _};
-use rs_matter::dm::clusters::decl::icd_management::{
-    self, IcdManagementAttrResponses as _, OperatingModeEnum,
-};
+use rs_matter::dm::clusters::decl::icd_management;
 use rs_matter::dm::clusters::decl::network_commissioning::{
     self, NetworkCommissioningAttrResponses as _,
 };
@@ -69,9 +67,9 @@ async fn try_read_basic_info<C: Crypto>(
     fab_idx: NonZeroU8,
     node_id: u64,
 ) -> Result<DeviceIdentity, Error> {
-    // BasicInformation and the primary interface's Network Commissioning
-    // whole (they are small); eight paths in all, within the nine a device
-    // must take.
+    // BasicInformation, the primary interface's Network Commissioning and ICD
+    // Management whole (they are small); eight paths in all, within the nine
+    // a device must take.
     let paths = [
         AttrPath::from_gp(&GenericPath::new(
             Some(ROOT_ENDPOINT),
@@ -96,10 +94,11 @@ async fn try_read_basic_info<C: Crypto>(
             power_source::FULL_CLUSTER.id,
             power_source::AttributeId::FeatureMap as _,
         ),
-        attr(
-            icd_management::FULL_CLUSTER.id,
-            icd_management::AttributeId::OperatingMode as _,
-        ),
+        AttrPath::from_gp(&GenericPath::new(
+            None,
+            Some(icd_management::FULL_CLUSTER.id),
+            None,
+        )),
         attr(
             thread_network_diagnostics::FULL_CLUSTER.id,
             thread_network_diagnostics::AttributeId::NetworkName as _,
@@ -121,7 +120,7 @@ async fn try_read_basic_info<C: Crypto>(
     let mut clusters = BTreeSet::new();
     let mut endpoints = BTreeSet::new();
     let mut power = None;
-    let mut operating_mode = None;
+    let mut icd = None;
     let mut networks: Vec<(Vec<u8>, bool)> = Vec::new();
     loop {
         {
@@ -181,10 +180,7 @@ async fn try_read_basic_info<C: Crypto>(
                     power = Some(power.unwrap_or(0) | features);
                 }
             }
-            set(
-                &mut operating_mode,
-                resp.icd_management_read_resp().operating_mode(),
-            );
+            crate::icd::read(&resp, &mut icd);
 
             let thread = resp.thread_network_diagnostics_read_resp();
             for (_, name) in thread.network_name() {
@@ -224,10 +220,9 @@ async fn try_read_basic_info<C: Crypto>(
         details.endpoints = Some(endpoints.len() as u16);
         // The ICD Management cluster without a mode is a short-idle one.
         if clusters.contains(&icd_management::FULL_CLUSTER.id) {
-            details.icd = Some(match operating_mode {
-                Some(OperatingModeEnum::LIT) => IcdMode::Lit,
-                _ => IcdMode::Sit,
-            });
+            let mut icd = icd.unwrap_or_default();
+            icd.mode.get_or_insert(IcdMode::Sit);
+            details.icd = Some(icd);
         }
         details.clusters = clusters.into_iter().collect();
     }

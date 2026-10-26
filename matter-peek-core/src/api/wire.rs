@@ -151,6 +151,10 @@ pub enum Request {
     RetrieveLogs { node_id: u64, intent: LogIntent },
     /// See `MatterPeek::identify`. Answered with [`Response::Ok`].
     Identify { node_id: u64, secs: u16 },
+    /// See `MatterPeek::register_check_ins`. Answered with [`Response::Ok`].
+    RegisterCheckIns { node_id: u64 },
+    /// See `MatterPeek::unregister_check_ins`. Answered with [`Response::Ok`].
+    UnregisterCheckIns { node_id: u64 },
     /// See `MatterPeek::open_commissioning_window`. Answered with
     /// [`Response::CommissioningWindow`].
     OpenCommissioningWindow {

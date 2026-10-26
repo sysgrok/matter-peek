@@ -61,6 +61,7 @@ mod convert;
 mod datamodel;
 mod devices;
 mod fabrics;
+mod icd;
 mod locks;
 mod mesh;
 mod netconfig;
@@ -77,6 +78,8 @@ const FIRST_DEVICE_NODE_ID: u64 = 112234;
 const FIRST_SYNC_DELAY_SECS: u64 = 5;
 /// How often the device list is synced with our fabric.
 const SYNC_PERIOD_SECS: u64 = 300;
+/// How many Check-Ins may wait to be taken.
+const CHECK_INS_QUEUED: usize = 8;
 
 /// How many devices on Thread prime a data model subscription at once.
 const MODEL_PRIMINGS_OVER_THREAD: usize = 2;
@@ -294,6 +297,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             | Op::Window { node_id, .. }
             | Op::DeviceTime { node_id, .. } => self.device_keys(*node_id, Mode::Read),
             Op::Decommission { node_id, .. }
+            | Op::CheckIns { node_id, .. }
             | Op::WriteAttribute { node_id, .. }
             | Op::InvokeCommand { node_id, .. }
             | Op::ChangeNetwork { node_id, .. }
@@ -483,6 +487,13 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 reply,
             } => {
                 let _ = reply.send(self.decommission(node_id, force).await).await;
+            }
+            Op::CheckIns {
+                node_id,
+                register,
+                reply,
+            } => {
+                let _ = reply.send(self.check_ins(node_id, register).await).await;
             }
             Op::PeekDevice { node_id, reply } => {
                 let _ = reply.send(self.peek_device(node_id).await).await;
@@ -721,6 +732,8 @@ async fn run<'a, C, S, O, N, M>(
     });
 
     let (sub_jobs, sub_jobs_rx) = async_channel::unbounded();
+    // A few at once: devices wake up on their own schedules.
+    let (check_ins, check_ins_rx) = async_channel::bounded(CHECK_INS_QUEUED);
 
     let ctx = Ctx {
         matter,
@@ -771,6 +784,7 @@ async fn run<'a, C, S, O, N, M>(
     let mut ops = pin!(ctx.run_ops(service, config.periodic_sync));
     let mut subs = pin!(ctx.run_subscriptions(sub_jobs_rx));
     let mut applies = pin!(ctx.run_apply_jobs(apply_jobs_rx));
+    let mut taken = pin!(ctx.run_check_ins(check_ins_rx));
     // Operational resolves (re-addressing a listed device over CASE) need it;
     // without it the rest still works.
     let mut mdns = pin!(async {
@@ -779,21 +793,23 @@ async fn run<'a, C, S, O, N, M>(
         }
         core::future::pending::<()>().await
     });
-    // What devices reach on us: our OTA Provider and the subscription reports.
-    let mut node = pin!(ctx.controller.run_node(&ctx.reports, &ctx.ota));
+    // What devices reach on us: our OTA Provider, the subscription reports and
+    // the Check-Ins.
+    let mut node = pin!(ctx.controller.run_node(&ctx.reports, &ctx.ota, &check_ins));
 
     match select4(
         &mut pump,
         &mut ops,
-        select(&mut subs, &mut applies),
+        select3(&mut subs, &mut applies, &mut taken),
         select(&mut mdns, &mut node),
     )
     .await
     {
         Either4::First(r) => error!("service: transport pump exited: {r:?}"),
         Either4::Second(()) => info!("service: every handle dropped, exiting"),
-        Either4::Third(Either::First(())) => info!("service: subscription driver exited"),
-        Either4::Third(Either::Second(())) => info!("service: OTA apply driver exited"),
+        Either4::Third(Either3::First(())) => info!("service: subscription driver exited"),
+        Either4::Third(Either3::Second(())) => info!("service: OTA apply driver exited"),
+        Either4::Third(Either3::Third(())) => info!("service: Check-In driver exited"),
         Either4::Fourth(Either::First(())) => {}
         Either4::Fourth(Either::Second(r)) => error!("service: controller node exited: {r:?}"),
     }
@@ -845,7 +861,9 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
                 refuse(reply, error).await
             }
             Op::RetrieveLogs { reply, .. } => refuse(reply, error).await,
-            Op::Identify { reply, .. } | Op::OtaUpdate { reply, .. } => refuse(reply, error).await,
+            Op::Identify { reply, .. }
+            | Op::CheckIns { reply, .. }
+            | Op::OtaUpdate { reply, .. } => refuse(reply, error).await,
             Op::Watch { reply, .. } | Op::WatchModel { reply, .. } => refuse(reply, error).await,
             Op::OtaImages(reply) | Op::OtaUploadEnd { reply, .. } | Op::OtaDelete { reply, .. } => {
                 refuse(reply, error).await

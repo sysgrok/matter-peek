@@ -517,6 +517,10 @@ pub struct DeviceInfo {
     /// Whether we keep a record of the device (see
     /// [`MatterPeek::remember`](super::MatterPeek::remember)).
     pub remembered: bool,
+    /// Whether we are registered for its Check-Ins (see
+    /// [`MatterPeek::register_check_ins`](super::MatterPeek::register_check_ins)).
+    #[serde(default)]
+    pub check_ins: bool,
     /// The kind of network it is on, if known.
     #[serde(default)]
     pub network: Option<NetworkKind>,
@@ -546,9 +550,10 @@ pub struct DeviceDetails {
     /// Its kinds of power source, if it says.
     #[serde(default)]
     pub power: Vec<PowerKind>,
-    /// How it idles, if it is an intermittently connected device.
+    /// How it idles, if it is an intermittently connected device; its `mode`
+    /// is always set: short without an OperatingMode.
     #[serde(default)]
-    pub icd: Option<IcdMode>,
+    pub icd: Option<IcdInfo>,
     /// The Wi-Fi network (SSID) or Thread network (name) it is on; empty if
     /// unknown.
     #[serde(default)]
@@ -1053,6 +1058,19 @@ pub struct IcdInfo {
     pub active_mode_ms: Option<u32>,
     /// How long it stays active after its last activity, ms.
     pub active_threshold_ms: Option<u16>,
+    /// Whether it can idle long: it does once a client registers for its
+    /// Check-Ins.
+    #[serde(default)]
+    pub long_idle: bool,
+    /// Whether it sends Check-Ins to the clients registered with it.
+    #[serde(default)]
+    pub check_in: bool,
+    /// How a user wakes it up, if it says: its UserActiveModeTriggerHint bits.
+    #[serde(default)]
+    pub user_trigger: Option<u32>,
+    /// The instruction that goes with `user_trigger`; empty if none.
+    #[serde(default)]
+    pub user_trigger_instruction: String,
 }
 
 /// An ICD's idle time.

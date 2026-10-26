@@ -419,8 +419,8 @@ impl Facts {
         for kind in &details.power {
             facts.text("power", power_word(*kind));
         }
-        if let Some(icd) = details.icd {
-            facts.text("icd", icd_word(icd));
+        if let Some(mode) = details.icd.as_ref().and_then(|icd| icd.mode) {
+            facts.text("icd", icd_word(mode));
         }
         if let Some(endpoints) = details.endpoints {
             facts.number("endpoints", "", endpoints.into());
@@ -1068,6 +1068,7 @@ mod tests {
             tags: vec!["ground floor".into(), "offline".into()],
             online: Some(true),
             remembered: true,
+            check_ins: false,
             network: Some(NetworkKind::Thread),
             device_types: vec![0x0072],
             details: DeviceDetails {

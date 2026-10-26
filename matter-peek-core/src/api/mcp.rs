@@ -41,6 +41,8 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2024-11-05"];
 const MUTATING_TOOLS: &[&str] = &[
     "commission",
     "decommission",
+    "register_check_ins",
+    "unregister_check_ins",
     "remember",
     "set_tags",
     "sync",
@@ -68,8 +70,8 @@ pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-o
      (discover, list_devices, peek_device, read_model, read_events, read_network, retrieve_logs, identify, \
      read_qr_image, ota_images, ota_updates, commissioning_window, \
      device_time, list_fabrics) are always available. The tools that change \
-     devices or the stored state (commission, decommission, remember, \
-     set_tags, sync, ota_upload, ota_delete, ota_update, add_network, \
+     devices or the stored state (commission, decommission, \
+     register/unregister_check_ins, remember, set_tags, sync, ota_upload, ota_delete, ota_update, add_network, \
      remove_network, connect_network, reorder_network, \
      open/close_commissioning_window, set_device_time, remove_device_fabric, \
      create/rename/set_default/delete_fabric, write_attribute, invoke_command) are \
@@ -507,6 +509,32 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
                     "node_id": node_id_schema(),
                     "force": { "type": "boolean", "description": "Drop it from the list without contacting the device. Default false." }
                 },
+                "required": ["node_id"]
+            }),
+        ));
+        tools.push(tool(
+            "register_check_ins",
+            "Register for the Check-Ins of a listed device that can idle long \
+             (details.icd.long_idle and check_in in list_devices): it then sleeps \
+             long (LIT) between active periods, answers only while awake, and \
+             checks in with us when it wakes and our subscription is gone. A \
+             commission does this by itself. MUTATING — changes how the device \
+             idles.",
+            json!({
+                "type": "object",
+                "properties": { "node_id": node_id_schema() },
+                "required": ["node_id"]
+            }),
+        ));
+        tools.push(tool(
+            "unregister_check_ins",
+            "Drop our registration for the Check-Ins of a listed device \
+             (check_ins in list_devices): with no other client registered, it \
+             idles short again (SIT), reachable within seconds. MUTATING — \
+             changes how the device idles.",
+            json!({
+                "type": "object",
+                "properties": { "node_id": node_id_schema() },
                 "required": ["node_id"]
             }),
         ));
@@ -958,6 +986,12 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
         "decommission" => wire::Request::Decommission {
             node_id: arg_node(args)?,
             force: args.get("force").and_then(Value::as_bool).unwrap_or(false),
+        },
+        "register_check_ins" => wire::Request::RegisterCheckIns {
+            node_id: arg_node(args)?,
+        },
+        "unregister_check_ins" => wire::Request::UnregisterCheckIns {
+            node_id: arg_node(args)?,
         },
         "ota_images" => wire::Request::OtaImages,
         "ota_updates" => wire::Request::OtaUpdates,

@@ -7,7 +7,8 @@ WebSocket/JSON with the web UI, on one port. The `matter-peek` executable
 
 The web UI (`matter-peek-web`) is built into the library, gzipped: from
 `MATTER_PEEK_WEB_DIST` if set, else from `../matter-peek-web/dist` in the
-repository, else from `web-dist`, the copy the published crate carries.
+repository, else from `web-dist`, the copy kept in git and in the published
+crate.
 
 ## License
 

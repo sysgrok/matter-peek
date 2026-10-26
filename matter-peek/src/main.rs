@@ -256,6 +256,10 @@ enum Command {
     /// OTA images and device updates.
     #[command(subcommand)]
     Ota(Ota),
+    /// The Check-Ins of a device that sleeps (an intermittently connected
+    /// device).
+    #[command(subcommand)]
+    Icd(Icd),
     /// The Thread mesh as our Thread devices see it: networks, nodes, links
     /// and what is wrong. Reads each Thread device in turn.
     Thread {
@@ -458,6 +462,17 @@ enum Ota {
     Delete { name: String },
     /// Update a device to a stored image, and follow the update.
     Update { node: Node, name: String },
+}
+
+#[derive(Subcommand)]
+enum Icd {
+    /// Register for its Check-Ins: a device that can idle long then sleeps
+    /// long, and checks in with us when it wakes. A commission does this by
+    /// itself.
+    Register { node: Node },
+    /// Drop our registration for its Check-Ins: with no other client, it idles
+    /// short again, reachable within seconds.
+    Unregister { node: Node },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -1113,6 +1128,26 @@ async fn run(cli: Cli) -> io::Result<bool> {
             call(&conn, &out, wire::Request::OtaDelete { name }).await?,
         ),
         Command::Ota(Ota::Update { node, name }) => update(&conn, &out, node.0, name).await,
+        Command::Icd(Icd::Register { node }) => ok(
+            &out,
+            call(
+                &conn,
+                &out,
+                wire::Request::RegisterCheckIns { node_id: node.0 },
+            )
+            .await?,
+            "Registered for its Check-Ins: it idles long now.",
+        ),
+        Command::Icd(Icd::Unregister { node }) => ok(
+            &out,
+            call(
+                &conn,
+                &out,
+                wire::Request::UnregisterCheckIns { node_id: node.0 },
+            )
+            .await?,
+            "Unregistered from its Check-Ins.",
+        ),
         Command::Assistant { action } => assistant(&conn, &out, action).await,
         Command::Thread { view } => {
             let response = call(&conn, &out, wire::Request::ReadThreadMesh { fabric }).await?;
@@ -1532,6 +1567,9 @@ fn devices(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
         }
         if let Some(kind) = d.network {
             line.push_str(&format!("  {}", kind.label()));
+        }
+        if let Some(sleep) = d.sleep() {
+            line.push_str(&format!("  {}", sleep.label.to_lowercase()));
         }
         match d.online {
             Some(true) => line.push_str("  online"),

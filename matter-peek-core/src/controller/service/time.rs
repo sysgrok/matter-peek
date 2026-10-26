@@ -120,7 +120,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     }
 
     /// Our node ID on the device's fabric.
-    fn our_node_id(&self, handle: DeviceHandle) -> Result<u64, PeekError> {
+    pub(super) fn our_node_id(&self, handle: DeviceHandle) -> Result<u64, PeekError> {
         self.fabrics
             .borrow()
             .iter()

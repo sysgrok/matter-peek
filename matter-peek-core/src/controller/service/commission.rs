@@ -359,6 +359,10 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             info!("service: the commissioned device's clock is not set: {e}");
         }
 
+        // A device that idles long sleeps once a client registers for its
+        // Check-Ins, as a commissioner does.
+        self.register_if_long_idle(outcome.handle.node_id).await;
+
         Ok(CommissionResult {
             handle: convert::handle(outcome.handle),
             rematch_candidate,

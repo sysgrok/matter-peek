@@ -54,6 +54,32 @@ jobs:
       - name: Test
         run: cargo test --workspace --exclude matter-peek-app
 
+  # The MSRV (`rust-version`), for both executables: that they build, as the
+  # README's `cargo install` does. Lints are the stable jobs'.
+  msrv:
+    name: MSRV (1.91)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install WebKitGTK and D-Bus
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libdbus-1-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.91
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check --locked -p matter-peek -p matter-peek-app
+
   # The app (Tauri), for the desktop: it links the system's WebKitGTK, and
   # D-Bus for its windows. Its formatting is checked with the workspace.
   app:

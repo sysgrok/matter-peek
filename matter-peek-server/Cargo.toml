@@ -10,7 +10,6 @@ readme = "README.md"
 repository.workspace = true
 rust-version.workspace = true
 build = "build.rs"
-# The web UI's copy goes into the package although git ignores it.
 include = ["/src", "/build.rs", "/web-dist", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
 [dependencies]

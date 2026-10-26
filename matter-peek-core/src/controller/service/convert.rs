@@ -20,12 +20,14 @@ pub(super) fn handle(handle: DeviceHandle) -> api::DeviceHandle {
 }
 
 /// A listed device; `online` is whether it is reachable as far as we know
-/// (`None` before the first sync), `remembered` whether it has a record.
+/// (`None` before the first sync), `remembered` whether it has a record,
+/// `check_ins` whether we are registered for its Check-Ins.
 pub(super) fn device(
     d: StoredDevice,
     fabric: alloc::string::String,
     online: Option<bool>,
     remembered: bool,
+    check_ins: bool,
 ) -> api::DeviceInfo {
     api::DeviceInfo {
         handle: handle(d.handle),
@@ -46,6 +48,7 @@ pub(super) fn device(
         tags: d.tags,
         online,
         remembered,
+        check_ins,
         network: d.network,
         device_types: d.device_types,
         details: d.details,

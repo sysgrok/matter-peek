@@ -14,8 +14,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 
 use super::types::{
-    DeviceFabric, DeviceInfo, DeviceTime, NetworkKind, NetworkStatus, ThreadRole, TimeGranularity,
-    WifiSecurity, WifiVersion,
+    DeviceFabric, DeviceInfo, DeviceTime, IcdMode, NetworkKind, NetworkStatus, ThreadRole,
+    TimeGranularity, WifiSecurity, WifiVersion,
 };
 
 mod clusters;
@@ -103,6 +103,61 @@ impl DeviceInfo {
     pub fn is_test_vendor(&self) -> bool {
         self.fingerprint.vendor_id.is_some_and(is_test_vendor)
     }
+
+    /// How the device sleeps, if it does: as an intermittently connected
+    /// device, or as a sleepy end device of its Thread network.
+    pub fn sleep(&self) -> Option<Sleep> {
+        let details = &self.details;
+
+        let Some(icd) = &details.icd else {
+            return (details.thread_role == Some(ThreadRole::SleepyEndDevice)).then(|| Sleep {
+                long: false,
+                label: "Sleepy",
+                text: "A sleepy end device: it wakes to poll its Thread parent, so it answers \
+                       a little later"
+                    .into(),
+            });
+        };
+
+        Some(if icd.mode == Some(IcdMode::Lit) {
+            let idle = icd
+                .idle_mode_secs
+                .map(|secs| format!(" up to {}", duration(secs.into())))
+                .unwrap_or_default();
+            Sleep {
+                long: true,
+                label: "Sleeps long",
+                text: format!(
+                    "Long idle time (LIT): it sleeps{idle} at a time, and checks in with its \
+                     registered clients when it wakes. While it sleeps it does not answer"
+                ),
+            }
+        } else {
+            let mut text = String::from(
+                "Short idle time (SIT): it polls at least every 15 s, so it answers within \
+                 seconds",
+            );
+            if icd.long_idle {
+                text.push_str(". It sleeps long (LIT) once a client registers for its Check-Ins");
+            }
+            Sleep {
+                long: false,
+                label: "Sleepy",
+                text,
+            }
+        })
+    }
+}
+
+/// How a device sleeps (see [`DeviceInfo::sleep`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sleep {
+    /// Long idle time (LIT): it does not answer while asleep.
+    pub long: bool,
+    /// A word for it: `Sleepy`, `Sleeps long`.
+    pub label: &'static str,
+    /// What it means for reaching it.
+    pub text: String,
 }
 
 impl DeviceFabric {
@@ -542,6 +597,71 @@ fn static_product_name(vid: u16, pid: u16) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use alloc::vec::Vec;
+
+    use crate::api::{DeviceDetails, DeviceHandle, Fingerprint, IcdInfo};
+
+    fn device(icd: Option<IcdInfo>, thread_role: Option<ThreadRole>) -> DeviceInfo {
+        DeviceInfo {
+            handle: DeviceHandle {
+                fabric_index: 1,
+                node_id: 0x1B689,
+            },
+            fabric: String::new(),
+            unique_id: String::new(),
+            serial_number: String::new(),
+            node_label: String::new(),
+            vendor_name: String::new(),
+            product_name: String::new(),
+            hardware_version_string: String::new(),
+            software_version_string: String::new(),
+            fingerprint: Fingerprint::default(),
+            tags: Vec::new(),
+            online: None,
+            remembered: false,
+            check_ins: false,
+            network: Some(NetworkKind::Thread),
+            device_types: Vec::new(),
+            details: DeviceDetails {
+                icd,
+                thread_role,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn sleep_says_how_a_device_sleeps() {
+        let sit = IcdInfo {
+            mode: Some(IcdMode::Sit),
+            idle_mode_secs: Some(300),
+            long_idle: true,
+            ..Default::default()
+        };
+        let lit = IcdInfo {
+            mode: Some(IcdMode::Lit),
+            ..sit.clone()
+        };
+
+        let sleep = device(Some(lit), None).sleep().unwrap();
+        assert!(sleep.long);
+        assert_eq!(sleep.label, "Sleeps long");
+        assert!(sleep.text.contains("up to 5m 0s"));
+
+        let sleep = device(Some(sit), None).sleep().unwrap();
+        assert!(!sleep.long);
+        assert_eq!(sleep.label, "Sleepy");
+        assert!(sleep.text.contains("once a client registers"));
+
+        let sleep = device(None, Some(ThreadRole::SleepyEndDevice))
+            .sleep()
+            .unwrap();
+        assert!(!sleep.long);
+        assert!(sleep.text.contains("sleepy end device"));
+
+        assert_eq!(device(None, Some(ThreadRole::Router)).sleep(), None);
+    }
 
     #[test]
     fn moments_and_offsets() {

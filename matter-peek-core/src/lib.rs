@@ -42,6 +42,7 @@ mod controller {
     pub mod fabrics;
     #[cfg(feature = "std")]
     pub mod host;
+    pub mod icd;
     pub mod logs;
     pub mod matter;
     pub mod mdns;

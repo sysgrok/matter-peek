@@ -13,7 +13,7 @@ cargo install matter-peek-app
 ```
 
 The Android build is in the project's
-[README](https://github.com/sysgrok/matter-peek#the-app).
+[build notes](https://github.com/sysgrok/matter-peek/blob/main/docs/BUILDING.md#the-app).
 
 ## License
 

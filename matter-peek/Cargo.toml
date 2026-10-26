@@ -39,8 +39,8 @@ futures-util = { workspace = true }
 async-net = { workspace = true }
 async-tungstenite = { workspace = true }
 # `chat`: the model's Markdown in the terminal, and a line editor with history
-# for the prompt.
+# for the prompt (rustyline 19 needs Rust 1.95, above the MSRV).
 termimad = "0.35"
-rustyline = "19"
+rustyline = "18"
 # `assistant set --api-key`: the key, typed without echo.
 rpassword = "7"

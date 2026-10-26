@@ -3,11 +3,13 @@
 //! One responder serves all of it: on endpoint 0 the OTA Provider cluster and
 //! the Time Synchronization cluster (our clock, which devices take their time
 //! from), OTA images over BDX, the reports of our health subscriptions, which
-//! [`Reports`] routes to them, and CASE, for devices that open a session to us
-//! (a time sync client does). A single responder matters: several would race
+//! [`Reports`] routes to them, the Check-Ins of the devices that sleep, and
+//! CASE, for devices that open a session to us (a time sync client does). A single responder matters: several would race
 //! for the same inbound exchanges.
 
 use core::num::NonZeroU8;
+
+use alloc::vec::Vec;
 
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Timer};
@@ -36,6 +38,7 @@ use rs_matter::sc::{SecureChannel, PROTO_ID_SECURE_CHANNEL};
 use rs_matter::transport::exchange::MatterBuffers;
 use rs_matter::{clusters, devices, with, Matter};
 
+use crate::icd::CheckInReceiver;
 use crate::persist::ControllerStore;
 use crate::subscribe::Reports;
 use crate::time;
@@ -69,12 +72,13 @@ const NODE: Node<'static> = Node {
 };
 
 /// Serve the controller's node until an error: the OTA Provider of `ota`, our
-/// clock and the subscription `reports`.
+/// clock and the subscription `reports`; the Check-Ins go to `check_ins`.
 pub async fn run<C, P>(
     matter: &Matter<'_>,
     crypto: C,
     reports: &Reports,
     ota: &P,
+    check_ins: &async_channel::Sender<Vec<u8>>,
 ) -> Result<(), Error>
 where
     C: Crypto + Copy,
@@ -116,7 +120,7 @@ where
 
     let handler = ChainedExchangeHandler::new(
         PROTO_ID_SECURE_CHANNEL,
-        SecureChannel::new(crypto, &im),
+        SecureChannel::new_with_handler(crypto, &im, CheckInReceiver(check_ins)),
         ChainedExchangeHandler::new(
             PROTO_ID_BDX,
             Bdx::new(OtaBdxHandler::new(&bdx_buffers, ota)),

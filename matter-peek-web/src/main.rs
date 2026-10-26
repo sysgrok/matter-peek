@@ -241,6 +241,8 @@ enum Msg {
     CloseLogs,
     /// Retrieve a log of the device whose logs popup is open.
     FetchLogs(api::LogIntent),
+    /// Register for the Check-Ins of a device (`true`), or unregister.
+    CheckIns(u64, bool),
     /// Open the network popup of a device, reading its networking.
     OpenNetwork(u64),
     /// Read the networking of the device whose network popup is open again.
@@ -1229,6 +1231,26 @@ impl Component for App {
                         intent,
                     },
                 );
+                true
+            }
+            Msg::CheckIns(node_id, register) => {
+                let pending = self.start_device_op(node_id, false);
+                self.set_status(Some(format!(
+                    "{} the Check-Ins of node {}…",
+                    if register {
+                        "Registering for"
+                    } else {
+                        "Unregistering from"
+                    },
+                    display::hex_u64(node_id)
+                )));
+                self.error = None;
+                let request = if register {
+                    wire::Request::RegisterCheckIns { node_id }
+                } else {
+                    wire::Request::UnregisterCheckIns { node_id }
+                };
+                send_request(ctx.link().clone(), pending, request);
                 true
             }
             Msg::Identify(node_id) => {

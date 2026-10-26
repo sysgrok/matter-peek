@@ -124,6 +124,8 @@ html, body { background: var(--bulma-scheme-main-bis); min-height: 100vh; }
 .pill.is-up::before { opacity: 1; box-shadow: 0 0 0 3px hsla(var(--success-hsl), .25); }
 .pill.is-warning { background: hsla(var(--warning-hsl), .2); color: var(--bulma-warning-on-scheme); }
 .pill.is-danger { background: hsla(var(--danger-hsl), .12); color: var(--bulma-danger-on-scheme); }
+.pill.is-sit { background: hsla(var(--info-hsl), .14); color: var(--bulma-info-on-scheme); }
+.pill.is-lit { background: hsla(var(--link-hsl), .14); color: var(--bulma-link-on-scheme); }
 .note { display: flex; align-items: flex-start; gap: .75rem; padding-right: 2.75rem; border-radius: 14px; }
 .note-icon { flex: none; display: inline-flex; margin-top: .05rem; }
 .note-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
@@ -326,6 +328,7 @@ pre.log-text { max-height: 70vh; margin: 0; padding: .75rem 0; overflow: auto; b
 .switch:checked::after { transform: translateX(1.1rem); }
 .switch-title { display: block; font-weight: 600; color: var(--bulma-text-strong); }
 .switch-text { display: block; font-size: .82rem; color: var(--bulma-text-weak); }
+.device-check-ins { margin: .25rem 0 .75rem; }
 .progress-card { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin-top: 1.25rem; padding: 1.1rem 1.25rem; border: 1px solid var(--bulma-border-weak); border-radius: var(--radius-card); background: var(--bulma-scheme-main); box-shadow: var(--shadow-card); }
 .progress-card-icon { flex: none; width: 3rem; height: 3rem; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: hsla(var(--link-hsl), .1); color: var(--bulma-link); }
 .progress-card-icon .loader.is-medium { margin: 0; }

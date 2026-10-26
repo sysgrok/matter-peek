@@ -96,6 +96,18 @@ pub struct StoredDevice {
     pub details: DeviceDetails,
 }
 
+/// Our registration for the Check-Ins of a device (ICD Management).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IcdClient {
+    pub handle: DeviceHandle,
+    /// The key it encrypts its Check-Ins with.
+    pub key: [u8; crate::icd::KEY_LEN],
+    /// Its Check-In counter when we registered.
+    pub start_counter: u32,
+    /// How far past `start_counter` the counter of the last Check-In taken was.
+    pub offset: u32,
+}
+
 /// Device identity read from the BasicInformation cluster at commission time.
 ///
 /// The spec-stable string identifiers (`UniqueID`, `SerialNumber`, `NodeLabel`)

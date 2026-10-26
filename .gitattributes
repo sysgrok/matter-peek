@@ -1,0 +1,2 @@
+# The built web UI (scripts/vendor-web.sh): no diffs, no language stats.
+matter-peek-server/web-dist/** linguist-generated -diff

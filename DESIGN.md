@@ -184,8 +184,8 @@ of it is private to `core`.
   WebSocket with the API, and any other with a file of the web UI: it peeks
   at the request's head, so the WebSocket handshake reads it whole.
 - `matter-peek-server`'s `build.rs` takes the web UI's files
-  (`MATTER_PEEK_WEB_DIST`, else `../matter-peek-web/dist`, else the copy a
-  packaged crate carries, `web-dist`) into it, each gzipped; they go out
+  (`MATTER_PEEK_WEB_DIST`, else `../matter-peek-web/dist`, else the copy
+  kept in git and in the package, `web-dist`) into it, each gzipped; they go out
   as they are, with `Content-Encoding: gzip` (unpacked only for a client that
   takes no gzip). Without them, `/` says how to add them. An executable to
   hand out should take `trunk build --release`'s: the web crate's release

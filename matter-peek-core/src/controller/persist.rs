@@ -30,8 +30,8 @@ use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::sync::blocking::Mutex;
 
 use crate::api::agent::{ModelConfig, Think};
-use crate::api::{IcdMode, PowerKind, ThreadRole};
-use crate::model::{DeviceDetails, DeviceHandle, NetworkKind, StoredDevice};
+use crate::api::{IcdInfo, IcdMode, PowerKind, ThreadRole};
+use crate::model::{DeviceDetails, DeviceHandle, IcdClient, NetworkKind, StoredDevice};
 
 /// Scratch buffer size for the KV store (fits a fabric blob or our device list).
 const KV_BUF_LEN: usize = 64 * 1024;
@@ -60,6 +60,12 @@ const NEXT_NODE_ID_KEY: u16 = VENDOR_KEYS_START + 2;
 const ASSISTANT_KEY: u16 = VENDOR_KEYS_START + 3;
 /// Our fabrics: their names, colors and CA signing keys, and the default.
 const FABRICS_KEY: u16 = VENDOR_KEYS_START + 4;
+/// Our registrations for devices' Check-Ins.
+const ICD_CLIENTS_KEY: u16 = VENDOR_KEYS_START + 5;
+
+/// The ICD features stored: as the ICD Management FeatureMap has them.
+const ICD_CHECK_IN: u32 = 0x1;
+const ICD_LONG_IDLE: u32 = 0x4;
 
 /// Owns a shared KV store and exposes the controller's persistence operations:
 /// load/save our fabric (via rs-matter) and our device records. Generic over the
@@ -250,6 +256,20 @@ impl<'a, S: KvBlobStore> ControllerStore<'a, S> {
         Persist::new(&self.kv).store_tlv(NEXT_NODE_ID_KEY, NextNodeId { node_id })
     }
 
+    /// Our registrations for the Check-Ins of devices.
+    pub fn load_icd_clients(&self) -> Result<Vec<IcdClient>, Error> {
+        self.kv
+            .access(|kv, buf| match kv.load(ICD_CLIENTS_KEY, buf)? {
+                Some(data) => Ok(IcdClientList::from_tlv(&TLVElement::new(data))?.into_model()),
+                None => Ok(Vec::new()),
+            })
+    }
+
+    /// Replace our registrations for the Check-Ins of devices.
+    pub fn save_icd_clients(&self, clients: &[IcdClient]) -> Result<(), Error> {
+        Persist::new(&self.kv).store_tlv(ICD_CLIENTS_KEY, IcdClientList::from_model(clients))
+    }
+
     /// The assistant's model, if one is set.
     pub fn load_assistant(&self) -> Result<Option<ModelConfig>, Error> {
         self.kv
@@ -339,6 +359,18 @@ fn icd_mode(code: u8) -> Option<IcdMode> {
         1 => Some(IcdMode::Lit),
         _ => None,
     }
+}
+
+/// The features `icd` is stored as.
+fn icd_features(icd: &IcdInfo) -> u32 {
+    let mut features = 0;
+    if icd.check_in {
+        features |= ICD_CHECK_IN;
+    }
+    if icd.long_idle {
+        features |= ICD_LONG_IDLE;
+    }
+    features
 }
 
 /// The code `role` is stored as: the Thread Network Diagnostics value.
@@ -452,6 +484,56 @@ struct NextNodeId {
 }
 
 #[derive(ToTLV, FromTLV)]
+struct IcdClientList {
+    clients: Vec<IcdClientWire>,
+}
+
+#[derive(ToTLV, FromTLV)]
+struct IcdClientWire {
+    fabric_index: u8,
+    node_id: u64,
+    key: OctetsVec,
+    start_counter: u32,
+    offset: u32,
+}
+
+impl IcdClientList {
+    fn from_model(clients: &[IcdClient]) -> Self {
+        Self {
+            clients: clients
+                .iter()
+                .map(|c| IcdClientWire {
+                    fabric_index: c.handle.fabric_index.get(),
+                    node_id: c.handle.node_id,
+                    key: OctetsVec::from_vec(c.key.to_vec()),
+                    start_counter: c.start_counter,
+                    offset: c.offset,
+                })
+                .collect(),
+        }
+    }
+
+    fn into_model(self) -> Vec<IcdClient> {
+        // A corrupt entry is dropped: the device then checks in to nobody we
+        // know, until registered again.
+        self.clients
+            .into_iter()
+            .filter_map(|w| {
+                Some(IcdClient {
+                    handle: DeviceHandle {
+                        fabric_index: core::num::NonZeroU8::new(w.fabric_index)?,
+                        node_id: w.node_id,
+                    },
+                    key: w.key[..].try_into().ok()?,
+                    start_counter: w.start_counter,
+                    offset: w.offset,
+                })
+            })
+            .collect()
+    }
+}
+
+#[derive(ToTLV, FromTLV)]
 struct StoredDeviceList {
     devices: Vec<StoredDeviceWire>,
 }
@@ -494,6 +576,20 @@ struct StoredDeviceWire {
     icd: Option<u8>,
     network_name: Option<String>,
     thread_role: Option<u8>,
+    // The rest of its `DeviceDetails::icd`, beyond the mode (`icd`); appended
+    // last, as `network`.
+    icd_more: Option<StoredIcdWire>,
+}
+
+/// A device's `DeviceDetails::icd` beyond its mode.
+#[derive(ToTLV, FromTLV, Default)]
+struct StoredIcdWire {
+    features: u32,
+    idle_secs: Option<u32>,
+    active_ms: Option<u32>,
+    threshold_ms: Option<u16>,
+    trigger: Option<u32>,
+    trigger_instruction: Option<String>,
 }
 
 impl StoredDeviceList {
@@ -501,34 +597,46 @@ impl StoredDeviceList {
         Self {
             devices: devices
                 .iter()
-                .map(|d| StoredDeviceWire {
-                    fabric_index: d.handle.fabric_index.get(),
-                    node_id: d.handle.node_id,
-                    unique_id: d.unique_id.clone(),
-                    serial_number: d.serial_number.clone(),
-                    node_label: d.node_label.clone(),
-                    fp_vendor_id: d.fingerprint.vendor_id,
-                    fp_product_id: d.fingerprint.product_id,
-                    fp_hardware_version: d.fingerprint.hardware_version,
-                    fp_software_version: d.fingerprint.software_version,
-                    tags: d.tags.clone(),
-                    // Persist the name only when non-empty (keeps blobs compact
-                    // and round-trips `None` ⇄ empty string).
-                    vendor_name: opt_str(&d.vendor_name),
-                    product_name: opt_str(&d.product_name),
-                    pending_removal: None,
-                    network: d.network.map(network_code),
-                    hardware_version_string: opt_str(&d.hardware_version_string),
-                    software_version_string: opt_str(&d.software_version_string),
-                    device_types: (!d.device_types.is_empty()).then(|| d.device_types.clone()),
-                    spec_version: d.details.spec_version,
-                    clusters: (!d.details.clusters.is_empty()).then(|| d.details.clusters.clone()),
-                    endpoints: d.details.endpoints,
-                    power: (!d.details.power.is_empty())
-                        .then(|| PowerKind::features(&d.details.power)),
-                    icd: d.details.icd.map(icd_code),
-                    network_name: opt_str(&d.details.network_name),
-                    thread_role: d.details.thread_role.map(thread_role_code),
+                .map(|d| {
+                    let icd = d.details.icd.as_ref();
+                    StoredDeviceWire {
+                        fabric_index: d.handle.fabric_index.get(),
+                        node_id: d.handle.node_id,
+                        unique_id: d.unique_id.clone(),
+                        serial_number: d.serial_number.clone(),
+                        node_label: d.node_label.clone(),
+                        fp_vendor_id: d.fingerprint.vendor_id,
+                        fp_product_id: d.fingerprint.product_id,
+                        fp_hardware_version: d.fingerprint.hardware_version,
+                        fp_software_version: d.fingerprint.software_version,
+                        tags: d.tags.clone(),
+                        // Persist the name only when non-empty (keeps blobs compact
+                        // and round-trips `None` ⇄ empty string).
+                        vendor_name: opt_str(&d.vendor_name),
+                        product_name: opt_str(&d.product_name),
+                        pending_removal: None,
+                        network: d.network.map(network_code),
+                        hardware_version_string: opt_str(&d.hardware_version_string),
+                        software_version_string: opt_str(&d.software_version_string),
+                        device_types: (!d.device_types.is_empty()).then(|| d.device_types.clone()),
+                        spec_version: d.details.spec_version,
+                        clusters: (!d.details.clusters.is_empty())
+                            .then(|| d.details.clusters.clone()),
+                        endpoints: d.details.endpoints,
+                        power: (!d.details.power.is_empty())
+                            .then(|| PowerKind::features(&d.details.power)),
+                        icd: icd.and_then(|icd| icd.mode).map(icd_code),
+                        network_name: opt_str(&d.details.network_name),
+                        thread_role: d.details.thread_role.map(thread_role_code),
+                        icd_more: icd.map(|icd| StoredIcdWire {
+                            features: icd_features(icd),
+                            idle_secs: icd.idle_mode_secs,
+                            active_ms: icd.active_mode_ms,
+                            threshold_ms: icd.active_threshold_ms,
+                            trigger: icd.user_trigger,
+                            trigger_instruction: opt_str(&icd.user_trigger_instruction),
+                        }),
+                    }
                 })
                 .collect(),
         }
@@ -567,7 +675,21 @@ impl StoredDeviceList {
                         clusters: w.clusters.unwrap_or_default(),
                         endpoints: w.endpoints,
                         power: w.power.map(PowerKind::of_features).unwrap_or_default(),
-                        icd: w.icd.and_then(icd_mode),
+                        icd: w.icd.and_then(icd_mode).map(|mode| {
+                            let more = w.icd_more.unwrap_or_default();
+                            IcdInfo {
+                                mode: Some(mode),
+                                idle_mode_secs: more.idle_secs,
+                                active_mode_ms: more.active_ms,
+                                active_threshold_ms: more.threshold_ms,
+                                long_idle: more.features & ICD_LONG_IDLE != 0,
+                                check_in: more.features & ICD_CHECK_IN != 0,
+                                user_trigger: more.trigger,
+                                user_trigger_instruction: more
+                                    .trigger_instruction
+                                    .unwrap_or_default(),
+                            }
+                        }),
                         network_name: w.network_name.unwrap_or_default(),
                         thread_role: w.thread_role.and_then(thread_role),
                     },
@@ -655,7 +777,16 @@ mod tests {
                 clusters: vec![0x0003, 0x0006, 0x002F, 0x0046],
                 endpoints: Some(2),
                 power: vec![PowerKind::Battery, PowerKind::Replaceable],
-                icd: Some(IcdMode::Lit),
+                icd: Some(IcdInfo {
+                    mode: Some(IcdMode::Lit),
+                    idle_mode_secs: Some(300),
+                    active_mode_ms: Some(5000),
+                    active_threshold_ms: Some(5000),
+                    long_idle: true,
+                    check_in: true,
+                    user_trigger: Some(0x4),
+                    user_trigger_instruction: "Pull GPIO4 low".to_string(),
+                }),
                 network_name: "MyHome".to_string(),
                 thread_role: Some(ThreadRole::SleepyEndDevice),
             },

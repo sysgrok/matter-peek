@@ -1,8 +1,8 @@
 //! Takes the web UI into the executable, if it is built: the files of
 //! `MATTER_PEEK_WEB_DIST`, else of `../matter-peek-web/dist` (`trunk build
-//! --release` in `matter-peek-web/`), else of `web-dist`, the copy a packaged
-//! crate carries (`scripts/vendor-web.sh`), each gzipped. Without them, the
-//! server says how to add it.
+//! --release` in `matter-peek-web/`), else of `web-dist`, the copy kept in git
+//! and in the package (`scripts/vendor-web.sh`), each gzipped. Without them,
+//! the server says how to add it.
 
 use std::env;
 use std::fmt::Write as _;

@@ -203,6 +203,14 @@ impl WireSession {
             Request::Identify { node_id, secs } => {
                 peek.identify(node_id, secs).await.map(|()| Response::Ok)
             }
+            Request::RegisterCheckIns { node_id } => peek
+                .register_check_ins(node_id)
+                .await
+                .map(|()| Response::Ok),
+            Request::UnregisterCheckIns { node_id } => peek
+                .unregister_check_ins(node_id)
+                .await
+                .map(|()| Response::Ok),
             Request::OpenCommissioningWindow {
                 node_id,
                 timeout_secs,

@@ -13,7 +13,7 @@ use log::{error, info};
 
 use rs_matter::cert::gen::VALID_FOREVER;
 use rs_matter::cert::{MAX_CERT_TLV_AND_ASN1_LEN, MAX_CERT_TLV_LEN};
-use rs_matter::crypto::Crypto;
+use rs_matter::crypto::{Crypto, Rng as _};
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::onboard::{CommissionOptions, Commissioner};
 use rs_matter::transport::network::Address;
@@ -467,18 +467,20 @@ impl<'a, C: Crypto> Controller<'a, C> {
         .await
     }
 
-    /// Serve what devices reach on us: the OTA Provider of `ota` and the reports
-    /// of the subscriptions using `reports`. See [`crate::node::run`].
+    /// Serve what devices reach on us: the OTA Provider of `ota`, the reports of
+    /// the subscriptions using `reports`, and the Check-Ins, to `check_ins`. See
+    /// [`crate::node::run`].
     pub async fn run_node<P>(
         &self,
         reports: &crate::subscribe::Reports,
         ota: &P,
+        check_ins: &async_channel::Sender<Vec<u8>>,
     ) -> Result<(), Error>
     where
         P: rs_matter::dm::clusters::ota_prov::OtaImagesRegistry
             + rs_matter::dm::clusters::ota_prov::OtaImages,
     {
-        crate::node::run(self.matter, self.crypto, reports, ota).await
+        crate::node::run(self.matter, self.crypto, reports, ota, check_ins).await
     }
 
     /// Announce us to the device as its OTA Provider, with an update for it: it
@@ -756,6 +758,55 @@ impl<'a, C: Crypto> Controller<'a, C> {
 
         info!(
             "identify: device 0x{:016X} ep{endpoint} for {secs}s",
+            dev.node_id
+        );
+        Ok(())
+    }
+
+    /// Register `our_node_id` for the Check-Ins of the device, with a fresh
+    /// key; returns the key and the device's Check-In counter.
+    pub async fn register_check_ins(
+        &self,
+        dev: DeviceHandle,
+        our_node_id: u64,
+    ) -> Result<([u8; crate::icd::KEY_LEN], u32), Error> {
+        let mut key = [0; crate::icd::KEY_LEN];
+        self.crypto.rand()?.fill_bytes(&mut key);
+
+        let counter = crate::icd::register(
+            self.matter,
+            self.crypto,
+            dev.fabric_index,
+            dev.node_id,
+            our_node_id,
+            &key,
+        )
+        .await?;
+
+        info!(
+            "icd: registered for the Check-Ins of device 0x{:016X}, its counter at {counter}",
+            dev.node_id
+        );
+        Ok((key, counter))
+    }
+
+    /// Drop our registration for the Check-Ins of the device.
+    pub async fn unregister_check_ins(
+        &self,
+        dev: DeviceHandle,
+        our_node_id: u64,
+    ) -> Result<(), Error> {
+        crate::icd::unregister(
+            self.matter,
+            self.crypto,
+            dev.fabric_index,
+            dev.node_id,
+            our_node_id,
+        )
+        .await?;
+
+        info!(
+            "icd: unregistered from the Check-Ins of device 0x{:016X}",
             dev.node_id
         );
         Ok(())

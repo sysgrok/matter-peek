@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>matter-peek</title>
+    <!-- Bulma, vendored locally (offline-safe; no CDN at runtime). -->
+    
+    <link rel="stylesheet" href="bulma.min.css" />
+    <link rel="stylesheet" href="/style-be420d49fb504e0b.css" integrity="sha384-PK4TOlIeBo7DvYB7Ey290+usqQMzfRcqG+BYOQyopvi6Th1PhWQGWlO2p1AJAIZZ"/>
+    <!-- The app; its release build goes through wasm-opt for size. -->
+    
+<script type="module">
+import init, * as bindings from '/matter-peek-web-739302045ef57662.js';
+const wasm = await init({ module_or_path: '/matter-peek-web-739302045ef57662_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+  <link rel="modulepreload" href="/matter-peek-web-739302045ef57662.js" crossorigin="anonymous" integrity="sha384-OGifO7Qt/CVKLGjOOZSjbmS+X8t24M8mSh+7ds+oBC7YaSHxl8yHOaNI44spN4RY"><link rel="preload" href="/matter-peek-web-739302045ef57662_bg.wasm" crossorigin="anonymous" integrity="sha384-jKEpocxRSFVN3nPC3Mp+mJmNoPbkjdP9Cg6atGsKN/lHN1SsTa2vekXhQLWCEH2/" as="fetch" type="application/wasm"></head>
+  <body></body>
+</html>

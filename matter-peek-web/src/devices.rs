@@ -216,6 +216,7 @@ impl App {
                 </dl>
 
                 { self.view_fabrics_row(node_id, live, link) }
+                { view_check_ins(d, busy || offline, link) }
                 { self.view_health(live, offline) }
                 { self.view_tags(d, link) }
                 { self.view_device_update(d, offline, link) }
@@ -313,6 +314,11 @@ impl App {
                         if d.is_test_vendor() {
                             { self.filter_chip("is:test-vendor".into(),
                                 ui::pill("Test vendor", Some("is-warning"), None), link) }
+                        }
+                        if let Some(sleep) = d.sleep() {
+                            { self.filter_chip(sleep_term(d),
+                                ui::pill(sleep.label, Some(if sleep.long { "is-lit" } else { "is-sit" }),
+                                    Some(sleep.text)), link) }
                         }
                     </p>
                 </div>
@@ -748,6 +754,47 @@ impl App {
             .find(|d| d.handle.node_id == node_id)
             .map(api::DeviceInfo::title)
             .unwrap_or_else(|| format!("node {}", display::hex_u64(node_id)))
+    }
+}
+
+/// Whether we are registered for the Check-Ins of `d`, as a switch: for a
+/// device that can idle long and check in.
+fn view_check_ins(d: &api::DeviceInfo, disabled: bool, link: &Scope<App>) -> Html {
+    let capable = d
+        .details
+        .icd
+        .as_ref()
+        .is_some_and(|icd| icd.long_idle && icd.check_in);
+    if !capable && !d.check_ins {
+        return html! {};
+    }
+
+    let node_id = d.handle.node_id;
+    let register = !d.check_ins;
+    let text = if d.check_ins {
+        "On: it sleeps long, and checks in with us when it wakes."
+    } else {
+        "Off: it idles short, reachable within seconds. On, it sleeps long."
+    };
+
+    html! {
+        <label class="switch-row device-check-ins">
+            <input type="checkbox" class="switch" checked={d.check_ins} {disabled}
+                onchange={link.callback(move |_| Msg::CheckIns(node_id, register))} />
+            <span>
+                <span class="switch-title">{ "Check-Ins" }</span>
+                <span class="switch-text">{ text }</span>
+            </span>
+        </label>
+    }
+}
+
+/// The filter for devices that sleep as `d` does.
+fn sleep_term(d: &api::DeviceInfo) -> String {
+    match d.details.icd.as_ref().and_then(|icd| icd.mode) {
+        Some(api::IcdMode::Lit) => "icd:lit".into(),
+        Some(api::IcdMode::Sit) => "icd:sit".into(),
+        None => "is:sleepy".into(),
     }
 }
 
