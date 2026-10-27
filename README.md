@@ -133,7 +133,7 @@ matter-peek chat "Which of my Thread devices have weak links?"
   server and the assistant
 - [Building](https://github.com/sysgrok/matter-peek/blob/main/docs/BUILDING.md):
   the crates, static builds, the app on Android, working on the web UI
-- [Design](https://github.com/sysgrok/matter-peek/blob/main/DESIGN.md): the
+- [Design](https://github.com/sysgrok/matter-peek/blob/main/docs/DESIGN.md): the
   architecture and the roadmap
 
 ## License

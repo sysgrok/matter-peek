@@ -21,7 +21,7 @@ matter-peek-app/    the web UI as a desktop and Android app (Tauri), using the
 Everything goes through the API. The web UI talks to the server that serves
 it. The CLI, also when it runs as the MCP server, does the same when it is
 given `--server`; otherwise it runs a controller in its own process. Only one
-process at a time can hold the store. [DESIGN.md](../DESIGN.md) describes the
+process at a time can hold the store. [DESIGN.md](DESIGN.md) describes the
 architecture.
 
 ## Requirements

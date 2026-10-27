@@ -12,7 +12,7 @@
 //!
 //! The controller wraps [`rs_matter`]'s controller side: its `Commissioner`,
 //! the IM client, the Diagnostic Logs / BDX receiver, the OTA Provider. See
-//! `DESIGN.md` at the workspace root for the architecture.
+//! `docs/DESIGN.md` for the architecture.
 
 #![no_std]
 // The TLV derives of the stored device record nest deeper than the default.
