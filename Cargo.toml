@@ -55,7 +55,7 @@ rs-matter = { git = "https://github.com/project-chip/rs-matter" }
 rs-matter-codegen = { git = "https://github.com/project-chip/rs-matter" }
 
 # `--profile dist`: the executable to hand out, as small as it gets without
-# slowing the crypto down much (static x86_64: 16.7 MB as `release`, 10.9 MB;
+# slowing the crypto down much (x86_64: 20.3 MB as `release`, 13.0 MB;
 # `opt-level = "z"` would save 0.6 MB more).
 [profile.dist]
 inherits = "release"

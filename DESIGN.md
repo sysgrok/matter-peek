@@ -155,7 +155,7 @@ runs the following side by side:
 - the transport pump (UDP and, with `ble`, BTP, chained on one stack);
 - the mDNS backend, all the time, for operational resolves;
 - our own node: the OTA Provider, the time source, BDX, inbound subscription
-  reports, and CASE for devices that reach us;
+  reports, the Check-Ins of sleepy devices, and CASE for devices that reach us;
 - the operations, plus a periodic sync. Operations without device I/O are
   answered at once. The others queue in arrival order, on read/write locks of
   the device, the fabric or the sync they use. One commission runs at a time,
@@ -173,9 +173,22 @@ by cargo feature (Avahi, systemd-resolved, Bonjour or rs-matter's own), and
 runs the service on its own thread. The thread ends once every handle has been
 dropped.
 
-Below the service, the modules `matter` (`Controller`), `ble`, `discovery`,
-`subscribe`, `logs`, `ota`, `node`, `ca` and `persist` wrap rs-matter's
-controller side. All of this is private to `core`.
+Below the service, these modules wrap rs-matter's controller side:
+- `matter` (`Controller`): the operations the service builds on;
+- `discovery` and `mdns`: browsing, and the mDNS backends;
+- `ble`: commissioning over Bluetooth LE;
+- `basic_info`, `diagnostics` and `network`: a device's identity, its health
+  and its networks; `netconfig` changes the networks;
+- `subscribe`: the live subscriptions;
+- `datamodel`, with `schema` and `values`: any cluster, by name, as JSON;
+- `logs`, `ota`, `icd`, `mesh`, `time` and `window`: diagnostic logs, the OTA
+  Provider, sleepy devices, the Thread mesh, time and commissioning windows;
+- `node`: our own node, which devices reach;
+- `fabrics`, `ca` and `persist`: our fabrics, their CAs, and the store.
+
+Next to them, `model` holds the controller's records of devices, `setup_code`
+reads a setup code in any of its forms, and `explain` puts errors in plain
+words. All of this is private to `core`.
 
 ### Front-ends
 
@@ -216,8 +229,8 @@ controller side. All of this is private to `core`.
   assistant's model over HTTPS, with its own root certificates). It therefore
   builds as a static executable with musl, for x86_64 and aarch64
   (`.cargo/config.toml` names the C compilers). The `dist` profile (LTO, one
-  codegen unit, `opt-level = "s"`, stripped) makes it about 11 MB instead of
-  17 MB. `"z"` would save another 0.6 MB, but at the expense of the crypto's
+  codegen unit, `opt-level = "s"`, stripped) makes it about 13 MB instead of
+  20 MB. `"z"` would save another 0.6 MB, but at the expense of the crypto's
   speed, which every CASE handshake depends on.
 
 ### Devices and fabrics
@@ -341,7 +354,34 @@ filter.
 - A device is **offline** when no report arrived within the maximum interval
   plus two MRP round trips of a report. Re-establishing the subscription is
   retried with a backoff of 2 to 60 s. A successful `peek_device` retries at
-  once.
+  once. A device that sleeps long is the exception, see below.
+
+### Sleepy devices (ICD)
+- A device that can idle long (an ICD that supports Check-Ins) sleeps long
+  only while a client is registered for its Check-Ins. Otherwise it idles
+  short, and answers within seconds. matter-peek registers for the Check-Ins
+  of such a device when it commissions it. `register_check_ins` and
+  `unregister_check_ins` change this later. The registration (the key and
+  the last counter) is kept in the store. When half of the key's counter
+  values are used, the next Check-In registers again, with a new key.
+- Check-Ins arrive at our node. Each one is matched to a registration by its
+  key, and one whose counter is not newer than the last is dropped.
+- A device that sleeps long does not answer while it sleeps. It counts as
+  awake for its active threshold (5 s if it does not say) after each message
+  from it: a report, a Check-In, or a report for a subscription that we lost.
+  The operations that need the device wait for it to wake up, for at most its
+  idle duration (one hour if it does not say) plus 30 s. The sync does not
+  read such a device again while it sleeps, and the Thread mesh skips it.
+- Its subscription is counted offline by the same rule as any other. It is
+  then not retried with a backoff. Instead it waits for the device to wake up:
+  for a Check-In or a stray report, or for 30 minutes at most, in case the
+  Check-Ins go astray. A Check-In marks the device online and re-establishes
+  the subscription at once. Its subscription is also never narrowed, because a
+  narrowed one would be lost until the device wakes up again.
+- `wake_device` waits for the device to wake up, then asks it to stay awake for
+  30 s (`StayActiveRequest`). `stay_awake` keeps it awake: it asks again 10 s
+  before the device would fall asleep, while someone holds it, for 10 minutes
+  at most. `let_sleep` ends this.
 
 ### Network changes
 - One `change_network` call is one complete change: arm the fail-safe, make the
@@ -512,7 +552,9 @@ with `--no-default-features` (the API types, messages and MCP tools) and with
 Linux is supported today. There, the `matter-peek` executable and the app use
 the Avahi backend and BlueZ (`ble`). macOS needs the executables to use the
 Bonjour backend (`mdns-astro`) there, and it has no BLE central yet. Windows
-would use the builtin mDNS backend.
+would use the builtin mDNS backend, but that backend finds its network
+interface with `nix`, which is Unix-only. It needs another way to do that
+first.
 
 ### Mobile
 

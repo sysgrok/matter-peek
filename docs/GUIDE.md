@@ -56,6 +56,34 @@ cards of the devices that the image is meant for then offer the update, and
 show its progress. In the CLI, `matter-peek ota update <node> <image>` starts
 the update.
 
+## Sleepy devices
+
+Some battery devices (ICDs) sleep most of the time, and answer only while they
+are awake. A device that can sleep long does so only while a controller is
+registered for its Check-Ins. Otherwise it wakes up often, and answers within
+seconds. When matter-peek commissions such a device, it registers for its
+Check-Ins. The device then checks in with matter-peek each time it wakes up,
+and matter-peek uses that time to talk to it.
+
+While such a device sleeps, its card says *Asleep*, how often the device wakes
+up, and how to wake it now, if the device tells (for example, by pressing a
+button). Anything that needs the device waits until it wakes up. The sleep pill
+in the card's header is also a switch: it keeps the device awake once it wakes
+up, for 10 minutes at most. The **Check-Ins** switch on the card registers or
+unregisters matter-peek.
+
+In the CLI:
+
+- `matter-peek icd register <node>` and `matter-peek icd unregister <node>`
+  register and unregister for the device's Check-Ins.
+- `matter-peek icd wake <node>` waits for the device to wake up, and keeps it
+  awake for a while.
+- `matter-peek icd stay-awake <node>` keeps it awake until it is interrupted,
+  for 10 minutes at most.
+
+Over MCP, use `register_check_ins`, `unregister_check_ins`, `wake_device` and
+`stay_awake`.
+
 ## Filtering devices
 
 The filter box of the web UI, `matter-peek list <filter>` and the `filter`

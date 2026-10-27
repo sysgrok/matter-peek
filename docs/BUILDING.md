@@ -61,7 +61,7 @@ cargo build --profile dist --target aarch64-unknown-linux-musl -p matter-peek
 
 The `dist` profile is the `release` profile with LTO, one codegen unit,
 `opt-level = "s"` and no symbols. It produces a static x86_64 executable of
-about 11 MB, compared to 17 MB with `release`. `MATTER_PEEK_WEB_DIST` can point
+about 13 MB, compared to 20 MB with `release`. `MATTER_PEEK_WEB_DIST` can point
 to a web UI in another place than `matter-peek-web/dist`.
 
 `cargo install --git https://github.com/sysgrok/matter-peek matter-peek` also
