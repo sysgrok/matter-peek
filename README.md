@@ -3,9 +3,13 @@
 **A health and diagnostics tool for Matter devices, to use next to your existing controller.**
 
 [![CI](https://github.com/sysgrok/matter-peek/actions/workflows/ci.yml/badge.svg)](https://github.com/sysgrok/matter-peek/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/matter-peek.svg)](https://crates.io/crates/matter-peek)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![Matrix](https://img.shields.io/matrix/rs-matter:matrix.org?label=join%20matrix&color=BEC5C9&logo=matrix)](https://matrix.to/#/#rs-matter:matrix.org)
 
-When Google Home, Apple Home or Alexa report a device as *not responding*, they usually don't say why. matter-peek can help you find out.
+When Google Home, Apple Home or Alexa report a device as *not responding*, they usually don't say why.
+
+matter-peek can help you find out.
 
 It is added to your Matter devices as an additional admin, next to the controller you already use, and shows what the devices report about themselves: uptime and reboots, Wi-Fi signal and Thread mesh links, free heap and stack, and crash logs.
 
