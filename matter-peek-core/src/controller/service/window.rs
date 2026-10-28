@@ -26,6 +26,7 @@ pub(super) struct OpenedWindow {
     manual_code: String,
     qr_code: String,
     qr_rows: Vec<String>,
+    passcode: u32,
     discriminator: u16,
     until: Instant,
 }
@@ -89,6 +90,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 manual_code,
                 qr_code,
                 qr_rows,
+                passcode: code.passcode,
                 discriminator: code.discriminator,
                 until: Instant::now() + Duration::from_secs(timeout.into()),
             },
@@ -171,6 +173,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             qr_rows: ours
                 .map(|window| window.qr_rows.clone())
                 .unwrap_or_default(),
+            passcode: ours.map(|window| window.passcode),
             discriminator: ours.map(|window| window.discriminator),
             remaining_secs: ours.map(|window| (window.until - now).as_secs()),
             opened_by_vendor: state.admin_vendor_id,

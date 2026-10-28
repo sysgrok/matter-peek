@@ -3,7 +3,9 @@
 //! network, then hands it over to us: the page commissions it onto our fabric
 //! over IP, with the passcode it gets, and answers how that went. A device that
 //! another Matter app, such as Google Home, shares with us comes with its
-//! pairing code, and goes the same way.
+//! pairing code, and goes the same way. The other way round, we share a device
+//! with another Matter app on the phone, through a commissioning window we
+//! opened on it.
 
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -113,6 +115,38 @@ pub async fn commission(
     drop(onmessage);
 
     match ended {
+        Ok(answer) => Ok(from_js::<Ended>(&answer).is_some_and(|e| e.done)),
+        Err(e) => Err(js_error(e)),
+    }
+}
+
+/// A device to share with another Matter app on the phone, through the
+/// commissioning window we opened on it.
+pub struct ToShare {
+    pub name: String,
+    pub vendor_id: Option<u16>,
+    pub product_id: Option<u16>,
+    pub discriminator: u16,
+    pub passcode: u32,
+    /// How long the window stays open.
+    pub remaining_secs: u64,
+}
+
+/// Share `device` with another Matter app on the phone, which the user picks
+/// from Android's list of them. Ends when Android's screens close: whether an
+/// app was picked (not that it has commissioned the device yet).
+pub async fn share(device: ToShare) -> Result<bool, String> {
+    let fields = [
+        ("name", JsValue::from(device.name)),
+        ("vendorId", device.vendor_id.unwrap_or_default().into()),
+        ("productId", device.product_id.unwrap_or_default().into()),
+        ("discriminator", device.discriminator.into()),
+        ("passcode", device.passcode.into()),
+        // As a number: the window is open for minutes, not for ages.
+        ("remainingSecs", (device.remaining_secs as f64).into()),
+    ];
+
+    match invoke("plugin:play|share", args(&fields)).await {
         Ok(answer) => Ok(from_js::<Ended>(&answer).is_some_and(|e| e.done)),
         Err(e) => Err(js_error(e)),
     }

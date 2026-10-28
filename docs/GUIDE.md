@@ -6,6 +6,16 @@ has one page for each task: **Devices**, **Commission**, **Updates**,
 functions. `matter-peek --help` lists the CLI commands, and [AI.md](AI.md)
 lists the MCP tools.
 
+The web UI can also be installed as an app of its own, with its own window and
+icon:
+- Chrome and Edge offer it on the server's own machine (`localhost`) and over
+  HTTPS: the web UI then shows an **Install** button in its top bar. Over plain
+  HTTP on the network, they do not; their menu can still create a shortcut
+  that opens in a window of its own.
+- On an iPhone or iPad, Safari's *Share* → *Add to Home Screen* does it, also
+  over plain HTTP. The app on the home screen keeps its own storage, so it asks
+  for the server's access token once.
+
 ## Adding devices
 
 New devices can be commissioned over IP, or over Bluetooth LE. When a device is
@@ -152,6 +162,11 @@ code and the QR code. The QR code is drawn both in the web UI and in the
 terminal.
 
 - In the web UI, use the **Share** button on the device card.
+- In the Android app, the Share popup can also hand the device to another
+  Matter app on the phone, such as Google Home or Home Assistant: **Share with
+  an app on this phone** opens the window (if it is not open yet), and Android
+  then lists the apps that take Matter devices. The app picked commissions the
+  device through that window, with no code to type.
 - In the CLI, use `matter-peek share <node> [--minutes 3..15]`. `--status`
   shows the state of the window, and `--close` closes it.
 - Over MCP, use `open_commissioning_window`, `close_commissioning_window` and

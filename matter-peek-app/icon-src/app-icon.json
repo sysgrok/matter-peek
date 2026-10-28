@@ -1,0 +1,5 @@
+{
+  "default": "../../matter-peek-web/icons/icon.svg",
+  "android_bg": "android-bg.svg",
+  "android_fg": "android-fg.svg"
+}

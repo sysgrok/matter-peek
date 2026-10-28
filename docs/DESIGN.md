@@ -225,6 +225,10 @@ words. All of this is private to `core`.
   the wasm to about 1.8 MB (0.7 MB gzipped).
 - The web UI reaches the API on its own origin, at `/ws`. `trunk serve`
   forwards that to the server (`Trunk.toml`).
+- The web UI is installable (a web app manifest, `manifest.webmanifest`, and
+  icons rendered from `matter-peek-web/icons/*.svg`). Where the browser offers
+  it (`beforeinstallprompt`, Chrome and Edge, on localhost or over HTTPS), the
+  top bar shows an Install button.
 - The API asks for an access token: 16 random bytes, in hex, made at the
   server's first start and kept in the store's directory (`access-token`,
   readable by its owner alone). A client gives it on the WebSocket handshake,
@@ -596,6 +600,11 @@ in `gen/android`) whose commands the page calls directly:
   comes with the pairing code of the window Google Home opened. The page
   passes this code back to Google Play services' commissioning, as Google's
   sample app does, and the device is handed over in the same way.
+- The other way round, the Share popup hands a device to another Matter app on
+  the phone: it opens our enhanced window, then gives its discriminator and
+  passcode (now part of `CommissioningWindow`), with the device's name and IDs,
+  to `CommissioningClient.shareDevice`. Android then lists the apps that handle
+  `ACTION_COMMISSION_DEVICE`, and the one picked commissions the device.
 
 `core` can also build native bindings itself. With the `uniffi` feature, it
 builds as a `cdylib` / `staticlib` (`cargo rustc --crate-type …`, so the no_std

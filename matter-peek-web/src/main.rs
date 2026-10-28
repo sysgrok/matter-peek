@@ -29,6 +29,7 @@ mod devices;
 mod fabrics;
 mod filter;
 mod icons;
+mod install;
 mod memory;
 mod network;
 mod our_fabrics;
@@ -348,6 +349,10 @@ enum Msg {
     /// Filter the stored list by tag substring.
     Filter(filter::FilterMsg),
     Connection(connection::ConnectionMsg),
+    /// Whether the browser offers to install the page as an app.
+    Installable(bool),
+    /// Install it.
+    Install,
     /// Fetch the stored OTA images.
     OtaImages,
     /// The user picked an OTA image file to upload.
@@ -449,6 +454,8 @@ struct App {
     connection: Option<String>,
     /// The access token typed into it.
     connection_token: String,
+    /// The browser offers to install the page as an app.
+    installable: bool,
     /// The server refused the access token kept.
     refused: bool,
     filter_focus: bool,
@@ -579,6 +586,8 @@ impl Component for App {
         transport::on_refused(move || {
             link.send_message(Msg::Connection(connection::ConnectionMsg::Refused))
         });
+        let link = ctx.link().clone();
+        install::watch(move |offered| link.send_message(Msg::Installable(offered)));
 
         Self {
             tab: Tab::Devices,
@@ -618,6 +627,7 @@ impl Component for App {
             filter: String::new(),
             connection: None,
             connection_token: String::new(),
+            installable: false,
             refused: false,
             filter_focus: false,
             filter_pick: 0,
@@ -1742,6 +1752,15 @@ impl Component for App {
             }
             Msg::Filter(msg) => self.update_filter(msg),
             Msg::Connection(msg) => self.update_connection(msg),
+            Msg::Installable(offered) => {
+                self.installable = offered;
+                true
+            }
+            Msg::Install => {
+                install::install();
+                self.installable = false;
+                true
+            }
             Msg::SaveTags(node_id) => {
                 let tags = self
                     .tag_inputs
@@ -2599,6 +2618,7 @@ impl App {
                         </a>
                         { self.view_fabric_switcher(link) }
                         { self.view_connection_button("is-appbar", link) }
+                        { self.view_install_button("is-appbar", link) }
                         <nav class="appbar-nav">
                             { for pages.into_iter().map(|page| link_to("appbar-link", page)) }
                             <a class={classes!("appbar-link", "is-assistant", assistant)}
@@ -2626,6 +2646,7 @@ impl App {
                         </div>
                     }
                     { self.view_connection_button("is-drawer", link) }
+                    { self.view_install_button("is-drawer", link) }
                     <nav class="drawer-nav">
                         { for pages.into_iter().map(|page| link_to("drawer-link", page)) }
                     </nav>

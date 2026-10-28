@@ -122,6 +122,8 @@ matter-peek thread findings                  # show the problems found in the Th
 matter-peek --help
 ```
 
+The web UI can also be installed as an app of its own: an iPhone, for example, adds it to its home screen. See the [user guide](https://github.com/sysgrok/matter-peek/blob/main/docs/GUIDE.md).
+
 If a server is running, pass `--server ws://127.0.0.1:17335` so that the CLI uses it. As the user who runs the server, the CLI finds its access token by itself; otherwise, give it with `--token` (`matter-peek token` prints it). Without a server, the CLI runs its own controller.
 
 `matter-peek serve` listens on this machine alone by default. `--listen 0.0.0.0:17335` makes it reachable from the network, for example from the app on a phone or a browser on another computer.

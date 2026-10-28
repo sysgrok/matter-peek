@@ -20,8 +20,12 @@ import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
 import com.google.android.gms.home.matter.Matter
 import com.google.android.gms.home.matter.commissioning.CommissioningRequest
+import com.google.android.gms.home.matter.commissioning.CommissioningWindow
 import com.google.android.gms.home.matter.commissioning.DeviceInfo
+import com.google.android.gms.home.matter.commissioning.ShareDeviceRequest
 import com.google.android.gms.home.matter.commissioning.SharedDeviceData
+import com.google.android.gms.home.matter.common.DeviceDescriptor
+import com.google.android.gms.home.matter.common.Discriminator
 
 private const val TAG = "matter-peek"
 
@@ -47,6 +51,17 @@ class HandedOverArgs {
   var error: String? = null
 }
 
+@InvokeArg
+class ShareArgs {
+  // The device, and the commissioning window the page opened on it.
+  lateinit var name: String
+  var vendorId: Int = 0
+  var productId: Int = 0
+  var discriminator: Int = 0
+  var passcode: Long = 0
+  var remainingSecs: Long = 0
+}
+
 /**
  * Google Play services' Matter commissioning, for the page. Google Play
  * services puts a new device on the network (its QR code, Bluetooth, Wi-Fi or
@@ -62,11 +77,11 @@ class PlayPlugin(private val activity: Activity) : Plugin(activity) {
   private var shares: Channel? = null
 
   override fun load(webView: WebView) {
-    share(activity.intent)
+    receiveShare(activity.intent)
   }
 
   override fun onNewIntent(intent: Intent) {
-    share(intent)
+    receiveShare(intent)
   }
 
   /** Whether Google Play services is there. */
@@ -121,6 +136,56 @@ class PlayPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve(JSObject().put("done", result.resultCode == Activity.RESULT_OK))
   }
 
+  /**
+   * Share a device with another Matter app on the phone, which the user picks
+   * from Android's list of them, through the commissioning window the page
+   * opened. Answered when Android's screens close: whether an app was picked
+   * (not that it commissioned the device).
+   */
+  @Command
+  fun share(invoke: Invoke) {
+    val args = invoke.parseArgs(ShareArgs::class.java)
+    val request = try {
+      val descriptor = DeviceDescriptor.builder()
+      if (args.vendorId != 0) {
+        descriptor.setVendorId(args.vendorId)
+        if (args.productId != 0) descriptor.setProductId(args.productId)
+      }
+      // Open from now, as far as Android knows, for the time it has left.
+      val window = CommissioningWindow.builder()
+        .setDiscriminator(Discriminator.forLongValue(args.discriminator))
+        .setPasscode(args.passcode)
+        .setWindowOpenMillis(SystemClock.elapsedRealtime())
+        .setDurationSeconds(args.remainingSecs)
+        .build()
+      ShareDeviceRequest.builder()
+        .setDeviceDescriptor(descriptor.build())
+        .setDeviceName(args.name)
+        .setCommissioningWindow(window)
+        .build()
+    } catch (e: IllegalArgumentException) {
+      invoke.reject(e.message ?: "Google Play services does not take this window", e)
+      return
+    } catch (e: IllegalStateException) {
+      invoke.reject(e.message ?: "Google Play services does not take this window", e)
+      return
+    }
+
+    Matter.getCommissioningClient(activity)
+      .shareDevice(request)
+      .addOnSuccessListener { sender ->
+        startIntentSenderForResult(invoke, IntentSenderRequest.Builder(sender).build(), "shared")
+      }
+      .addOnFailureListener { e ->
+        invoke.reject(e.message ?: "Google Play services cannot share the device", e)
+      }
+  }
+
+  @ActivityCallback
+  private fun shared(invoke: Invoke, result: ActivityResult) {
+    invoke.resolve(JSObject().put("done", result.resultCode == Activity.RESULT_OK))
+  }
+
   /** How the page's commission of the device handed over went: its node ID, or why not. */
   @Command
   fun handedOver(invoke: Invoke) {
@@ -130,7 +195,7 @@ class PlayPlugin(private val activity: Activity) : Plugin(activity) {
   }
 
   /** The device shared with us by `intent`, if it shares one, to the page. */
-  private fun share(intent: Intent?) {
+  private fun receiveShare(intent: Intent?) {
     if (intent?.action != Matter.ACTION_COMMISSION_DEVICE) return
     // Reopened from the recent apps: shared long ago.
     if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return

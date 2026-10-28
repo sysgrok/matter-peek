@@ -4,6 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>matter-peek</title>
+    <!-- Installable as an app of its own (on localhost or over HTTPS), and on
+         an iPhone's home screen. -->
+    
+    
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-title" content="matter-peek" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)" />
     <!-- Bulma, vendored locally (offline-safe; no CDN at runtime). -->
     
     <link rel="stylesheet" href="bulma.min.css" />
@@ -11,8 +21,8 @@
     <!-- The app; its release build goes through wasm-opt for size. -->
     
 <script type="module">
-import init, * as bindings from '/matter-peek-web-2fcec77bfee75019.js';
-const wasm = await init({ module_or_path: '/matter-peek-web-2fcec77bfee75019_bg.wasm' });
+import init, * as bindings from '/matter-peek-web-2178f91597385dc.js';
+const wasm = await init({ module_or_path: '/matter-peek-web-2178f91597385dc_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -21,6 +31,6 @@ window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
-  <link rel="modulepreload" href="/matter-peek-web-2fcec77bfee75019.js" crossorigin="anonymous" integrity="sha384-fMP6nu52f4GFPMXNsVftweWpFi/gC7uEDD/OCShwZPv0Q/b451GUjui0RET1tp8g"><link rel="preload" href="/matter-peek-web-2fcec77bfee75019_bg.wasm" crossorigin="anonymous" integrity="sha384-4VF2khvwaknbuUjwanAAkK8HWU/cH6fPAGU2wy2pilfqwgqWb5qf8M4J51A9HnSe" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/matter-peek-web-2178f91597385dc.js" crossorigin="anonymous" integrity="sha384-TFC01aq48BdO/0/zTNAX9HnUshkw+334EpkK2dAAhKclFbFvnnPdZipTOj0uQHmv"><link rel="preload" href="/matter-peek-web-2178f91597385dc_bg.wasm" crossorigin="anonymous" integrity="sha384-fLHSNUjk8zM/EPDul8AoisizzKz1L/FemHRNkI9fBFvNh34KD54NGM1/sMAO07qE" as="fetch" type="application/wasm"></head>
   <body></body>
 </html>

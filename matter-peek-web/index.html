@@ -4,6 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>matter-peek</title>
+    <!-- Installable as an app of its own (on localhost or over HTTPS), and on
+         an iPhone's home screen. -->
+    <link data-trunk rel="copy-file" href="manifest.webmanifest" />
+    <link data-trunk rel="copy-dir" href="icons" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-title" content="matter-peek" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)" />
     <!-- Bulma, vendored locally (offline-safe; no CDN at runtime). -->
     <link data-trunk rel="copy-file" href="bulma.min.css" />
     <link rel="stylesheet" href="bulma.min.css" />

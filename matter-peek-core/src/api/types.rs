@@ -854,6 +854,9 @@ pub struct CommissioningWindow {
     pub qr_code: Option<String>,
     /// The QR code's modules, row by row, `1` dark.
     pub qr_rows: Vec<String>,
+    /// The passcode, likewise (both codes hold it too).
+    #[serde(default)]
+    pub passcode: Option<u32>,
     pub discriminator: Option<u16>,
     /// Seconds until the window we opened closes.
     pub remaining_secs: Option<u64>,

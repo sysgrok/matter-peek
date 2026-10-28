@@ -4,7 +4,13 @@ fn main() {
     // The commands of the app's Android plugin (Google Play services), which
     // the page calls; the capability allows them.
     let play = InlinedPlugin::new()
-        .commands(&["available", "watch_shares", "commission", "handed_over"])
+        .commands(&[
+            "available",
+            "watch_shares",
+            "commission",
+            "handed_over",
+            "share",
+        ])
         .default_permission(DefaultPermissionRule::AllowAllCommands);
 
     tauri_build::try_build(Attributes::new().plugin("play", play))

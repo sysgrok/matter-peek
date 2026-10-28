@@ -89,6 +89,7 @@ fn content_type(name: &str) -> &'static str {
         "png" => "image/png",
         "ico" => "image/x-icon",
         "json" => "application/json",
+        "webmanifest" => "application/manifest+json",
         _ => "application/octet-stream",
     }
 }
