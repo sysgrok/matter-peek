@@ -10,14 +10,17 @@
 //! every cluster/attribute, so a missing attribute (an attribute-status error
 //! in its iterator) leaves that field `None` rather than aborting the snapshot.
 //!
-//! Covered so far: General (`0x0033`) and Software (`0x0034`) diagnostics.
-//! Thread / Wi-Fi / Ethernet land next.
+//! Covered here: General (`0x0033`) and Software (`0x0034`) diagnostics, and
+//! what a health check judges (with the network diagnostics, see
+//! [`crate::network`]).
 
 use core::num::NonZeroU8;
 
 use rs_matter::crypto::Crypto;
+use rs_matter::dm::clusters::decl::ethernet_network_diagnostics as eth_diag;
 use rs_matter::dm::clusters::decl::general_diagnostics::{
-    GeneralDiagnosticsAttrReads as _, GeneralDiagnosticsAttrResponses as _,
+    self as gen_diag, BootReasonEnum, GeneralDiagnosticsAttrReads as _,
+    GeneralDiagnosticsAttrResponses as _,
 };
 use rs_matter::dm::clusters::decl::operational_credentials::{
     self as op_creds, FabricDescriptorStruct, OperationalCredentialsAttrResponses as _,
@@ -25,22 +28,30 @@ use rs_matter::dm::clusters::decl::operational_credentials::{
 use rs_matter::dm::clusters::decl::software_diagnostics::{
     self as sw_diag, SoftwareDiagnosticsAttrResponses as _, ThreadMetricsStruct,
 };
+use rs_matter::dm::clusters::decl::thread_network_diagnostics as thread_diag;
+use rs_matter::dm::clusters::decl::wi_fi_network_diagnostics as wifi_diag;
 use rs_matter::dm::EndptId;
 use rs_matter::error::Error;
 use rs_matter::im::client::ImClient as _;
-use rs_matter::im::encoding::{AttrResp, ReportDataResp};
-use rs_matter::im::{AttrPath, GenericPath};
+use rs_matter::im::encoding::{AttrResp, EventResp, ReportDataResp};
+use rs_matter::im::{AttrPath, EventPath, GenericPath};
 use rs_matter::tlv::{FromTLV, TLVArray};
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::Matter;
 
-use crate::api::{DeviceFabric, ThreadMetric};
+use crate::api::{
+    ActiveFaults, BootReason, DeviceFabric, HardwareFault, NetworkFault, RadioFault, ThreadMetric,
+};
+use crate::health::HealthRead;
 use crate::model::{DeviceHealth, DiagSet, GeneralDiag, SoftwareDiag};
 
 extern crate alloc;
 
 /// The root node endpoint, where the diagnostic clusters live.
 pub(crate) const ROOT_ENDPOINT: EndptId = 0;
+
+/// Software Diagnostics' `SoftwareFault` event.
+const SOFTWARE_FAULT_EVENT: u32 = 0;
 
 /// The diagnostic **cluster IDs** a health snapshot covers, selected by `which`
 /// (endpoint is always [`ROOT_ENDPOINT`]).
@@ -56,9 +67,6 @@ pub(crate) const ROOT_ENDPOINT: EndptId = 0;
 /// accepts the subscription; [`parse_health`] then picks out the attributes we
 /// care about and ignores the rest.
 pub(crate) fn health_cluster_ids(which: DiagSet) -> alloc::vec::Vec<u32> {
-    use rs_matter::dm::clusters::decl::general_diagnostics as gen_diag;
-    use rs_matter::dm::clusters::decl::software_diagnostics as sw_diag;
-
     let mut clusters = alloc::vec::Vec::new();
     if which.general {
         clusters.push(gen_diag::FULL_CLUSTER.id);
@@ -104,15 +112,7 @@ pub(crate) fn fabric_paths(which: DiagSet) -> alloc::vec::Vec<AttrPath> {
 pub(crate) fn parse_health(resp: &ReportDataResp<'_>, which: DiagSet) -> DeviceHealth {
     let mut health = DeviceHealth::default();
     if which.general {
-        let reads = resp.general_diagnostics_read_resp();
-        let g = GeneralDiag {
-            up_time_secs: first(reads.up_time()),
-            reboot_count: first(reads.reboot_count()),
-            total_operational_hours: first(reads.total_operational_hours()),
-        };
-        if g != GeneralDiag::default() {
-            health.general = Some(g);
-        }
+        general(resp, &mut health);
     }
     if which.software {
         let reads = resp.software_diagnostics_read_resp();
@@ -158,7 +158,7 @@ pub async fn read_health<C: Crypto + Copy>(
     let mut health = DeviceHealth::default();
 
     if which.general {
-        health.general = Some(read_general(matter, crypto, fab_idx, node_id).await?);
+        read_general(matter, crypto, fab_idx, node_id, &mut health).await?;
     }
     if which.software {
         health.software = Some(read_software(matter, crypto, fab_idx, node_id).await?);
@@ -207,6 +207,149 @@ pub(crate) async fn read_fabrics<C: Crypto>(
     }
 }
 
+/// What a health check judges, in one read: General and Software
+/// Diagnostics whole, the diagnostics of each network the device has, and the
+/// software faults it reported since it started.
+pub(crate) async fn read_check<C: Crypto>(
+    matter: &Matter<'_>,
+    crypto: C,
+    fab_idx: NonZeroU8,
+    node_id: u64,
+) -> Result<HealthRead, Error> {
+    let attrs = [
+        cluster_path(Some(ROOT_ENDPOINT), gen_diag::FULL_CLUSTER.id),
+        cluster_path(Some(ROOT_ENDPOINT), sw_diag::FULL_CLUSTER.id),
+        cluster_path(None, wifi_diag::FULL_CLUSTER.id),
+        cluster_path(None, thread_diag::FULL_CLUSTER.id),
+        cluster_path(None, eth_diag::FULL_CLUSTER.id),
+    ];
+    let events = [EventPath {
+        endpoint: Some(ROOT_ENDPOINT),
+        cluster: Some(sw_diag::FULL_CLUSTER.id),
+        event: Some(SOFTWARE_FAULT_EVENT),
+        ..Default::default()
+    }];
+
+    let exchange = Exchange::initiate(matter, crypto, fab_idx, node_id).await?;
+    let mut chunk = exchange
+        .read_with(|msg| {
+            msg.attr_requests_from(&attrs)?
+                .event_requests_from(&events)?
+                .fabric_filtered(true)?
+                .end()
+        })
+        .await?;
+
+    let mut read = HealthRead::default();
+    let mut software = SoftwareDiag::default();
+    loop {
+        {
+            let resp = chunk.response()?;
+            general(&resp, &mut read.health);
+            software_diag(&resp, &mut software);
+            crate::network::interfaces(&resp, &mut read.network);
+            crate::network::wifi(&resp, &mut read.network);
+            crate::network::thread(&resp, &mut read.network);
+            crate::network::ethernet(&resp, &mut read.network);
+            software_faults(&resp, &mut read.software_faults);
+        }
+
+        match chunk.complete().await? {
+            Some(next) => chunk = next,
+            None => break,
+        }
+    }
+    read.health.software = Some(software);
+
+    Ok(read)
+}
+
+/// Every attribute of `cluster`, on `endpoint` (any if `None`).
+fn cluster_path(endpoint: Option<EndptId>, cluster: u32) -> AttrPath {
+    AttrPath::from_gp(&GenericPath::new(endpoint, Some(cluster), None))
+}
+
+/// The software faults in `resp`, by name, else by ID, onto `into`.
+fn software_faults(resp: &ReportDataResp<'_>, into: &mut alloc::vec::Vec<alloc::string::String>) {
+    let events = resp
+        .event_reports
+        .iter()
+        .flat_map(|reports| reports.iter())
+        .filter_map(Result::ok);
+
+    for event in events {
+        let EventResp::Data(data) = event else {
+            continue;
+        };
+        if data.path.cluster != Some(sw_diag::FULL_CLUSTER.id)
+            || data.path.event != Some(SOFTWARE_FAULT_EVENT)
+        {
+            continue;
+        }
+
+        let Ok(fields) = data.data.structure() else {
+            continue;
+        };
+        let name = fields
+            .find_ctx(1)
+            .and_then(|name| name.utf8())
+            .ok()
+            .filter(|name| !name.is_empty())
+            .map(alloc::string::ToString::to_string);
+        let id = fields.find_ctx(0).and_then(|id| id.u64()).ok();
+        into.extend(name.or_else(|| id.map(|id| alloc::format!("#{id}"))));
+    }
+}
+
+fn boot_reason(reason: BootReasonEnum) -> BootReason {
+    match reason {
+        BootReasonEnum::Unspecified => BootReason::Unspecified,
+        BootReasonEnum::PowerOnReboot => BootReason::PowerOnReboot,
+        BootReasonEnum::BrownOutReset => BootReason::BrownOutReset,
+        BootReasonEnum::SoftwareWatchdogReset => BootReason::SoftwareWatchdogReset,
+        BootReasonEnum::HardwareWatchdogReset => BootReason::HardwareWatchdogReset,
+        BootReasonEnum::SoftwareUpdateCompleted => BootReason::SoftwareUpdateCompleted,
+        BootReasonEnum::SoftwareReset => BootReason::SoftwareReset,
+    }
+}
+
+fn hardware_fault(code: u8) -> HardwareFault {
+    match code {
+        1 => HardwareFault::Radio,
+        2 => HardwareFault::Sensor,
+        3 => HardwareFault::ResettableOverTemp,
+        4 => HardwareFault::NonResettableOverTemp,
+        5 => HardwareFault::PowerSource,
+        6 => HardwareFault::VisualDisplay,
+        7 => HardwareFault::AudioOutput,
+        8 => HardwareFault::UserInterface,
+        9 => HardwareFault::NonVolatileMemory,
+        10 => HardwareFault::TamperDetected,
+        _ => HardwareFault::Unspecified,
+    }
+}
+
+fn radio_fault(code: u8) -> RadioFault {
+    match code {
+        1 => RadioFault::WiFi,
+        2 => RadioFault::Cellular,
+        3 => RadioFault::Thread,
+        4 => RadioFault::Nfc,
+        5 => RadioFault::Ble,
+        6 => RadioFault::Ethernet,
+        _ => RadioFault::Unspecified,
+    }
+}
+
+fn network_fault(code: u8) -> NetworkFault {
+    match code {
+        1 => NetworkFault::HardwareFailure,
+        2 => NetworkFault::NetworkJammed,
+        3 => NetworkFault::ConnectionFailed,
+        _ => NetworkFault::Unspecified,
+    }
+}
+
 /// First report from a scalar-attribute iterator. `None` on absence/error
 /// (an unsupported attribute surfaces as the iterator's `Err` arm).
 fn first<T, I>(mut iter: I) -> Option<T>
@@ -219,12 +362,14 @@ where
     }
 }
 
+/// What General Diagnostics tells of the device's health, onto `health`.
 async fn read_general<C: Crypto>(
     matter: &Matter<'_>,
     crypto: C,
     fab_idx: NonZeroU8,
     node_id: u64,
-) -> Result<GeneralDiag, Error> {
+    health: &mut DeviceHealth,
+) -> Result<(), Error> {
     let exchange = Exchange::initiate(matter, crypto, fab_idx, node_id).await?;
 
     let mut chunk = exchange
@@ -234,27 +379,65 @@ async fn read_general<C: Crypto>(
                 .up_time(ROOT_ENDPOINT)?
                 .reboot_count(ROOT_ENDPOINT)?
                 .total_operational_hours(ROOT_ENDPOINT)?
+                .boot_reason(ROOT_ENDPOINT)?
+                .active_hardware_faults(ROOT_ENDPOINT)?
+                .active_radio_faults(ROOT_ENDPOINT)?
+                .active_network_faults(ROOT_ENDPOINT)?
                 .end()?
                 .fabric_filtered(true)?
                 .end()
         })
         .await?;
 
-    let diag = {
-        let resp = chunk.response()?;
-        let reads = resp.general_diagnostics_read_resp();
-        GeneralDiag {
-            up_time_secs: first(reads.up_time()),
-            reboot_count: first(reads.reboot_count()),
-            total_operational_hours: first(reads.total_operational_hours()),
-        }
-    };
+    loop {
+        general(&chunk.response()?, health);
 
-    while let Some(next) = chunk.complete().await? {
-        chunk = next;
+        match chunk.complete().await? {
+            Some(next) => chunk = next,
+            None => break,
+        }
     }
 
-    Ok(diag)
+    health.general.get_or_insert_with(Default::default);
+
+    Ok(())
+}
+
+/// What General Diagnostics tells of the device's health in `resp`, merged
+/// into `health`.
+fn general(resp: &ReportDataResp<'_>, health: &mut DeviceHealth) {
+    let reads = resp.general_diagnostics_read_resp();
+    let g = GeneralDiag {
+        up_time_secs: first(reads.up_time()),
+        reboot_count: first(reads.reboot_count()),
+        total_operational_hours: first(reads.total_operational_hours()),
+        boot_reason: first(reads.boot_reason()).map(boot_reason),
+    };
+
+    let cluster = gen_diag::FULL_CLUSTER.id;
+    let mut faults = ActiveFaults::default();
+    let list = |attr: gen_diag::AttributeId| {
+        let mut items = alloc::vec::Vec::new();
+        list_items(resp, cluster, attr as _, &mut items, |fault: &u8| {
+            Some(*fault)
+        })
+        .then_some(items)
+    };
+    faults.hardware = list(gen_diag::AttributeId::ActiveHardwareFaults)
+        .map(|codes| codes.into_iter().map(hardware_fault).collect());
+    faults.radio = list(gen_diag::AttributeId::ActiveRadioFaults)
+        .map(|codes| codes.into_iter().map(radio_fault).collect());
+    faults.network = list(gen_diag::AttributeId::ActiveNetworkFaults)
+        .map(|codes| codes.into_iter().map(network_fault).collect());
+
+    let mut delta = DeviceHealth::default();
+    if g != GeneralDiag::default() {
+        delta.general = Some(g);
+    }
+    if faults != ActiveFaults::default() {
+        delta.faults = Some(faults);
+    }
+    health.merge(delta);
 }
 
 /// The whole of Software Diagnostics, so that attributes a device does not
@@ -279,15 +462,7 @@ async fn read_software<C: Crypto>(
 
     let mut diag = SoftwareDiag::default();
     loop {
-        {
-            let resp = chunk.response()?;
-            let reads = resp.software_diagnostics_read_resp();
-            diag.current_heap_free = first(reads.current_heap_free()).or(diag.current_heap_free);
-            diag.current_heap_used = first(reads.current_heap_used()).or(diag.current_heap_used);
-            diag.current_heap_high_watermark =
-                first(reads.current_heap_high_watermark()).or(diag.current_heap_high_watermark);
-            thread_metrics(&resp, &mut diag.thread_metrics);
-        }
+        software_diag(&chunk.response()?, &mut diag);
 
         match chunk.complete().await? {
             Some(next) => chunk = next,
@@ -296,6 +471,16 @@ async fn read_software<C: Crypto>(
     }
 
     Ok(diag)
+}
+
+/// The Software Diagnostics in `resp`, onto `diag`.
+fn software_diag(resp: &ReportDataResp<'_>, diag: &mut SoftwareDiag) {
+    let reads = resp.software_diagnostics_read_resp();
+    diag.current_heap_free = first(reads.current_heap_free()).or(diag.current_heap_free);
+    diag.current_heap_used = first(reads.current_heap_used()).or(diag.current_heap_used);
+    diag.current_heap_high_watermark =
+        first(reads.current_heap_high_watermark()).or(diag.current_heap_high_watermark);
+    thread_metrics(resp, &mut diag.thread_metrics);
 }
 
 /// The ThreadMetrics in `resp`, onto `into`.

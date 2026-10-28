@@ -23,7 +23,7 @@ pub(super) fn handle(handle: DeviceHandle) -> api::DeviceHandle {
 /// (`None` before the first sync), `remembered` whether it has a record,
 /// `check_ins` whether we are registered for its Check-Ins, `awake_ms` how
 /// much longer it is awake if it sleeps long, `stay_awake` whether it is kept
-/// so.
+/// so. Its health check is left for the caller to fill in.
 pub(super) fn device(
     d: StoredDevice,
     fabric: alloc::string::String,
@@ -58,6 +58,7 @@ pub(super) fn device(
         network: d.network,
         device_types: d.device_types,
         details: d.details,
+        health_check: None,
     }
 }
 

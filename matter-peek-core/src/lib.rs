@@ -42,6 +42,7 @@ mod controller {
     pub mod discovery;
     pub mod explain;
     pub mod fabrics;
+    pub mod health;
     #[cfg(feature = "std")]
     pub mod host;
     pub mod icd;

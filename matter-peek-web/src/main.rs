@@ -31,6 +31,7 @@ mod datamodel;
 mod devices;
 mod fabrics;
 mod filter;
+mod health;
 mod icons;
 mod install;
 mod memory;
@@ -186,6 +187,8 @@ enum Msg {
     Assistant(AssistantMsg),
     /// In a device's memory popup.
     Memory(memory::MemoryMsg),
+    /// In a device's health popup.
+    Health(health::HealthMsg),
     /// In a device's data model popup.
     Model(datamodel::ModelMsg),
     /// In a device's share popup.
@@ -542,6 +545,8 @@ struct App {
     logs: Option<LogsView>,
     /// The memory popup, while open.
     memory: Option<memory::MemoryView>,
+    /// The health popup, while open.
+    health_view: Option<health::HealthView>,
     /// The data model popup, while open.
     model_view: Option<datamodel::ModelView>,
     /// The share popup, while open.
@@ -687,6 +692,7 @@ impl Component for App {
             ota_announcing: HashSet::new(),
             logs: None,
             memory: None,
+            health_view: None,
             model_view: None,
             share: None,
             clock: None,
@@ -761,6 +767,7 @@ impl Component for App {
             }
             Msg::Assistant(msg) => self.update_assistant(ctx, msg),
             Msg::Memory(msg) => self.update_memory(ctx, msg),
+            Msg::Health(msg) => self.update_health(ctx, msg),
             Msg::Model(msg) => self.update_model(ctx, msg),
             Msg::Share(msg) => self.update_share(ctx, msg),
             Msg::Clock(msg) => self.update_clock(ctx, msg),
@@ -1914,8 +1921,9 @@ impl Component for App {
                     // the reads of the running updates (`read_ota_updates`).
                     wire::Response::OtaUploadStarted { .. } | wire::Response::OtaUpdates { .. } => {
                     }
-                    // The share, clock and data model popups' own.
-                    wire::Response::Model { .. }
+                    // The share, clock, health and data model popups' own.
+                    wire::Response::Health { .. }
+                    | wire::Response::Model { .. }
                     | wire::Response::Events { .. }
                     | wire::Response::CommandOutcome { .. }
                     | wire::Response::CommissioningWindow { .. }
@@ -2064,6 +2072,7 @@ impl Component for App {
                 { self.view_camera_modal(link) }
                 { self.view_logs_modal(link) }
                 { self.view_memory_modal(link) }
+                { self.view_health_modal(link) }
                 { self.view_model_modal(link) }
                 { self.view_fabrics_modal(link) }
                 { self.view_manage_modal(link) }
@@ -2215,6 +2224,7 @@ impl App {
             .as_ref()
             .map(|view| view.node_id)
             .or(self.memory.as_ref().map(|view| view.node_id))
+            .or(self.health_view.as_ref().map(|view| view.node_id))
             .or(self.model_view.as_ref().map(|view| view.node_id))
             .or(self.share.as_ref().map(|view| view.node_id))
             .or(self.clock.as_ref().map(|view| view.node_id))

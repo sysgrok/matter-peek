@@ -10,6 +10,8 @@ use matter_peek_core::api;
 pub enum Icon {
     /// Light colours.
     Sun,
+    /// Health.
+    Pulse,
     /// Dark colours.
     Moon,
     Wifi,
@@ -101,6 +103,7 @@ pub fn icon(glyph: Icon, size: u32) -> Html {
         },
         Icon::Play => html! { <path d="M6 4l14 8-14 8z" /> },
         Icon::Bolt => html! { <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" /> },
+        Icon::Pulse => html! { <path d="M22 12h-4l-3 9L9 3l-3 9H2" /> },
         Icon::Wifi => html! {
             <>
                 <path d="M2 8.5a15 15 0 0 1 20 0" />

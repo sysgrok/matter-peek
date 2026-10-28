@@ -11,6 +11,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use core::net::{Ipv6Addr, SocketAddr};
 use core::num::NonZeroU8;
 
 use log::{info, warn};
@@ -87,6 +88,47 @@ pub async fn discover_all_with_running_backend(
 
     info!("discovery: found {} device(s)", found.len());
     found
+}
+
+/// The address of the device in commissioning mode that advertises IPv6 address
+/// `ip`, as this host reaches it (a link-local one with this host's scope).
+/// Assumes the mDNS backend runs.
+pub async fn find_commissionable_with_running_backend(
+    matter: &Matter<'_>,
+    ip: Ipv6Addr,
+) -> Option<SocketAddr> {
+    let query = MdnsBrowseQuery::Commissionable(CommissionableFilter {
+        commissioning_mode_only: true,
+        ..Default::default()
+    });
+
+    let mut ids = Vec::new();
+    if let Err(e) = matter
+        .transport()
+        .browse(&query, DEFAULT_BROWSE_WINDOW_MS, |found| {
+            if let MdnsBrowseMatch::Commissionable { id } = found {
+                ids.push(id);
+            }
+        })
+        .await
+    {
+        warn!("discovery: browse failed: {e:?}");
+    }
+
+    for id in ids {
+        let Ok(addrs) = matter.transport().resolve_commissionable_addrs(id).await else {
+            continue;
+        };
+        let found = addrs
+            .iter()
+            .filter_map(|addr| addr.udp())
+            .find(|addr| matches!(addr, SocketAddr::V6(v6) if *v6.ip() == ip));
+        if found.is_some() {
+            return found;
+        }
+    }
+
+    None
 }
 
 /// The nodes advertising on our fabric `fab_idx` - the devices holding it that

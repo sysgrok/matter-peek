@@ -86,7 +86,7 @@ same native controller also serves the CLI, the MCP server and the apps.
 |---|---|
 | Commissioning | `commission` (over IP or BLE, with network credentials, `remember` and a progress listener), `cancel_commission`, `read_qr_image`, `discover` (mDNS and BLE), `advertised_devices` (the commissioned devices on the network, on our fabrics or on others', grouped by device) |
 | Device list | `list_devices` (with a filter, see [Device filters](#device-filters)), `subscribe_devices` (live: the current list, then the list again each time it changes; returns a `DevicesSubscription`), `sync`, `remember`, `forget`, `set_tags`, `decommission` |
-| Health | `peek_device` (a one-shot read, which also includes the heap, and the threads (tasks) of the device's software and their stacks, where the device reports them), `subscribe` (live: General Diagnostics (uptime, reboots, operating hours) and the fabrics the device is on; returns a `Subscription`, which stops when it is dropped) |
+| Health | `peek_device` (a one-shot read, which also includes the heap, and the threads (tasks) of the device's software and their stacks, where the device reports them), `subscribe` (live: General Diagnostics (uptime, reboots, operating hours, boot reason, active faults) and the fabrics the device is on; returns a `Subscription`, which stops when it is dropped), `check_health` (a verdict on the signs of crashes, the heap, the stacks and the link; see [Health checks](#health-checks)) |
 | Sleepy devices (ICD) | `register_check_ins`, `unregister_check_ins` (Check-In registration for a device that can idle long), `wake_device`, `stay_awake`, `let_sleep` (keeping such a device awake, so that it answers) |
 | Thread | `read_thread_mesh`: the networks, nodes, links and findings, built from our Thread devices' tables and from the MeshCoP and Matter adverts on the LAN |
 | Device | `read_network` (interfaces, known networks, and Wi-Fi, Thread or Ethernet diagnostics), `change_network` (add or update, remove, connect or reorder a known network), `retrieve_logs`, `identify` |
@@ -181,7 +181,8 @@ Below the service, these modules wrap rs-matter's controller side:
 - `discovery` and `mdns`: browsing, and the mDNS backends;
 - `ble`: commissioning over Bluetooth LE;
 - `basic_info`, `diagnostics` and `network`: a device's identity, its health
-  and its networks; `netconfig` changes the networks;
+  and its networks; `netconfig` changes the networks; `health` judges a
+  health check;
 - `subscribe`: the live subscriptions;
 - `datamodel`, with `schema` and `values`: any cluster, by name, as JSON;
 - `logs`, `ota`, `icd`, `mesh`, `time` and `window`: diagnostic logs, the OTA
@@ -304,7 +305,7 @@ The facets come from the device record (`net`, `type`, `vendor`, `product`,
 `fabric`, `sw`, `hw`, `node`, `label`, `tag`, and the details: `spec`,
 `cluster`, `can`, `power`, `icd`, `endpoints`, `ssid`, `thread`, `role`), from
 the health subscription (`eco`, `fabrics`, `uptime`, `reboots`, `hours`,
-`heap`) and from the updates (`ota`). `is:` takes states (online, offline,
+`heap`), from the last health check (`health`) and from the updates (`ota`). `is:` takes states (online, offline,
 remembered, shared, fabrics-full, updatable, updating, sleepy, bridge,
 test-vendor). The web UI knows the live facts of every card. The server knows
 them only for the devices it follows at the moment, so on the server a term on
@@ -356,6 +357,29 @@ filter.
 - Events are read with rs-matter's event paths, and their fields are decoded by
   the schema. Delta timestamps count from the previous event in the same
   report.
+
+### Health checks
+- A check reads, in one request, General and Software Diagnostics as cluster
+  wildcards, the Wi-Fi, Thread and Ethernet Network Diagnostics of every
+  endpoint, and Software Diagnostics' `SoftwareFault` events. `health::judge`
+  then gives each of four areas (crashes, heap, stacks, link) a verdict, a
+  summary and findings. It is a pure function, with unit tests.
+- The thresholds are rules of thumb, kept as constants in `health.rs`. A task's
+  stack is judged by the share of it used at its peak (75 % and 90 %, as in the
+  Memory popup) and by its least free bytes, against a floor of the heap's size
+  divided by 512, from 512 B to 64 KiB. A device that restarted at least 10
+  times, and more often than once per hour of operation, may be restarting over
+  and over; a device under development restarts often, but rarely that often.
+- The crash log is never read: a device may delete it once delivered
+  (rs-matter's `DiagLogs::retrieved`). `crash_signs` says when the boot reason
+  (a watchdog or software reset), the restarts or the software faults point to
+  a crash.
+- The service keeps each device's last check in memory, and the device list
+  carries it. With the periodic sync on, it also checks the devices in the
+  background, one at a time, if they answer and are awake: soon after the first
+  sync, every 6 hours, 30 minutes after a failed check, and 30 seconds after the
+  device's subscription reports another reboot count or boot reason, or other
+  faults. A peek makes the device due at once.
 
 ### Health subscriptions
 - There is one subscription per device, shared by all its listeners. A listener

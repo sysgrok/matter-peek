@@ -8,14 +8,16 @@
 //! - versions by the device's string, with the number in hex in brackets
 //!   (`1.3.0-s1 (0x01030041)`);
 //! - durations in units, from the largest one present (`2mo 4d 0h 6m 1s`);
-//! - moments as `2026-10-23 14:05:09 UTC`, UTC offsets as `+02:00`.
+//! - moments as `2026-10-23 14:05:09 UTC`, UTC offsets as `+02:00`;
+//! - sizes in binary units (`1.1KB`).
 
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use super::types::{
-    DeviceFabric, DeviceInfo, DeviceTime, IcdInfo, IcdMode, NetworkKind, NetworkStatus, ThreadRole,
+    BootReason, DeviceFabric, DeviceInfo, DeviceTime, HardwareFault, HealthAreaKind, HealthVerdict,
+    IcdInfo, IcdMode, NetworkFault, NetworkKind, NetworkStatus, RadioFault, ThreadRole,
     TimeGranularity, WifiSecurity, WifiVersion,
 };
 
@@ -357,6 +359,85 @@ impl ThreadRole {
     }
 }
 
+impl HealthVerdict {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Good => "Good",
+            Self::Fair => "Fair",
+            Self::Poor => "Poor",
+        }
+    }
+}
+
+impl HealthAreaKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Crashes => "Crashes",
+            Self::Heap => "Heap",
+            Self::Stacks => "Stacks",
+            Self::Link => "Link",
+        }
+    }
+}
+
+impl BootReason {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::PowerOnReboot => "power-on",
+            Self::BrownOutReset => "brown-out",
+            Self::SoftwareWatchdogReset => "software watchdog",
+            Self::HardwareWatchdogReset => "hardware watchdog",
+            Self::SoftwareUpdateCompleted => "software update",
+            Self::SoftwareReset => "software reset",
+        }
+    }
+}
+
+impl HardwareFault {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Radio => "radio",
+            Self::Sensor => "sensor",
+            Self::ResettableOverTemp => "overheating",
+            Self::NonResettableOverTemp => "overheated",
+            Self::PowerSource => "power source",
+            Self::VisualDisplay => "display",
+            Self::AudioOutput => "audio output",
+            Self::UserInterface => "user interface",
+            Self::NonVolatileMemory => "non-volatile memory",
+            Self::TamperDetected => "tampering",
+        }
+    }
+}
+
+impl RadioFault {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::WiFi => "Wi-Fi",
+            Self::Cellular => "cellular",
+            Self::Thread => "Thread",
+            Self::Nfc => "NFC",
+            Self::Ble => "Bluetooth LE",
+            Self::Ethernet => "Ethernet",
+        }
+    }
+}
+
+impl NetworkFault {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::HardwareFailure => "hardware failure",
+            Self::NetworkJammed => "network jammed",
+            Self::ConnectionFailed => "connection failed",
+        }
+    }
+}
+
 /// The name of vendor `vid`, as the CSA's registry has it.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn vendor_name(vid: u16) -> Option<String> {
@@ -618,6 +699,21 @@ pub fn bit_rate(bits_per_sec: u64) -> String {
     format!("{bits_per_sec} bit/s")
 }
 
+/// A size in bytes, e.g. `512B`, `1.1KB`, `2.3MB`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn bytes(size: u64) -> String {
+    const UNITS: [(u64, &str); 2] = [(1_048_576, "MB"), (1024, "KB")];
+
+    for (unit, suffix) in UNITS {
+        if size >= unit {
+            let tenths = size * 10 / unit;
+            return format!("{}.{}{suffix}", tenths / 10, tenths % 10);
+        }
+    }
+
+    format!("{size}B")
+}
+
 /// `2026-10-23 14:05:09`, from milliseconds since the Unix epoch.
 fn date_time(unix_ms: u64) -> String {
     let secs = unix_ms / 1000;
@@ -730,6 +826,7 @@ mod tests {
                 thread_role,
                 ..Default::default()
             },
+            health_check: None,
         }
     }
 

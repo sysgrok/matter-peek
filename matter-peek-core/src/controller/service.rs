@@ -5,8 +5,8 @@
 //! fabric, ensures the CA, then runs side by side the transport pump, the mDNS
 //! backend (for operational resolves), our own node (OTA Provider, BDX,
 //! subscription reports), the operations (side by side unless they conflict,
-//! see [`locks`], plus a periodic sync) and the health subscriptions (detached,
-//! so they never block operations).
+//! see [`locks`], plus a periodic sync), the health subscriptions (detached,
+//! so they never block operations) and the background health checks.
 //!
 //! It is `no_std`: the host hands it the stack, the crypto, the KV store, the OTA
 //! image store and the UDP network (see [`crate::host`] for this host's).
@@ -35,6 +35,7 @@ use rs_matter::crypto::Crypto;
 use rs_matter::error::Error;
 use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::{NetworkReceive, NetworkSend, NoNetwork};
+use rs_matter::utils::sync::Notification;
 use rs_matter::Matter;
 
 use crate::api::{
@@ -50,6 +51,7 @@ use crate::ota::{OtaEvent, OtaImageStore, OtaProvider};
 use crate::persist::{ControllerStore, KvBuf};
 use crate::subscribe::{Coverage, Gate, Reports};
 
+use health::HealthChecks;
 use locks::{Key, Locks, Mode};
 use ota::{OtaFollower, TrackedUpdate, Upload};
 use watch::{SubJob, Watch};
@@ -61,6 +63,7 @@ mod convert;
 mod datamodel;
 mod devices;
 mod fabrics;
+mod health;
 mod icd;
 mod locks;
 mod mesh;
@@ -173,6 +176,10 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     thread_names_missed: Cell<Option<Instant>>,
     /// The border routers seen lately, by name, and when.
     border_routers: RefCell<BTreeMap<String, (BorderRouter, Instant)>>,
+    /// The devices' health checks, and when they are due.
+    health: RefCell<HealthChecks>,
+    /// Wakes the background health checks: a device fell due.
+    health_wake: Notification,
     /// The Bluetooth side of the transport, for commissioning over BLE.
     #[cfg(feature = "ble")]
     btp: &'a rs_matter::transport::network::btp::Btp,
@@ -314,6 +321,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             | Op::ReadThreadMesh { fabric, .. } => self.fabric_keys(fabric, Mode::Read),
             Op::DeleteFabric { fabric, .. } => self.fabric_keys(fabric, Mode::Write),
             Op::PeekDevice { node_id, .. }
+            | Op::CheckHealth { node_id, .. }
             | Op::ReadModel { node_id, .. }
             | Op::ReadEvents { node_id, .. }
             | Op::ReadNetwork { node_id, .. }
@@ -550,6 +558,9 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             }
             Op::PeekDevice { node_id, reply } => {
                 let _ = reply.send(self.peek_device(node_id).await).await;
+            }
+            Op::CheckHealth { node_id, reply } => {
+                let _ = reply.send(self.check_health(node_id).await).await;
             }
             Op::ReadNetwork { node_id, reply } => {
                 let _ = reply.send(self.read_network(node_id).await).await;
@@ -821,6 +832,8 @@ async fn run<'a, C, S, O, N, M>(
         thread_names: RefCell::new(BTreeMap::new()),
         thread_names_missed: Cell::new(None),
         border_routers: RefCell::new(BTreeMap::new()),
+        health: RefCell::new(HealthChecks::default()),
+        health_wake: Notification::new(),
         #[cfg(feature = "ble")]
         btp: &btp,
     };
@@ -843,6 +856,7 @@ async fn run<'a, C, S, O, N, M>(
     let mut applies = pin!(ctx.run_apply_jobs(apply_jobs_rx));
     let mut taken = pin!(ctx.run_check_ins(check_ins_rx));
     let mut keep_awake = pin!(ctx.run_stay_awake());
+    let mut health_checks = pin!(ctx.run_health_checks());
     // Operational resolves (re-addressing a listed device over CASE) need it;
     // without it the rest still works.
     let mut mdns = pin!(async {
@@ -858,7 +872,11 @@ async fn run<'a, C, S, O, N, M>(
     match select4(
         &mut pump,
         &mut ops,
-        select3(&mut subs, &mut applies, select(&mut taken, &mut keep_awake)),
+        select3(
+            &mut subs,
+            &mut applies,
+            select3(&mut taken, &mut keep_awake, &mut health_checks),
+        ),
         select(&mut mdns, &mut node),
     )
     .await
@@ -867,10 +885,12 @@ async fn run<'a, C, S, O, N, M>(
         Either4::Second(()) => info!("service: every handle dropped, exiting"),
         Either4::Third(Either3::First(())) => info!("service: subscription driver exited"),
         Either4::Third(Either3::Second(())) => info!("service: OTA apply driver exited"),
-        Either4::Third(Either3::Third(Either::First(()))) => {
+        Either4::Third(Either3::Third(Either3::First(()))) => {
             info!("service: Check-In driver exited")
         }
-        Either4::Third(Either3::Third(Either::Second(never))) => match never {},
+        Either4::Third(Either3::Third(Either3::Second(never) | Either3::Third(never))) => {
+            match never {}
+        }
         Either4::Fourth(Either::First(())) => {}
         Either4::Fourth(Either::Second(r)) => error!("service: controller node exited: {r:?}"),
     }
@@ -935,6 +955,7 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             | Op::SetTags { reply, .. }
             | Op::Decommission { reply, .. } => refuse(reply, error).await,
             Op::PeekDevice { reply, .. } => refuse(reply, error).await,
+            Op::CheckHealth { reply, .. } => refuse(reply, error).await,
             Op::ReadNetwork { reply, .. } | Op::ChangeNetwork { reply, .. } => {
                 refuse(reply, error).await
             }

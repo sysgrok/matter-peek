@@ -191,10 +191,12 @@ fn theme<R: Runtime>() -> TauriPlugin<R> {
     builder.build()
 }
 
-/// Give the window dark colours, or light ones.
+/// Give the window dark colours, or light ones. Async, so that it runs off the
+/// main thread: on Windows, changing the theme from within WebView2's message
+/// handler, where a sync command runs, hangs the window.
 #[cfg(desktop)]
 #[tauri::command]
-fn set_theme<R: Runtime>(window: tauri::Window<R>, dark: bool) -> Result<(), String> {
+async fn set_theme<R: Runtime>(window: tauri::Window<R>, dark: bool) -> Result<(), String> {
     let theme = if dark {
         tauri::Theme::Dark
     } else {

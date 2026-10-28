@@ -18,7 +18,7 @@ android {
     compileSdk = 37
     namespace = "com.sysgrok.matterpeek"
     defaultConfig {
-        manifestPlaceholders["usesCleartextTraffic"] = "false"
+        manifestPlaceholders["usesCleartextTraffic"] = "true"
         applicationId = "com.sysgrok.matterpeek"
         minSdk = 24
         targetSdk = 37

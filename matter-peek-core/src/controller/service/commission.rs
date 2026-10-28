@@ -142,8 +142,11 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 ));
             }
             CommissionVia::Ip { addr } => Reach::Ip(
-                addr.parse()
-                    .map_err(|e| PeekError::failed(format!("invalid peer address: {e}")))?,
+                self.local_link(
+                    addr.parse()
+                        .map_err(|e| PeekError::failed(format!("invalid peer address: {e}")))?,
+                )
+                .await,
             ),
             CommissionVia::Ble { addr, network } => Reach::Ble {
                 filter: code.filter,
@@ -154,6 +157,28 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
 
         self.commission_flow(&fabric, reach, code.passcode, remember, progress)
             .await
+    }
+
+    /// A link-local `addr` as this host reaches the device: its scope may be
+    /// another host's (an app hands over the address its phone found), so the
+    /// device is looked up by its IP among those in commissioning mode.
+    async fn local_link(&self, addr: SocketAddr) -> SocketAddr {
+        let SocketAddr::V6(v6) = addr else {
+            return addr;
+        };
+        if !v6.ip().is_unicast_link_local() {
+            return addr;
+        }
+
+        match self.controller.find_commissionable(*v6.ip()).await {
+            Some(found) => {
+                if found != addr {
+                    info!("commission: {addr} is at {found} from here");
+                }
+                found
+            }
+            None => addr,
+        }
     }
 
     /// The commission proper, reporting its steps to `progress`: commission,

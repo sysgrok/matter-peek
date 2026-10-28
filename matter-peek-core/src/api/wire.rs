@@ -136,6 +136,8 @@ pub enum Request {
     },
     /// See `MatterPeek::peek_device`. Answered with [`Response::Peek`].
     PeekDevice { node_id: u64 },
+    /// See `MatterPeek::check_health`. Answered with [`Response::Health`].
+    CheckHealth { node_id: u64 },
     /// See `MatterPeek::remove_device_fabric`. Answered with
     /// [`Response::Peek`], the device's fabrics.
     RemoveDeviceFabric { node_id: u64, fabric_index: u8 },
@@ -381,6 +383,10 @@ pub enum Response {
     Peek {
         node_id: u64,
         health: DeviceHealth,
+    },
+    Health {
+        node_id: u64,
+        check: HealthCheck,
     },
     Network {
         node_id: u64,

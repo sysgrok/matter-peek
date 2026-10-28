@@ -22,6 +22,7 @@ use crate::model::{DeviceHandle, DiagSet};
 use crate::ota::OtaImageStore;
 use crate::subscribe::{Coverage, ModelUpdate, Scope, Sleepy};
 
+use super::health::RESTART_SETTLE;
 use super::{convert, Ctx};
 
 /// The events kept of a device, the latest.
@@ -150,13 +151,19 @@ impl Watch {
         self.health.fabrics.as_deref().unwrap_or_default()
     }
 
-    fn report(&mut self, node_id: u64, health: DeviceHealth) {
+    /// Merge a report in, and hand it to the listeners. Whether it tells of a
+    /// restart, or of other faults than before.
+    fn report(&mut self, node_id: u64, health: DeviceHealth) -> bool {
+        let news = self.reports > 0 && crash_signs_changed(&self.health, &health);
+
         self.reports += 1;
         self.health.merge(health.clone());
 
         for (_, listener) in &self.listeners {
             listener.on_report(node_id, self.reports, health.clone());
         }
+
+        news
     }
 
     fn set_state(&mut self, node_id: u64, state: SubscriptionState) {
@@ -369,7 +376,12 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                     self.note_message_of(node_id);
                 }
                 self.mark_our_fabric(node_id, &mut health);
-                with_watch(&mut |watch| watch.report(node_id, health.clone()))
+
+                let mut news = false;
+                with_watch(&mut |watch| news = watch.report(node_id, health.clone()));
+                if news {
+                    self.health_due(node_id, RESTART_SETTLE);
+                }
             },
             |update, fresh| {
                 let mut update = Some(update);
@@ -403,4 +415,26 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             }
         }
     }
+}
+
+/// Whether `delta`, reported after `before`, tells of a restart (another reboot
+/// count or boot reason) or of other faults.
+fn crash_signs_changed(before: &DeviceHealth, delta: &DeviceHealth) -> bool {
+    let general = (before.general.unwrap_or_default(), delta.general);
+    let restarted = general.1.is_some_and(|now| {
+        (now.reboot_count.is_some() && now.reboot_count != general.0.reboot_count)
+            || (now.boot_reason.is_some() && now.boot_reason != general.0.boot_reason)
+    });
+
+    let faults = (
+        before.faults.clone().unwrap_or_default(),
+        delta.faults.as_ref(),
+    );
+    let faulted = faults.1.is_some_and(|now| {
+        (now.hardware.is_some() && now.hardware != faults.0.hardware)
+            || (now.radio.is_some() && now.radio != faults.0.radio)
+            || (now.network.is_some() && now.network != faults.0.network)
+    });
+
+    restarted || faulted
 }

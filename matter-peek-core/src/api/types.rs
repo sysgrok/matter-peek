@@ -15,7 +15,8 @@ pub struct PeekConfig {
     /// default the platform's data directory.
     #[serde(default)]
     pub store_dir: Option<String>,
-    /// Sync the device list shortly after start, and every few minutes after.
+    /// Sync the device list shortly after start, and every few minutes after;
+    /// and check the devices' health in the background.
     #[serde(default)]
     pub periodic_sync: bool,
 }
@@ -592,6 +593,9 @@ pub struct DeviceInfo {
     /// What it serves, and the network it is on.
     #[serde(default)]
     pub details: DeviceDetails,
+    /// Its health, as last checked since the controller started.
+    #[serde(default)]
+    pub health_check: Option<HealthCheck>,
 }
 
 /// What a device serves and the network it is on, beyond its identity: read
@@ -681,6 +685,9 @@ pub struct Fingerprint {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DeviceHealth {
     pub general: Option<GeneralDiag>,
+    /// The faults General Diagnostics lists.
+    #[serde(default)]
+    pub faults: Option<ActiveFaults>,
     pub software: Option<SoftwareDiag>,
     /// The fabrics the device is on: the controllers (ecosystems) it belongs
     /// to.
@@ -705,6 +712,13 @@ impl DeviceHealth {
             base.reboot_count = g.reboot_count.or(base.reboot_count);
             base.total_operational_hours =
                 g.total_operational_hours.or(base.total_operational_hours);
+            base.boot_reason = g.boot_reason.or(base.boot_reason);
+        }
+        if let Some(f) = delta.faults {
+            let base = self.faults.get_or_insert_with(Default::default);
+            base.hardware = f.hardware.or(base.hardware.take());
+            base.radio = f.radio.or(base.radio.take());
+            base.network = f.network.or(base.network.take());
         }
         if let Some(s) = delta.software {
             let base = self.software.get_or_insert_with(Default::default);
@@ -762,6 +776,75 @@ pub struct GeneralDiag {
     pub reboot_count: Option<u16>,
     /// Cumulative operational hours.
     pub total_operational_hours: Option<u32>,
+    /// Why it last started.
+    #[serde(default)]
+    pub boot_reason: Option<BootReason>,
+}
+
+/// Why a device last started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum BootReason {
+    Unspecified,
+    PowerOnReboot,
+    /// Its supply voltage dropped too low.
+    BrownOutReset,
+    SoftwareWatchdogReset,
+    HardwareWatchdogReset,
+    SoftwareUpdateCompleted,
+    /// Its software restarted it: on purpose, or after a crash.
+    SoftwareReset,
+}
+
+/// The faults a device has now, as General Diagnostics lists them; a list it
+/// does not serve is `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ActiveFaults {
+    pub hardware: Option<Vec<HardwareFault>>,
+    pub radio: Option<Vec<RadioFault>>,
+    pub network: Option<Vec<NetworkFault>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum HardwareFault {
+    Unspecified,
+    Radio,
+    Sensor,
+    ResettableOverTemp,
+    NonResettableOverTemp,
+    PowerSource,
+    VisualDisplay,
+    AudioOutput,
+    UserInterface,
+    NonVolatileMemory,
+    TamperDetected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum RadioFault {
+    Unspecified,
+    WiFi,
+    Cellular,
+    Thread,
+    Nfc,
+    Ble,
+    Ethernet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkFault {
+    Unspecified,
+    HardwareFailure,
+    NetworkJammed,
+    ConnectionFailed,
 }
 
 /// Part of the Software Diagnostics cluster (`0x0034`).
@@ -810,6 +893,74 @@ impl ThreadMetric {
             _ => (2, 0),
         }
     }
+}
+
+/// A device's health, as judged from what it reports: signs of crashes, its
+/// heap, the stacks of its tasks and its link (see
+/// [`MatterPeek::check_health`](super::MatterPeek::check_health)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct HealthCheck {
+    /// The worst of its areas'.
+    pub verdict: HealthVerdict,
+    /// Crashes, heap, stacks and link, in this order.
+    pub areas: Vec<HealthArea>,
+    /// Whether there are signs of a crash: its crash log, if it keeps one,
+    /// may tell more.
+    pub crash_signs: bool,
+    /// When it was checked, ms since the Unix epoch; `None` if this host has
+    /// no clock.
+    pub checked_ms: Option<u64>,
+}
+
+/// One area of a [`HealthCheck`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct HealthArea {
+    pub kind: HealthAreaKind,
+    pub verdict: HealthVerdict,
+    /// What was found, in a few words, e.g. `peak 38% of 289.1KB`.
+    pub summary: String,
+    /// What is wrong, the worst first.
+    pub findings: Vec<HealthFinding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum HealthAreaKind {
+    /// Why it last started, its faults, how often it restarts.
+    Crashes,
+    Heap,
+    /// The stacks of its tasks.
+    Stacks,
+    /// Its link to its network.
+    Link,
+}
+
+/// How healthy a device, or an area of it, is; from the least to the most
+/// worrying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum HealthVerdict {
+    /// It reports too little to tell.
+    Unknown,
+    Good,
+    /// Something to keep an eye on.
+    Fair,
+    /// Something wrong.
+    Poor,
+}
+
+/// Something wrong in an area of a [`HealthCheck`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct HealthFinding {
+    /// [`Fair`](HealthVerdict::Fair) or [`Poor`](HealthVerdict::Poor).
+    pub verdict: HealthVerdict,
+    /// What it is, in plain words.
+    pub text: String,
 }
 
 /// The state of a live health subscription.

@@ -172,12 +172,3 @@ pub fn modal_head(
         </header>
     }
 }
-
-/// `bytes` in B, KiB or MiB.
-pub fn bytes(bytes: u64) -> String {
-    match bytes {
-        0..1024 => format!("{bytes}B"),
-        1024..1_048_576 => format!("{:.1}KB", bytes as f64 / 1024.0),
-        _ => format!("{:.1}MB", bytes as f64 / 1_048_576.0),
-    }
-}

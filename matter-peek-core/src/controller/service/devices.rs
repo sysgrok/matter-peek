@@ -71,9 +71,11 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 let check_ins = clients.iter().any(|c| c.handle == d.handle);
                 let awake_ms = self.awake_ms(node_id);
                 let stay_awake = self.stays_awake(node_id);
-                convert::device(
+                let mut device = convert::device(
                     d, fabric, online, remembered, check_ins, awake_ms, stay_awake,
-                )
+                );
+                device.health_check = self.health.borrow().check(node_id);
+                device
             })
             .collect();
 
@@ -204,6 +206,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         self.stop_watch(node_id);
         self.controller.forget_sessions(dev.handle);
         self.set_online(node_id, false);
+        self.health.borrow_mut().forget(node_id);
         self.transient
             .borrow_mut()
             .retain(|d| d.handle.node_id != node_id);
@@ -226,8 +229,10 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             .map_err(|e| failed(&format!("device 0x{node_id:016X} did not answer"), e))?;
         self.mark_our_fabric(node_id, &mut health);
 
-        // It answers, so an offline subscription of it can be re-established now.
+        // It answers, so an offline subscription of it can be re-established now,
+        // and its health checked again.
         self.set_online(node_id, true);
+        self.health_due(node_id, Duration::from_secs(0));
         if let Some(watch) = self.subs.borrow().get(&node_id) {
             if watch.state == Some(SubscriptionState::Offline) {
                 watch.retry.notify();
@@ -481,6 +486,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         }
 
         self.set_online(node_id, false);
+        self.health.borrow_mut().forget(node_id);
         self.transient
             .borrow_mut()
             .retain(|d| d.handle.node_id != node_id);

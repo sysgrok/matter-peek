@@ -68,7 +68,7 @@ const MUTATING_TOOLS: &[&str] = &[
 
 /// What an agent should know about the tools, for its instructions.
 pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-only tools \
-     (discover, list_devices, peek_device, read_model, read_events, read_network, retrieve_logs, identify, wake_device, stay_awake, \
+     (discover, list_devices, peek_device, check_health, read_model, read_events, read_network, retrieve_logs, identify, wake_device, stay_awake, \
      read_qr_image, ota_images, ota_updates, commissioning_window, \
      device_time, list_fabrics) are always available. The tools that change \
      devices or the stored state (commission, decommission, \
@@ -227,7 +227,8 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
              listed also while offline; the others only once commissioned or \
              found by a sync since the server started. Each has its `details`: \
              Matter version, clusters served, endpoints, power, ICD mode, and \
-             network (SSID or Thread network name, Thread role). `filter` \
+             network (SSID or Thread network name, Thread role); and its \
+             last `health_check`, if any (see check_health). `filter` \
              narrows the list, e.g. to the devices to act on.",
             json!({ "type": "object", "properties": {
                 "fabric": fabric_schema(),
@@ -286,6 +287,27 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
              the device reports them), and the fabrics it is on: the \
              controllers (ecosystems: Google, Apple, Home Assistant, ...) it \
              belongs to, ours marked, of how many it supports.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node_id": node_id_schema()
+                },
+                "required": ["node_id"]
+            }),
+        ),
+        tool(
+            "check_health",
+            "Check a listed device's health: judge, from what it reports, the \
+             signs of crashes (why it last started, its active faults, the \
+             software faults it reported, how often it restarts), its heap's \
+             peak use, how close its tasks came to the end of their stacks, \
+             and its link (Wi-Fi signal and missed beacons; Thread parent or \
+             router links, frame losses, parent changes). Answers a verdict \
+             (good, fair, poor, unknown) and, per area, a summary and what is \
+             wrong. Its crash log is not read: where there are crash signs, \
+             retrieve_logs with intent crash_logs can fetch it, but the device \
+             may delete it once delivered. list_devices carries each \
+             device's last check.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1102,6 +1124,9 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
         "peek_device" => wire::Request::PeekDevice {
             node_id: arg_node(args)?,
         },
+        "check_health" => wire::Request::CheckHealth {
+            node_id: arg_node(args)?,
+        },
         "read_network" => wire::Request::ReadNetwork {
             node_id: arg_node(args)?,
         },
@@ -1368,6 +1393,18 @@ fn labelled(response: &wire::Response) -> Value {
                 v["hardware_version"] = json!(d.hardware_version());
                 v["software_version"] = json!(d.software_version());
                 v["device_type"] = json!(d.device_type().map(display::device_type_label));
+                // The verdict and what is wrong; check_health has the rest.
+                if let Some(check) = &d.health_check {
+                    v["health_check"] = json!({
+                        "verdict": check.verdict,
+                        "crash_signs": check.crash_signs,
+                        "checked": check.checked_ms.map(display::utc_label),
+                        "findings": check.areas.iter()
+                            .flat_map(|area| area.findings.iter())
+                            .map(|finding| finding.text.as_str())
+                            .collect::<Vec<_>>(),
+                    });
+                }
             }
         }
         wire::Response::Discovered { ble_devices, .. } => {
@@ -1517,6 +1554,11 @@ fn labelled(response: &wire::Response) -> Value {
                 if let Some(fabric) = v.as_object_mut() {
                     fabric.remove("root_key");
                 }
+            }
+        }
+        wire::Response::Health { check, .. } => {
+            if let Some(ms) = check.checked_ms {
+                value["check"]["checked"] = json!(display::utc_label(ms));
             }
         }
         wire::Response::DeviceTime { time } => label_time(time, &mut value["time"]),

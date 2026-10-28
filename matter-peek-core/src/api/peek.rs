@@ -372,6 +372,16 @@ impl MatterPeek {
         self.call(|reply| Op::PeekDevice { node_id, reply }).await
     }
 
+    /// Check the health of a listed device: judge the signs of crashes (why it
+    /// last started, its faults, how often it restarts), its heap, the stacks
+    /// of its tasks and its link, from what it reports. Its crash log is not
+    /// read: a device may delete it once delivered. The device list carries
+    /// each device's last check; a controller that syncs periodically also
+    /// checks the devices in the background.
+    pub async fn check_health(&self, node_id: u64) -> Result<HealthCheck, PeekError> {
+        self.call(|reply| Op::CheckHealth { node_id, reply }).await
+    }
+
     /// The Thread mesh as our Thread devices on `fabric` (or on all our
     /// fabrics) see it: their networks, the nodes and links their neighbour
     /// and route tables show, the border routers on the LAN, and what is wrong
@@ -980,6 +990,10 @@ pub(crate) enum Op {
     PeekDevice {
         node_id: u64,
         reply: Reply<DeviceHealth>,
+    },
+    CheckHealth {
+        node_id: u64,
+        reply: Reply<HealthCheck>,
     },
     ReadNetwork {
         node_id: u64,

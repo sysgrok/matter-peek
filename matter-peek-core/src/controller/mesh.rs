@@ -1136,7 +1136,7 @@ fn child_role(role: ThreadRole) -> bool {
 
 /// A link quality from 0 to 3: OpenThread devices report it so, the spec
 /// scales it to 255.
-fn quality(lqi: u8) -> u8 {
+pub(crate) fn quality(lqi: u8) -> u8 {
     if lqi <= 3 {
         lqi
     } else {

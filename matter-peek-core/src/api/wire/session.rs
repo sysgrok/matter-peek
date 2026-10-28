@@ -169,6 +169,10 @@ impl WireSession {
                 .peek_device(node_id)
                 .await
                 .map(|health| Response::Peek { node_id, health }),
+            Request::CheckHealth { node_id } => peek
+                .check_health(node_id)
+                .await
+                .map(|check| Response::Health { node_id, check }),
             Request::RemoveDeviceFabric {
                 node_id,
                 fabric_index,

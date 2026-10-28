@@ -123,7 +123,7 @@ fn whole(cluster: u32) -> AttrPath {
     AttrPath::from_gp(&GenericPath::new(None, Some(cluster), None))
 }
 
-fn interfaces(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {
+pub(crate) fn interfaces(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {
     for (_, list) in resp.general_diagnostics_read_resp().network_interfaces() {
         let Ok(list) = list else { continue };
 
@@ -225,7 +225,7 @@ fn configs(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {
     }
 }
 
-fn wifi(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {
+pub(crate) fn wifi(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {
     let reads = resp.wi_fi_network_diagnostics_read_resp();
 
     // Present on a Wi-Fi device only: it reports at least one attribute.
@@ -316,7 +316,7 @@ fn wifi(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {
     info.wifi = seen.then_some(diag);
 }
 
-fn thread(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {
+pub(crate) fn thread(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {
     let reads = resp.thread_network_diagnostics_read_resp();
 
     let mut seen = info.thread.is_some();
@@ -447,7 +447,7 @@ fn icd(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {
     crate::icd::read(resp, &mut info.icd);
 }
 
-fn ethernet(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {
+pub(crate) fn ethernet(resp: &ReportDataResp<'_>, info: &mut NetworkInfo) {
     let reads = resp.ethernet_network_diagnostics_read_resp();
 
     let mut seen = info.ethernet.is_some();

@@ -157,6 +157,10 @@ enum Command {
     },
     /// Read the health of a device.
     Peek { node: Node },
+    /// Check the health of a device: judge the signs of crashes, its heap, the
+    /// stacks of its tasks and its link, from what it reports. Its crash log
+    /// is not read: a device may delete it once delivered.
+    Health { node: Node },
     /// Read a device's data model: its endpoints and their device types, their
     /// clusters, the clusters' attributes (* writable) and commands.
     Model {
@@ -892,6 +896,15 @@ async fn run(cli: Cli) -> io::Result<bool> {
             match call(&conn, &out, wire::Request::PeekDevice { node_id: node.0 }).await? {
                 Some(wire::Response::Peek { health, .. }) if !out.json => {
                     println!("{}", health_text(&health));
+                    true
+                }
+                response => response.is_some(),
+            },
+        ),
+        Command::Health { node } => Ok(
+            match call(&conn, &out, wire::Request::CheckHealth { node_id: node.0 }).await? {
+                Some(wire::Response::Health { node_id, check }) if !out.json => {
+                    println!("{}", health_check_text(node_id, &check));
                     true
                 }
                 response => response.is_some(),
@@ -1734,6 +1747,12 @@ fn devices(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
             Some(true) => line.push_str("  online"),
             Some(false) => line.push_str("  offline"),
             None => {}
+        }
+        if let Some(check) = &d.health_check {
+            line.push_str(&format!(
+                "  health {}",
+                check.verdict.label().to_lowercase()
+            ));
         }
         if !d.remembered {
             line.push_str("  not remembered");
@@ -2609,6 +2628,36 @@ fn network_text(info: &api::NetworkInfo) -> String {
     out
 }
 
+/// A health check: the verdict, then each area with what is wrong in it.
+fn health_check_text(node_id: u64, check: &api::HealthCheck) -> String {
+    let mut text = format!("Health: {}", check.verdict.label().to_lowercase());
+    if let Some(ms) = check.checked_ms {
+        text.push_str(&format!(" (checked {})", display::utc_label(ms)));
+    }
+
+    for area in &check.areas {
+        text.push_str(&format!(
+            "\n  {:<8} {:<8} {}",
+            area.kind.label(),
+            area.verdict.label().to_lowercase(),
+            area.summary
+        ));
+        for finding in &area.findings {
+            text.push_str(&format!("\n{:19}- {}", "", finding.text));
+        }
+    }
+
+    if check.crash_signs {
+        text.push_str(&format!(
+            "\nThere are signs of a crash: its crash log, if it keeps one, may tell more \
+             (`matter-peek logs {} crash`). The device may delete it once delivered.",
+            display::hex_u64(node_id)
+        ));
+    }
+
+    text
+}
+
 fn health_text(health: &api::DeviceHealth) -> String {
     fn opt<T: std::fmt::Display>(v: Option<T>) -> String {
         v.map(|v| v.to_string()).unwrap_or_else(|| "-".into())
@@ -2616,14 +2665,31 @@ fn health_text(health: &api::DeviceHealth) -> String {
 
     let mut parts = Vec::new();
     if let Some(g) = &health.general {
-        parts.push(format!(
+        let mut general = format!(
             "uptime {}, reboots {}, operational {} h",
             g.up_time_secs
                 .map(display::duration)
                 .unwrap_or_else(|| "-".into()),
             opt(g.reboot_count),
             opt(g.total_operational_hours)
-        ));
+        );
+        if let Some(reason) = g.boot_reason {
+            general.push_str(&format!(", last start: {}", reason.label()));
+        }
+        parts.push(general);
+    }
+    if let Some(faults) = &health.faults {
+        let names: Vec<&str> = faults
+            .hardware
+            .iter()
+            .flatten()
+            .map(|fault| fault.label())
+            .chain(faults.radio.iter().flatten().map(|fault| fault.label()))
+            .chain(faults.network.iter().flatten().map(|fault| fault.label()))
+            .collect();
+        if !names.is_empty() {
+            parts.push(format!("faults: {}", names.join(", ")));
+        }
     }
     if let Some(s) = &health.software {
         parts.push(format!(

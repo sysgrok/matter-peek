@@ -4,7 +4,7 @@
 use yew::html::Scope;
 use yew::prelude::*;
 
-use matter_peek_core::api::{wire, SoftwareDiag, ThreadMetric};
+use matter_peek_core::api::{display, wire, SoftwareDiag, ThreadMetric};
 
 use crate::icons::{icon, Icon};
 use crate::{request_loop, ui, App, Msg};
@@ -182,13 +182,13 @@ fn view_heap(software: &SoftwareDiag) -> Html {
                     { for figures.into_iter().filter_map(|(label, value)| value.map(|value| html! {
                         <div class="heap-figure">
                             <span class="health-label">{ label }</span>
-                            <span class="health-value">{ ui::bytes(value) }</span>
+                            <span class="health-value">{ display::bytes(value) }</span>
                         </div>
                     })) }
                     if let Some(total) = total {
                         <div class="heap-figure">
                             <span class="health-label">{ "Total" }</span>
-                            <span class="health-value">{ ui::bytes(total) }</span>
+                            <span class="health-value">{ display::bytes(total) }</span>
                         </div>
                     }
                 </div>
@@ -251,20 +251,20 @@ fn view_thread(thread: &ThreadMetric) -> Html {
     match used {
         Some((peak, size, _)) => figures.push(format!(
             "peak {} of {}",
-            ui::bytes(peak as u64),
-            ui::bytes(size as u64)
+            display::bytes(peak as u64),
+            display::bytes(size as u64)
         )),
         None => {
             if let Some(size) = thread.stack_size {
-                figures.push(format!("stack {}", ui::bytes(size as u64)));
+                figures.push(format!("stack {}", display::bytes(size as u64)));
             }
             if let Some(least) = thread.stack_free_minimum {
-                figures.push(format!("least free {}", ui::bytes(least as u64)));
+                figures.push(format!("least free {}", display::bytes(least as u64)));
             }
         }
     }
     if let Some(free) = thread.stack_free_current {
-        figures.push(format!("free now {}", ui::bytes(free as u64)));
+        figures.push(format!("free now {}", display::bytes(free as u64)));
     }
 
     html! {

@@ -69,10 +69,31 @@ the uptime, the reboots and the operating hours. From the card you can also
 open the device's networks, its memory (the heap, and how much stack each task
 has left) and its logs.
 
+The **Health** row of a card shows the verdict of the device's last health
+check (good, fair, poor or unknown) and the most important finding. The check
+looks at four areas:
+
+- crashes: why the device last started (a watchdog reset, for example), its
+  active faults, the software faults it reported, and how often it restarts;
+- the heap: how much of it was used at its peak;
+- the stacks: how close each task came to the end of its stack. A floor of
+  free stack is derived from the size of the device's heap, so that a few
+  kilobytes are fine on a small microcontroller but not on a larger device;
+- the link: the Wi-Fi signal and missed beacons, or the Thread links to the
+  parent or to other routers, their frame losses, and parent changes.
+
+The verdicts follow rules of thumb. A server checks each device in the
+background: soon after it starts, every six hours after that, and soon after
+the device restarts. Clicking the row opens the details and checks again. The
+crash log itself is not read by the check, because a device may delete it once
+it has been retrieved. When there are signs of a crash, the card's **Logs**
+button is highlighted instead.
+
 In the CLI:
 
 - `matter-peek peek <node>` reads the health of a device, and
   `matter-peek watch <node>` follows it live.
+- `matter-peek health <node>` checks the health of a device.
 - `matter-peek logs <node> [crash|support|network]` retrieves a diagnostic log.
 - `matter-peek network <node>` shows the networks a device knows, and can
   change them.

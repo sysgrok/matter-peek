@@ -35,6 +35,7 @@ use rs_matter::tlv::Nullable;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::network::mdns::CommissionableFilter;
 
+use crate::health::HealthRead;
 use crate::model::{CommissionOutcome, DeviceHandle, DeviceHealth, DiagSet, LogIntent};
 
 extern crate alloc;
@@ -408,6 +409,13 @@ impl<'a, C: Crypto> Controller<'a, C> {
             .await
     }
 
+    /// The address of the device in commissioning mode that advertises IPv6
+    /// address `ip`, as this host reaches it. Assumes the caller runs the mDNS
+    /// backend.
+    pub async fn find_commissionable(&self, ip: core::net::Ipv6Addr) -> Option<SocketAddr> {
+        crate::discovery::find_commissionable_with_running_backend(self.matter, ip).await
+    }
+
     /// The devices advertising on our fabric `fab_idx`: those holding it that
     /// are reachable, by node ID. Assumes the caller runs the mDNS backend (see
     /// [`Self::discover_all`]).
@@ -441,6 +449,12 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// the diagnostics of its network.
     pub async fn read_network(&self, dev: DeviceHandle) -> Result<crate::api::NetworkInfo, Error> {
         crate::network::read_network(self.matter, self.crypto, dev.fabric_index, dev.node_id).await
+    }
+
+    /// Read what a health check of a device judges.
+    pub async fn read_health_check(&self, dev: DeviceHandle) -> Result<HealthRead, Error> {
+        crate::diagnostics::read_check(self.matter, self.crypto, dev.fabric_index, dev.node_id)
+            .await
     }
 
     /// Read a diagnostic health snapshot from a previously-commissioned device

@@ -224,6 +224,7 @@ impl App {
                 </dl>
 
                 { self.view_fabrics_row(node_id, live, link) }
+                { view_health_row(d, link) }
                 { view_check_ins(d, busy || offline, link) }
                 { self.view_health(live, offline) }
                 { self.view_tags(d, link) }
@@ -240,9 +241,16 @@ impl App {
                         { ui::icon_button(kind_icon(d.network).unwrap_or(Icon::Globe), "Network",
                             classes!("is-small", "is-soft"), unreachable, Some("Its networks and interfaces"),
                             link.callback(move |_| Msg::OpenNetwork(node_id))) }
-                        { ui::icon_button(Icon::Logs, "Logs", classes!("is-small", "is-soft"), unreachable,
-                            Some("Retrieve its diagnostic logs"),
-                            link.callback(move |_| Msg::OpenLogs(node_id))) }
+                        if crash_signs(d) {
+                            { ui::icon_button(Icon::Logs, "Logs", classes!("is-small", "is-soft", "is-attention"),
+                                unreachable,
+                                Some("There are signs of a crash: its crash log, if it keeps one, may tell more"),
+                                link.callback(move |_| Msg::OpenLogs(node_id))) }
+                        } else {
+                            { ui::icon_button(Icon::Logs, "Logs", classes!("is-small", "is-soft"), unreachable,
+                                Some("Retrieve its diagnostic logs"),
+                                link.callback(move |_| Msg::OpenLogs(node_id))) }
+                        }
                         { ui::icon_button(Icon::Chip, "Memory", classes!("is-small", "is-soft"), unreachable,
                             Some("Its heap, and the stacks of its tasks"),
                             link.callback(move |_| Msg::Memory(crate::memory::MemoryMsg::Open(node_id)))) }
@@ -851,6 +859,46 @@ impl App {
     }
 }
 
+/// A card's health: the verdict of its last check and what is most wrong,
+/// opening the health popup.
+fn view_health_row(d: &api::DeviceInfo, link: &Scope<App>) -> Html {
+    let node_id = d.handle.node_id;
+    let check = d.health_check.as_ref();
+    let text = match check {
+        None => "Not checked yet".to_string(),
+        Some(check) => check
+            .areas
+            .iter()
+            .flat_map(|area| area.findings.iter())
+            .next()
+            .map(|finding| finding.text.clone())
+            .unwrap_or_else(|| match check.verdict {
+                api::HealthVerdict::Unknown => "It reports too little to tell".to_string(),
+                _ => "Nothing wrong found".to_string(),
+            }),
+    };
+
+    html! {
+        <button class="device-fabrics device-health"
+            title="Its health: signs of crashes, its heap, the stacks of its tasks, its link"
+            onclick={link.callback(move |_| Msg::Health(crate::health::HealthMsg::Open(node_id)))}>
+            <span class="device-fabrics-label">{ icon(Icon::Pulse, 14) }{ "Health" }</span>
+            if let Some(check) = check {
+                { crate::health::verdict_pill(check.verdict) }
+            }
+            <span class="device-health-text">{ text }</span>
+            { icon(Icon::ChevronRight, 16) }
+        </button>
+    }
+}
+
+/// Whether the last health check of `d` found signs of a crash.
+fn crash_signs(d: &api::DeviceInfo) -> bool {
+    d.health_check
+        .as_ref()
+        .is_some_and(|check| check.crash_signs)
+}
+
 /// Whether we are registered for the Check-Ins of `d`, as a switch: for a
 /// device that can idle long and check in.
 fn view_check_ins(d: &api::DeviceInfo, disabled: bool, link: &Scope<App>) -> Html {
@@ -966,7 +1014,7 @@ fn view_log(logs: &LogsView, link: &Scope<App>) -> Html {
             (
                 format!(
                     "{} · {lines} line{}",
-                    ui::bytes(size as u64),
+                    display::bytes(size as u64),
                     if lines == 1 { "" } else { "s" }
                 ),
                 html! {
@@ -977,7 +1025,7 @@ fn view_log(logs: &LogsView, link: &Scope<App>) -> Html {
             )
         }
         Err(_) => (
-            format!("{} of binary data", ui::bytes(size as u64)),
+            format!("{} of binary data", display::bytes(size as u64)),
             html! {
                 <div class="log-binary">
                     { icon(Icon::Chip, 22) }

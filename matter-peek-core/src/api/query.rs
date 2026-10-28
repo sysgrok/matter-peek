@@ -256,6 +256,12 @@ pub static FACETS: &[Facet] = &[
     ),
     facet("heap", "its free heap", Some(Unit::Bytes), &["<16k"]),
     facet(
+        "health",
+        "its health, as last checked: good, fair, poor, unknown",
+        None,
+        &[],
+    ),
+    facet(
         "ota",
         "its update: offered, downloading, applying, applied, failed",
         None,
@@ -440,6 +446,9 @@ impl Facts {
         }
         if let Some(free) = software.and_then(|s| s.current_heap_free) {
             facts.number("heap", "", free);
+        }
+        if let Some(check) = &device.health_check {
+            facts.text("health", check.verdict.label());
         }
 
         let fabrics = health.and_then(|health| health.fabrics.as_ref());
@@ -1082,6 +1091,12 @@ mod tests {
                 network_name: "NEST-PAN-1A2B".into(),
                 thread_role: Some(ThreadRole::Router),
             },
+            health_check: Some(HealthCheck {
+                verdict: HealthVerdict::Fair,
+                areas: Vec::new(),
+                crash_signs: false,
+                checked_ms: None,
+            }),
         }
     }
 
@@ -1091,6 +1106,7 @@ mod tests {
                 up_time_secs: Some(1800),
                 reboot_count: Some(7),
                 total_operational_hours: Some(120),
+                boot_reason: Some(BootReason::PowerOnReboot),
             }),
             fabrics: Some(vec![fabric(0xFFF1, true), fabric(0x6006, false)]),
             supported_fabrics: Some(2),
@@ -1160,6 +1176,8 @@ mod tests {
         assert!(matches("-eco:apple -is:updating"));
         assert!(!matches("-net:thread"));
         assert!(matches("is:test-vendor"));
+        assert!(matches("health:fair,poor"));
+        assert!(!matches("health:good"));
     }
 
     #[test]

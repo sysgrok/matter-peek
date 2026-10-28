@@ -29,7 +29,7 @@ See the [screenshots](https://github.com/sysgrok/matter-peek/blob/main/docs/SCRE
 
 ## Features
 
-- **Health and logs.** Uptime, reboots, network faults, and heap and stack usage, updated live. Crash and diagnostic logs are retrieved over BDX.
+- **Health and logs.** Uptime, reboots, network faults, and heap and stack usage, updated live. A health check judges the signs of crashes, the heap, the stacks and the link of each device. Crash and diagnostic logs are retrieved over BDX.
 - **Commissioning and sharing.** Commissioning over IP or Bluetooth LE, onto Wi-Fi or Thread. Devices can be added from other ecosystems, or shared with them.
 - **Data model.** All clusters, attributes, commands and events, by name and updated live, with controls for common device types.
 - **Thread mesh.** A view of the Thread mesh built from Matter data only, without Thread credentials. Problems it detects are described in plain words.
@@ -119,6 +119,7 @@ matter-peek discover                         # list the commissionable devices n
 matter-peek commission 34970112332 --ble --wifi Home --wifi-password '...'
 matter-peek list net:thread is:offline       # list the devices matching a filter
 matter-peek peek 0x1B67B                     # show a device's health
+matter-peek health 0x1B67B                   # check it: crashes, heap, stacks, link
 matter-peek logs 0x1B67B crash               # retrieve its crash log
 matter-peek thread findings                  # show the problems found in the Thread mesh
 matter-peek --help

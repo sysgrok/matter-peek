@@ -84,7 +84,7 @@ impl App {
                                         </p>
                                         <div class="image-chips">
                                             <span class="net-chip mono" title="File">{ image.name.clone() }</span>
-                                            <span class="net-chip" title="Size">{ ui::bytes(image.size) }</span>
+                                            <span class="net-chip" title="Size">{ display::bytes(image.size) }</span>
                                             if let Some(range) = range {
                                                 <span class="net-chip">{ range }</span>
                                             }
