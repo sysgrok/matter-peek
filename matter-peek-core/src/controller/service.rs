@@ -153,13 +153,18 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     /// The devices that are reachable, as far as we know; `None` before the
     /// first sync.
     online: RefCell<Option<BTreeSet<u64>>>,
+    /// Whether the device list is synced every [`SYNC_PERIOD_SECS`].
+    periodic_sync: bool,
+    /// Whether a sync has ended since the start, well or not.
+    synced: Cell<bool>,
     /// The listed devices we keep no record of (not remembered): commissioned
     /// without `remember`, or found by a sync, since the controller started.
     transient: RefCell<Vec<StoredDevice>>,
     /// Who follows the device list, by watcher ID.
     devices_listeners: RefCell<Vec<(u64, Arc<dyn DevicesListener>)>>,
-    /// The device list as they were last told it.
-    devices_told: RefCell<Option<Vec<DeviceInfo>>>,
+    /// The device list as they were last told it, and whether it was being
+    /// synced.
+    devices_told: RefCell<Option<(Vec<DeviceInfo>, bool)>>,
     /// The names of Thread networks, by extended PAN ID, as border routers
     /// advertise them.
     thread_names: RefCell<BTreeMap<u64, String>>,
@@ -175,9 +180,9 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
 impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// Run the operations, side by side unless they conflict (see [`Locks`]),
     /// syncing periodically if asked to, until every handle is dropped.
-    async fn run_ops(&self, service: Service, periodic_sync: bool) {
+    async fn run_ops(&self, service: Service) {
         let after = |secs| {
-            if periodic_sync {
+            if self.periodic_sync {
                 Instant::now() + Duration::from_secs(secs)
             } else {
                 Instant::MAX
@@ -198,12 +203,19 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
 
             match select3(service.ops.recv(), Timer::at(next_sync), done).await {
                 Either3::First(Ok(op)) => {
-                    if matches!(op, Op::Sync { .. }) {
+                    let sync = matches!(op, Op::Sync { .. });
+                    if sync {
                         next_sync = after(SYNC_PERIOD_SECS);
                     }
 
                     match self.start(op).await {
-                        Some(run) => running.push(run),
+                        Some(run) => {
+                            running.push(run);
+                            // The list is being synced now.
+                            if sync {
+                                self.tell_devices();
+                            }
+                        }
                         None => self.tell_devices(),
                     }
                 }
@@ -219,7 +231,9 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                             if let Err(e) = self.sync_devices(false).await {
                                 warn!("sync failed: {e:?}");
                             }
+                            self.synced.set(true);
                         }));
+                        self.tell_devices();
                     }
                 }
                 Either3::Third(()) => self.tell_devices(),
@@ -480,7 +494,9 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 let _ = reply.send(saved).await;
             }
             Op::Sync { fabric, reply } => {
-                let _ = reply.send(self.sync(&fabric).await).await;
+                let synced = self.sync(&fabric).await;
+                self.synced.set(true);
+                let _ = reply.send(synced).await;
             }
             Op::Remember { node_id, reply } => {
                 let _ = reply.send(self.remember(node_id)).await;
@@ -785,6 +801,8 @@ async fn run<'a, C, S, O, N, M>(
         uploads: RefCell::new(BTreeMap::new()),
         next_upload_id: Cell::new(1),
         online: RefCell::new(None),
+        periodic_sync: config.periodic_sync,
+        synced: Cell::new(false),
         transient: RefCell::new(Vec::new()),
         devices_listeners: RefCell::new(Vec::new()),
         devices_told: RefCell::new(None),
@@ -808,7 +826,7 @@ async fn run<'a, C, S, O, N, M>(
     let (send, recv) = (network, network);
 
     let mut pump = pin!(matter.run(&crypto, send, recv, NoNetwork));
-    let mut ops = pin!(ctx.run_ops(service, config.periodic_sync));
+    let mut ops = pin!(ctx.run_ops(service));
     let mut subs = pin!(ctx.run_subscriptions(sub_jobs_rx));
     let mut applies = pin!(ctx.run_apply_jobs(apply_jobs_rx));
     let mut taken = pin!(ctx.run_check_ins(check_ins_rx));

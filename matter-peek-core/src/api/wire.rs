@@ -464,8 +464,13 @@ pub enum Event {
     /// Attributes of a device whose data model this connection follows (see
     /// `ModelListener::on_model`).
     Model { node_id: u64, model: DeviceModel },
-    /// The device list, on all our fabrics, if this connection follows it.
-    Devices { devices: Vec<DeviceInfo> },
+    /// The device list, on all our fabrics, if this connection follows it;
+    /// `syncing` while it is being synced with the network.
+    Devices {
+        devices: Vec<DeviceInfo>,
+        #[serde(default)]
+        syncing: bool,
+    },
     /// How an update started on this connection goes.
     OtaProgress { node_id: u64, progress: OtaProgress },
     /// What the assistant does in chat `chat_id`, asked on this connection.

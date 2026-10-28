@@ -70,18 +70,24 @@ impl App {
                 if !visible.is_empty() {
                     { ui::face_switch(face, false, link.callback(Msg::FlipAll)) }
                 }
-                { ui::icon_button(Icon::Sync, "Sync", classes!("is-tinted"), self.busy_stored,
+                { ui::icon_button(Icon::Sync, "Sync", classes!("is-tinted", self.syncing.then_some("is-spinning")),
+                    self.busy_stored || self.syncing,
                     Some("Add the devices on our fabric missing from the list, and refresh the others"),
                     link.callback(|_| Msg::Sync)) }
             </>
         };
 
         let body = if self.stored.is_empty() {
-            if self.loading_list {
+            if self.loading_list || self.syncing {
+                let text = if self.loading_list {
+                    "Reading the devices…"
+                } else {
+                    "Looking for our devices on the network…"
+                };
                 html! {
                     <div class="empty-state">
                         <span class="loader is-large"></span>
-                        <p class="empty-state-text">{ "Reading the devices…" }</p>
+                        <p class="empty-state-text">{ text }</p>
                     </div>
                 }
             } else {

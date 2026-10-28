@@ -17,7 +17,7 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use termimad::MadSkin;
 
-use crate::client::Connection;
+use crate::client::{Connection, Endpoint};
 use matter_peek_core::api::agent::{self, ToolCall, STOPPED};
 use matter_peek_core::api::mcp::Caps;
 use matter_peek_core::api::platform::data_dir;
@@ -46,14 +46,14 @@ pub struct ChatArgs {
     pub fabric: matter_peek_core::api::FabricRef,
 }
 
-/// Chat with the assistant of the server at `server`, else of a controller
-/// started in this process; `false` if there is no assistant.
-pub async fn chat(server: Option<String>, args: ChatArgs) -> io::Result<bool> {
+/// Chat with the assistant of the server or the controller `endpoint` names;
+/// `false` if there is no assistant.
+pub async fn chat(endpoint: Endpoint, args: ChatArgs) -> io::Result<bool> {
     let terminal = Terminal::new(args.show_thinking, args.verbose);
-    if server.is_none() {
+    if endpoint.server.is_none() {
         terminal.note("Looking for the devices on our fabric…");
     }
-    let dispatch = mcp::dispatch(server, args.fabric.clone()).await?;
+    let dispatch = mcp::dispatch(endpoint, args.fabric.clone()).await?;
     let conn = dispatch.connection().await.map_err(io::Error::other)?;
 
     let assistant = match conn.call(Request::Assistant, |_| ()).await? {

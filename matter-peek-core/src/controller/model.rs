@@ -56,6 +56,9 @@ pub struct DeviceHandle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommissionOutcome {
     pub handle: DeviceHandle,
+    /// The device's index of the fabric whose administrator opened the
+    /// commissioning window, when it could be read.
+    pub window_opener: Option<u8>,
 }
 
 /// A device on our fabric, as the controller knows it: from the local store

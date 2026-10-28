@@ -25,6 +25,7 @@ use crate::model::{
 };
 use crate::ota::OtaImageStore;
 
+use super::locks::Key;
 use super::{convert, failed, Ctx};
 
 /// How many times to try reaching the device for `RemoveFabric` before giving
@@ -143,12 +144,13 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         self.tell_devices();
 
         let devices = self.list_devices_on(&FabricRef::All, None)?.devices;
-        listener.on_devices(devices.clone());
+        let syncing = self.syncing();
+        listener.on_devices(devices.clone(), syncing);
 
         let id = self.next_watcher.get();
         self.next_watcher.set(id + 1);
         self.devices_listeners.borrow_mut().push((id, listener));
-        *self.devices_told.borrow_mut() = Some(devices);
+        *self.devices_told.borrow_mut() = Some((devices, syncing));
 
         Ok(id)
     }
@@ -162,8 +164,8 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         }
     }
 
-    /// Tell the device list's listeners the list, if it changed since they
-    /// were last told.
+    /// Tell the device list's listeners the list, if it or whether it is
+    /// being synced changed since they were last told.
     pub(super) fn tell_devices(&self) {
         if self.devices_listeners.borrow().is_empty() {
             return;
@@ -176,15 +178,22 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                 return;
             }
         };
-        if self.devices_told.borrow().as_ref() == Some(&devices) {
+        let told = (devices, self.syncing());
+        if self.devices_told.borrow().as_ref() == Some(&told) {
             return;
         }
 
         let listeners = self.devices_listeners.borrow().clone();
         for (_, listener) in &listeners {
-            listener.on_devices(devices.clone());
+            listener.on_devices(told.0.clone(), told.1);
         }
-        *self.devices_told.borrow_mut() = Some(devices);
+        *self.devices_told.borrow_mut() = Some(told);
+    }
+
+    /// Whether the device list is being synced with the network: a sync is
+    /// queued or runs, or the first one is yet to end.
+    fn syncing(&self) -> bool {
+        self.locks.busy(Key::Sync) || (self.periodic_sync && !self.synced.get())
     }
 
     /// Drop a listed device without contacting it: its subscription, its

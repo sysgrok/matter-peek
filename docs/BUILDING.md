@@ -96,15 +96,18 @@ commissioning.
 # A device to try it with: here, rs-matter's system_tests with a crash log
 ( cd ../rs-matter && cargo run -p rs-matter-tests --bin system_tests -- --crash_log /tmp/crash.log )
 
-# The server: open http://127.0.0.1:8087/ (the API is at ws://127.0.0.1:8087/ws)
-cargo run --release --bin matter-peek -- serve [--listen 127.0.0.1:8087]
+# The server: open the address it shows, http://127.0.0.1:17335/?token=…
+# (the API is at ws://127.0.0.1:17335/ws)
+cargo run --release --bin matter-peek -- serve [--listen 127.0.0.1:17335]
 
 # While working on the web UI: trunk rebuilds it on each change, and forwards
-# the API requests to the server (open http://127.0.0.1:8080/)
+# the API requests to the server (open http://127.0.0.1:8080/?token=…, with
+# the server's token)
 ( cd matter-peek-web && trunk serve )
 
-# The CLI: through the server, or on its own when no server is running
-cargo run --bin matter-peek -- --server ws://127.0.0.1:8087 discover
+# The CLI: through the server (as the same user, it finds the server's access
+# token by itself), or on its own when no server is running
+cargo run --bin matter-peek -- --server ws://127.0.0.1:17335 discover
 cargo run --bin matter-peek -- --help
 ```
 
@@ -112,9 +115,10 @@ cargo run --bin matter-peek -- --help
 
 `matter-peek-app` is the web UI as a desktop or Android app, built with Tauri.
 It either runs its own controller inside the app, or connects to a server (for
-example `192.168.1.10:8087`). This is asked at the first launch, and can be
-changed later from the top bar. On Android, the app does not support Bluetooth
-commissioning yet.
+example `192.168.1.10:17335`, with its access token). This is asked at the first launch, and can be
+changed later from the top bar. On Android, the app commissions with Google
+Play services (`play-services-home`), which does the Bluetooth part; on a
+phone without Google Play services, the Commission page does not offer it.
 
 ```sh
 # The desktop app (build the web UI first, as above)
@@ -145,6 +149,9 @@ The Builds workflow (`.github/workflows/builds.yml`) builds, on each run:
 - the app for Android (arm64), as an APK.
 
 For x86_64 Linux and for Windows, the executable and the app are in one archive.
+The Linux archives also contain `service/install-service.sh`, and the Windows
+one `service/install-service.ps1`, which install `matter-peek serve` as a
+service (see the README).
 The files are named with the UTC time of the run (`20261028143005`). Each run
 keeps them as its artifacts. Pushes to `main` also publish them in the
 [`ci` pre-release](https://github.com/sysgrok/matter-peek/releases/tag/ci),

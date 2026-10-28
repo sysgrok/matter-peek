@@ -121,6 +121,13 @@ pub struct CommissionResult {
     /// existing device, offered as a "link these?" suggestion. `None` when the
     /// device was an exact re-match (auto-merged) or genuinely new.
     pub rematch_candidate: Option<u64>,
+    /// The device's index of the fabric whose administrator opened the
+    /// commissioning window this commission came in through, when it could be
+    /// read: for example Android's own fabric, when Google Play services hands
+    /// a device over. That fabric can be removed with
+    /// `MatterPeek::remove_device_fabric`.
+    #[serde(default)]
+    pub window_opener: Option<u8>,
 }
 
 /// The commissionable devices found by a discovery.

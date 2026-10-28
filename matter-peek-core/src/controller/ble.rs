@@ -256,11 +256,13 @@ pub async fn commission_ble<C: Crypto>(
 
     info!("BLE commission: phase B ok (CASE established, CommissioningComplete acknowledged)");
 
+    // A new device: no window was opened for it.
     Ok(CommissionOutcome {
         handle: DeviceHandle {
             fabric_index: controller_fab_idx,
             node_id: phase1.device_node_id,
         },
+        window_opener: None,
     })
 }
 

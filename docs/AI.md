@@ -35,7 +35,7 @@ itself.
 To add matter-peek to Claude Code:
 
 ```sh
-claude mcp add matter-peek -- matter-peek --server ws://127.0.0.1:8087 mcp
+claude mcp add matter-peek -- matter-peek --server ws://127.0.0.1:17335 mcp
 ```
 
 To add it to Claude Desktop, edit `claude_desktop_config.json`:
@@ -52,8 +52,10 @@ To add it to Claude Desktop, edit `claude_desktop_config.json`:
 ```
 
 Add `"--allow-mutate"` to `args` only if the agent is allowed to change
-devices. To use a running server, add `"--server", "ws://127.0.0.1:8087"`
-before `"mcp"`.
+devices. To use a running server, add `"--server", "ws://127.0.0.1:17335"`
+before `"mcp"`. As the user who runs the server, `matter-peek` finds the
+server's access token by itself; for a server run by another user (as a
+service, say), add `"--token", "…"` too, or set `MATTER_PEEK_TOKEN`.
 
 `scripts/claude-eval.sh` shows how a strong model works with these tools alone.
 It runs Claude Code with only the matter-peek tools, without its auto-memory,

@@ -32,8 +32,18 @@ code that the controller shows. `matter-peek advertised` lists the
 commissioned devices that are advertised on the network, both ours and those of
 other controllers.
 
-Bluetooth commissioning needs BlueZ. It works on Linux, but not yet in the
-Android app.
+Bluetooth commissioning needs BlueZ. It works on Linux, but not in the Android
+app. On Android, the app commissions with Google Play services instead: choose
+*With Google Play services* on the Commission page. Android scans the QR code,
+puts the device on your Wi-Fi or Thread network, and then hands it over to
+matter-peek, which commissions it onto our fabric. This works both with the
+controller in the app and with a server. For this, Android first commissions
+the device onto a fabric of its own; matter-peek removes that fabric again once
+Android's screens close, so the device keeps only ours.
+
+The Android app is also listed in Google Home, under the device's *Linked
+Matter apps & services* → *Link apps & services*. Choosing matter-peek there
+opens the app, which commissions the device at once, with no code to enter.
 
 ## Health, logs and updates
 

@@ -117,6 +117,7 @@ jobs:
         run: |
           tar -czf "$FILE" -C "$GITHUB_WORKSPACE/target/$TARGET/dist" matter-peek \
             -C "$GITHUB_WORKSPACE/target/dist" matter-peek-app \
+            -C "$GITHUB_WORKSPACE/service" install-service.sh \
             -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE
 
       - name: Upload
@@ -164,7 +165,9 @@ jobs:
         run: cargo build --locked --profile dist --target "$TARGET" -p matter-peek
 
       - name: Package
-        run: tar -czf "$FILE" -C "target/$TARGET/dist" matter-peek -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE
+        run: |
+          tar -czf "$FILE" -C "target/$TARGET/dist" matter-peek -C "$GITHUB_WORKSPACE/service" install-service.sh \
+            -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE
 
       - name: Upload
         uses: actions/upload-artifact@v7
@@ -228,7 +231,7 @@ jobs:
       - name: Package
         run: |
           zip -j "$FILE" "target/$TARGET/dist/matter-peek.exe" "target/$TARGET/dist/matter-peek-app.exe" \
-            LICENSE-MIT LICENSE-APACHE
+            service/install-service.ps1 LICENSE-MIT LICENSE-APACHE
 
       - name: Upload
         uses: actions/upload-artifact@v7
@@ -331,22 +334,26 @@ jobs:
       STAMP: ${{ needs.web.outputs.stamp }}
 
     steps:
+      # As uploaded: the Windows zip would be unpacked otherwise.
       - name: Download
         uses: actions/download-artifact@v8
         with:
           pattern: matter-peek-*
           path: files
           merge-multiple: true
+          skip-decompress: true
 
       - name: Publish
         run: |
           cat > notes.md <<'EOF'
           Builds of the latest commit on `main`, made by the Builds workflow on each push. They are not releases: they are only as tested as CI tests them, and the next push replaces them.
 
-          - `matter-peek-x86_64-linux-*.tar.gz`: the `matter-peek` executable, static, for any Linux on x86_64; and the app, for Linux with glibc 2.35 or newer (Ubuntu 22.04, Debian 12) and WebKitGTK 4.1 (`libwebkit2gtk-4.1-0`).
-          - `matter-peek-aarch64-linux-*.tar.gz`: the `matter-peek` executable, static, for any Linux on aarch64 (for example a Raspberry Pi).
-          - `matter-peek-x86_64-windows-*.zip`: the executable and the app, for Windows 10 and 11. There is no Bluetooth commissioning on Windows.
+          - `matter-peek-x86_64-linux-*.tar.gz`: the `matter-peek` executable, static, for any Linux on x86_64; and the app, for Linux with glibc 2.35 or newer (Ubuntu 22.04, Debian 12) and WebKitGTK 4.1 (`libwebkit2gtk-4.1-0`). `install-service.sh` runs the executable as a systemd service.
+          - `matter-peek-aarch64-linux-*.tar.gz`: the `matter-peek` executable, static, for any Linux on aarch64 (for example a Raspberry Pi). `install-service.sh` runs it as a systemd service.
+          - `matter-peek-x86_64-windows-*.zip`: the executable and the app, for Windows 10 and 11. There is no Bluetooth commissioning on Windows. `install-service.ps1` runs the executable at boot.
           - `matter-peek-aarch64-android-*.apk`: the app, for 64-bit ARM Android phones (Android 7 and newer). Open it on the phone to install it.
+
+          The server asks for an access token, which it shows when it starts. There is no TLS yet: the token and everything else travel unencrypted, so use the server on a network you trust, or reach it through a VPN or an SSH tunnel.
           EOF
           printf '\nBuilt from %s at %s UTC.\n' "$GITHUB_SHA" "$STAMP" >> notes.md
 

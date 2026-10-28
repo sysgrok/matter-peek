@@ -1,4 +1,4 @@
 # `trunk serve` (development): the page's API, at /ws, is the server's.
 [[proxy]]
-backend = "ws://127.0.0.1:8087/ws"
+backend = "ws://127.0.0.1:17335/ws"
 ws = true

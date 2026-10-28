@@ -487,9 +487,9 @@ impl ModelListener for Reports {
 }
 
 impl DevicesListener for Reports {
-    fn on_devices(&self, devices: Vec<DeviceInfo>) {
+    fn on_devices(&self, devices: Vec<DeviceInfo>, syncing: bool) {
         let _ = self.out.try_send(ServerMsg::Event {
-            event: Event::Devices { devices },
+            event: Event::Devices { devices, syncing },
         });
     }
 }

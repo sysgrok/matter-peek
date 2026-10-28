@@ -3215,6 +3215,7 @@ dependencies = [
  "futures-util",
  "log",
  "matter-peek-core",
+ "rand 0.10.3",
  "serde",
  "serde_json",
  "ureq",

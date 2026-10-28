@@ -15,9 +15,9 @@ use futures_lite::StreamExt;
 
 use log::{debug, info, warn};
 
-use crate::client::{self, Connection};
+use crate::client::{self, Connection, Endpoint};
 use matter_peek_core::api::mcp::{handle, jsonrpc, Caps, Dispatch};
-use matter_peek_core::api::{wire, FabricRef, PeekConfig};
+use matter_peek_core::api::{wire, FabricRef};
 
 /// A [`Dispatch`] over a connection to the API: to a controller in this
 /// process, or to the server at `url`, connected on the first call and
@@ -25,6 +25,8 @@ use matter_peek_core::api::{wire, FabricRef, PeekConfig};
 /// serves the whole session: an upload in progress belongs to it.
 pub(crate) struct ApiDispatch {
     url: Option<String>,
+    /// The server's access token.
+    token: Option<String>,
     conn: RefCell<Option<Rc<Connection>>>,
     /// The fabric of ours a tool naming none is about.
     fabric: FabricRef,
@@ -41,7 +43,10 @@ impl ApiDispatch {
             return Err("the controller stopped".into());
         };
 
-        let conn = Rc::new(client::connect(url).await.map_err(|e| e.to_string())?);
+        let conn = client::connect(url, self.token.as_deref())
+            .await
+            .map_err(|e| e.to_string())?;
+        let conn = Rc::new(conn);
         *self.conn.borrow_mut() = Some(conn.clone());
 
         Ok(conn)
@@ -78,39 +83,33 @@ impl Dispatch for ApiDispatch {
     }
 }
 
-/// Serve the MCP tools on stdin/stdout until stdin closes: through the server at
-/// `server`, else through a controller started in this process.
-pub async fn serve(
-    server: Option<String>,
-    fabric: FabricRef,
-    allow_mutate: bool,
-) -> io::Result<()> {
+/// Serve the MCP tools on stdin/stdout until stdin closes: through the server or
+/// the controller `endpoint` names.
+pub async fn serve(endpoint: Endpoint, fabric: FabricRef, allow_mutate: bool) -> io::Result<()> {
     info!(
         "mcp: starting, {} (mutating tools {})",
-        match &server {
+        match &endpoint.server {
             Some(url) => format!("server {url}"),
             None => "controller in this process".into(),
         },
         if allow_mutate { "ENABLED" } else { "disabled" }
     );
 
-    stdio_loop(&dispatch(server, fabric).await?, Caps { allow_mutate }).await
+    stdio_loop(&dispatch(endpoint, fabric).await?, Caps { allow_mutate }).await
 }
 
-/// The API, for an agent: through the server at `server`, else through a
+/// The API, for an agent: through the server `endpoint` names, else through a
 /// controller started in this process now, so that a store held by another
 /// process fails here, and synced, so that the first tool call sees the
 /// devices on our fabrics that are not remembered too. A tool naming no fabric
 /// is about `fabric`.
-pub(crate) async fn dispatch(server: Option<String>, fabric: FabricRef) -> io::Result<ApiDispatch> {
-    let Some(url) = server else {
+pub(crate) async fn dispatch(endpoint: Endpoint, fabric: FabricRef) -> io::Result<ApiDispatch> {
+    let Some(url) = endpoint.server.clone() else {
         // Long-lived, like a server: keep the device list in sync.
-        let conn = client::connect_in_process(PeekConfig {
-            store_dir: None,
-            periodic_sync: true,
-        })?;
+        let conn = client::connect_in_process(endpoint.in_process(true))?;
         let dispatch = ApiDispatch {
             url: None,
+            token: None,
             conn: RefCell::new(Some(Rc::new(conn))),
             fabric,
         };
@@ -127,6 +126,7 @@ pub(crate) async fn dispatch(server: Option<String>, fabric: FabricRef) -> io::R
 
     Ok(ApiDispatch {
         url: Some(url),
+        token: endpoint.token,
         conn: RefCell::new(None),
         fabric,
     })

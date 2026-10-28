@@ -366,6 +366,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         Ok(CommissionResult {
             handle: convert::handle(outcome.handle),
             rematch_candidate,
+            window_opener: outcome.window_opener,
         })
     }
 }

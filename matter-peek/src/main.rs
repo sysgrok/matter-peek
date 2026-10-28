@@ -10,13 +10,13 @@
 //! sets.
 //!
 //! ```text
-//! matter-peek serve [--listen 127.0.0.1:8087]
-//! matter-peek [--server ws://127.0.0.1:8087] [--json] <command> [args...]
+//! matter-peek serve [--listen 127.0.0.1:17335]
+//! matter-peek [--server ws://127.0.0.1:17335/ws [--token TOKEN]] [--json] <command> [args...]
 //! matter-peek --help
 //! ```
 
 use std::io::{self, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -25,14 +25,16 @@ use clap::builder::BoolishValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::client::Connection;
+use matter_peek_core::api::platform::data_dir;
 use matter_peek_core::api::{self, display, query, wire};
 
 mod chat;
 mod client;
 mod mcp;
 
-/// Where `serve` listens by default, and where `--server` finds it.
-const DEFAULT_LISTEN: &str = "127.0.0.1:8087";
+/// Where `serve` listens by default: port 17335 is "PEEK" on a phone's keypad,
+/// after a 1.
+const DEFAULT_LISTEN: &str = "127.0.0.1:17335";
 
 /// How much of an OTA image goes in one upload request.
 const UPLOAD_CHUNK_LEN: usize = 256 * 1024;
@@ -44,10 +46,15 @@ const UPLOAD_CHUNK_LEN: usize = 256 * 1024;
     about = "Commission, inspect and update Matter devices"
 )]
 struct Cli {
-    /// Use the matter-peek server at this URL (e.g. ws://127.0.0.1:8087),
+    /// Use the matter-peek server at this URL (e.g. ws://127.0.0.1:17335/ws),
     /// instead of a controller in this process.
     #[arg(long, global = true, value_name = "URL")]
     server: Option<String>,
+    /// The access token of the server given with --server. By default, the one
+    /// of a server whose store is here (in --store-dir, else in the user's data
+    /// directory), if this user can read it.
+    #[arg(long, global = true, env = "MATTER_PEEK_TOKEN", value_name = "TOKEN")]
+    token: Option<String>,
     /// Print the API's responses and events as JSON.
     #[arg(long, global = true)]
     json: bool,
@@ -55,6 +62,11 @@ struct Cli {
     /// the default one.
     #[arg(long, global = true, env = "MATTER_PEEK_FABRIC", value_name = "FABRIC")]
     fabric: Option<String>,
+    /// Keep the controller's store (its fabrics, devices and settings), the
+    /// assistant's chats and the server's access token in this directory,
+    /// instead of the user's data directory: for example a service's.
+    #[arg(long, global = true, env = "MATTER_PEEK_STORE_DIR", value_name = "DIR")]
+    store_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -274,10 +286,20 @@ enum Command {
     /// the stored one, unless MATTER_PEEK_LLM_URL, MATTER_PEEK_LLM_MODEL and
     /// MATTER_PEEK_LLM_KEY set one.
     Serve {
-        /// The address to listen on. There is no authentication yet: whoever
-        /// reaches it controls the devices.
+        /// The address to listen on: 0.0.0.0:17335 for the whole network.
+        /// Clients give the access token, which the log shows when it starts,
+        /// and `matter-peek token` prints.
         #[arg(long, default_value = DEFAULT_LISTEN, value_name = "ADDR")]
         listen: String,
+    },
+    /// Print the access token of the server whose store is here (in
+    /// --store-dir, else in the user's data directory), making one if there is
+    /// none yet.
+    Token {
+        /// Make a new one: the old one stops working when the server starts
+        /// again.
+        #[arg(long)]
+        new: bool,
     },
     /// Offer the API to an AI agent, as MCP tools over stdio (the MCP stdio
     /// transport), until stdin closes. Without --server, holds the store while
@@ -531,7 +553,10 @@ fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
 
     if let Command::Serve { listen } = &cli.command {
-        return serve(listen);
+        return serve(listen, cli.store_dir.as_deref());
+    }
+    if let Command::Token { new } = &cli.command {
+        return token(cli.store_dir.as_deref(), *new);
     }
     if let Command::Filters = &cli.command {
         print_filters();
@@ -548,24 +573,58 @@ fn main() -> ExitCode {
     }
 }
 
-/// Run the server on `listen`, until stopped.
-fn serve(listen: &str) -> ExitCode {
+/// Run the server on `listen`, with its store in `store_dir` if given, until
+/// stopped.
+fn serve(listen: &str, store_dir: Option<&Path>) -> ExitCode {
     let local = listen
         .parse::<std::net::SocketAddr>()
         .is_ok_and(|addr| addr.ip().is_loopback());
     if !local {
         log::warn!(
-            "serve: listening on {listen}, beyond this machine, without authentication: \
-             whoever reaches it controls the devices"
+            "serve: listening on {listen}, beyond this machine, without TLS: the access token \
+             and the rest travel unencrypted"
         );
     }
 
-    match matter_peek_server::run(listen, matter_peek_server::llm::model_from_env()) {
+    match matter_peek_server::run(listen, matter_peek_server::llm::model_from_env(), store_dir) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Print the access token kept in `store_dir`, else in the user's data
+/// directory; a new one if `renew`.
+fn token(store_dir: Option<&Path>, renew: bool) -> ExitCode {
+    let dir = store_dir.map_or_else(data_dir, Path::to_path_buf);
+
+    match matter_peek_server::access_token(&dir, renew) {
+        Ok(token) => {
+            println!("{token}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: the access token in {}: {e}", dir.display());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Where the API is, as the command line says: a server, with its token given
+/// or kept here, else a controller in this process.
+fn endpoint(cli: &Cli) -> client::Endpoint {
+    let token = cli.token.clone().or_else(|| {
+        let dir = cli.store_dir.clone().unwrap_or_else(data_dir);
+        cli.server.as_ref()?;
+        matter_peek_server::stored_access_token(&dir).ok().flatten()
+    });
+
+    client::Endpoint {
+        server: cli.server.clone(),
+        token,
+        store_dir: cli.store_dir.clone(),
     }
 }
 
@@ -576,11 +635,12 @@ async fn run(cli: Cli) -> io::Result<bool> {
         .as_deref()
         .map(api::FabricRef::parse)
         .unwrap_or_default();
+    let endpoint = endpoint(&cli);
 
     // Its own connection, for as long as stdin is open.
     match cli.command {
         Command::Mcp { allow_mutate } => {
-            mcp::serve(cli.server, fabric, allow_mutate).await?;
+            mcp::serve(endpoint, fabric, allow_mutate).await?;
             return Ok(true);
         }
         Command::Chat {
@@ -596,19 +656,16 @@ async fn run(cli: Cli) -> io::Result<bool> {
                 allow_mutate,
                 fabric: fabric.clone(),
             };
-            return chat::chat(cli.server, args).await;
+            return chat::chat(endpoint, args).await;
         }
         _ => {}
     }
 
-    let conn = match &cli.server {
-        Some(url) => client::connect(url).await?,
+    let conn = match &endpoint.server {
+        Some(url) => client::connect(url, endpoint.token.as_deref()).await?,
         // Short-lived: no periodic sync, which the process could exit in the
         // middle of.
-        None => client::connect_in_process(api::PeekConfig {
-            store_dir: None,
-            periodic_sync: false,
-        })?,
+        None => client::connect_in_process(endpoint.in_process(false))?,
     };
 
     let out = Out { json: cli.json };
@@ -1199,7 +1256,10 @@ async fn run(cli: Cli) -> io::Result<bool> {
             }
             Ok(response.is_some())
         }
-        Command::Serve { .. } | Command::Mcp { .. } | Command::Chat { .. } => {
+        Command::Serve { .. }
+        | Command::Token { .. }
+        | Command::Mcp { .. }
+        | Command::Chat { .. } => {
             unreachable!("served above")
         }
     }

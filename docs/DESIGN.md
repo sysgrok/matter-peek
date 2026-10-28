@@ -194,7 +194,7 @@ words. All of this is private to `core`.
 
 | Front-end | Binary | How it reaches the controller |
 |---|---|---|
-| Server | `matter-peek serve` | It starts a controller, and serves the API (`ws://127.0.0.1:8087/ws`) and the web UI (`http://127.0.0.1:8087/`) on one port |
+| Server | `matter-peek serve` | It starts a controller, and serves the API (`ws://127.0.0.1:17335/ws`, with the access token) and the web UI (`http://127.0.0.1:17335/`) on one port |
 | Web UI (Yew/Wasm, Bulma) | Built into `matter-peek-server` at build time (`trunk serve` while working on it) | WebSocket, to the server that served it |
 | CLI | `matter-peek` | `--server <url>`, or a `Hub` in its own process |
 | MCP server | `matter-peek mcp` | The same way as the CLI (read-only unless `--allow-mutate`) |
@@ -225,6 +225,15 @@ words. All of this is private to `core`.
   the wasm to about 1.8 MB (0.7 MB gzipped).
 - The web UI reaches the API on its own origin, at `/ws`. `trunk serve`
   forwards that to the server (`Trunk.toml`).
+- The API asks for an access token: 16 random bytes, in hex, made at the
+  server's first start and kept in the store's directory (`access-token`,
+  readable by its owner alone). A client gives it on the WebSocket handshake,
+  as `?token=` (browsers cannot set headers on a WebSocket; the web UI keeps it
+  in local storage and takes it out of the page's URL) or as
+  `Authorization: Bearer` (the CLI). Without it, the server completes the
+  handshake and closes the connection with code 4401, which a browser can see,
+  unlike an HTTP status. The web UI's files are open: they are the same for
+  everyone, and hold nothing of the devices. There is no TLS yet.
 - The only C code the executable links is ring's (used by rustls, for the
   assistant's model over HTTPS, with its own root certificates). It therefore
   builds as a static executable with musl, for x86_64 and aarch64
@@ -561,8 +570,32 @@ backend (`mdns-astro`) there, and it has no BLE central yet.
 The Android app is `matter-peek-app` (Tauri): the web UI in a WebView, on a
 controller in the app (a `Hub`) or on a server. In the app, `core` uses
 rs-matter's builtin mDNS backend (`mdns-builtin`), and the app holds a Wi-Fi
-`MulticastLock` while it is in the foreground. The app has no BLE
-commissioning yet. An iOS app is not started; building one needs a Mac.
+`MulticastLock` while it is in the foreground. An iOS app is not started;
+building one needs a Mac.
+
+The app commissions with Google Play services' Matter API
+(`play-services-home`), through a small Tauri plugin in Kotlin (`PlayPlugin`,
+in `gen/android`) whose commands the page calls directly:
+- Google Play services scans the QR code, does the BLE part and puts the
+  device on Wi-Fi or Thread. It commissions the device onto its own local
+  fabric (the "Android fabric"), opens a commissioning window, and hands the
+  device over to the app's `CommissioningService` (`HandoffService`): an IP
+  address, a port and a passcode.
+- The service passes these to the page on a channel. The page commissions the
+  device over IP like any other device, so this works with the controller in
+  the app and with a server. It then tells Google Play services how it went,
+  with the device's node ID, and Google Play services closes its screens.
+- Google Play services uses the Android fabric only for this, and Android does
+  not list the device as its own afterwards. So once its screens close, the
+  page removes that fabric from the device. The commission finds it while it
+  reads the device's fabrics over PASE, before AddNOC: `AdminFabricIndex`
+  names the fabric whose administrator opened the window, and the result
+  reports it as `window_opener`.
+- The app's activity handles `ACTION_COMMISSION_DEVICE`, which lists the app in
+  Google Home's *Linked Matter apps & services*. A device shared from there
+  comes with the pairing code of the window Google Home opened. The page
+  passes this code back to Google Play services' commissioning, as Google's
+  sample app does, and the device is handed over in the same way.
 
 `core` can also build native bindings itself. With the `uniffi` feature, it
 builds as a `cdylib` / `staticlib` (`cargo rustc --crate-type …`, so the no_std
@@ -581,8 +614,7 @@ Still to do on mobile:
   while the app is in the foreground.
 - UI: the existing web UI in a WebView is in use (through Tauri). SwiftUI or
   Jetpack Compose would be the native alternatives.
-- Later: the hand-off to and from Apple's MatterSupport and the Google Home
-  Mobile SDK.
+- Later: the hand-off to and from Apple's MatterSupport.
 
 ### Embedded (later)
 
@@ -616,7 +648,8 @@ not been tried on hardware yet.
 - operations that run concurrently;
 - the web UI, the CLI and MCP on one API, in one executable; the API in `core`
   (`MatterPeek`), exported over UniFFI;
-- the app (Tauri), on the desktop and on Android.
+- the app (Tauri), on the desktop and on Android; on Android, commissioning
+  with Google Play services, and devices shared from Google Home.
 
 **Next**
 - Migrating devices to a new Wi-Fi network, and other changes to the networks
@@ -631,9 +664,8 @@ not been tried on hardware yet.
   `Commissioner`, with questions back to the user (attestation failed, or a
   test device: continue? A retryable step failed: retry?).
 
-**Platforms**: the macOS and Windows desktops; an iOS app; and commissioning
-through the platform's own commissioner (Google Play services, Apple) rather
-than over BLE.
+**Platforms**: the macOS and Windows desktops; an iOS app, commissioning
+through Apple's own commissioner (MatterSupport) rather than over BLE.
 
 **AI agent**: The assistant (`api::agent`) works with any OpenAI-compatible
 API, in the terminal and in the web UI. Next are the Anthropic API and the

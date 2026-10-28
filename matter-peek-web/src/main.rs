@@ -32,6 +32,7 @@ mod icons;
 mod memory;
 mod network;
 mod our_fabrics;
+mod play;
 mod share;
 mod thread;
 mod transport;
@@ -104,6 +105,9 @@ enum Pending {
     Wake(u64),
     Discover,
     Commission,
+    /// Removing Android's own fabric from the device Google Play services
+    /// handed over.
+    AndroidFabric,
     /// An OTA image upload.
     Upload,
 }
@@ -135,6 +139,17 @@ const COMMISSION_TIMEOUT_SECS: u32 = 90;
 /// Likewise over Bluetooth: scanning for the device, and its joining its
 /// network, add to it.
 const BLE_COMMISSION_TIMEOUT_SECS: u32 = 300;
+
+/// How the Commission page reaches the device.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Via {
+    /// Over IP, at its address.
+    Network,
+    Bluetooth,
+    /// Google Play services (Android) puts it on the network, then hands it
+    /// over to us.
+    PlayServices,
+}
 
 /// The network a device commissioned over Bluetooth joins.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -208,8 +223,17 @@ enum Msg {
     PickDevice(String),
     /// Commission the device at this Bluetooth address.
     PickBleDevice(String),
-    /// Commission over Bluetooth (else over the network).
-    SetViaBle(bool),
+    /// How to reach the device to commission.
+    SetVia(Via),
+    /// Whether Google Play services commissions here.
+    PlayAvailable(bool),
+    /// Another Matter app shared this device with us: commission it.
+    Shared(play::Shared),
+    /// Google Play services handed the device over: commission it.
+    Handover(play::Handover),
+    /// Google Play services' screens closed: whether the device is
+    /// commissioned, or why they could not open.
+    PlayEnded(Result<bool, String>),
     BleAddr(String),
     SetNetwork(Network),
     WifiSsid(String),
@@ -301,7 +325,8 @@ enum Msg {
     /// the data model popup.
     ModelEvent(u64, api::DeviceModel),
     /// The device list changed, on the server.
-    DevicesChanged(Vec<api::DeviceInfo>),
+    /// The device list, and whether it is being synced with the network.
+    DevicesChanged(Vec<api::DeviceInfo>, bool),
     /// Turn a device's (node_id) card to its controls (`true`), or its health.
     Flip(u64, bool),
     /// Turn the cards shown to their controls (`true`), or their health.
@@ -357,10 +382,26 @@ struct App {
     discover_filter: String,
     /// Remember the device being commissioned (keep a record of it).
     remember: bool,
-    /// Commission over Bluetooth LE, rather than over the network.
-    via_ble: bool,
+    /// How to reach the device to commission.
+    via: Via,
     /// Whether the controller commissions over Bluetooth, once it said.
     can_ble: Option<bool>,
+    /// Whether Google Play services commissions here (in the Android app).
+    can_play: bool,
+    /// The device another Matter app shared with us, while it is commissioned.
+    shared: Option<play::Shared>,
+    /// Google Play services' screens are open.
+    play_open: bool,
+    /// The commission running is of the device Google Play services handed
+    /// over: it waits for the answer.
+    handing_over: bool,
+    /// Android's own fabric on the new device Google Play services handed
+    /// over: the node ID, and the device's index of the fabric. Google Play
+    /// services only uses it to hand the device over, so it is removed once
+    /// its screens close.
+    android_fabric: Option<(u64, u8)>,
+    /// What became of Android's fabric, said with the commission's result.
+    play_note: Option<String>,
     /// The Bluetooth address of the device to commission; empty for the one
     /// matching the setup code.
     ble_addr: String,
@@ -383,6 +424,9 @@ struct App {
     busy_stored: bool,
     /// It is being read, for the spinner of its Refresh button.
     loading_list: bool,
+    /// The controller is syncing the device list with the network, whoever
+    /// asked: devices may be added when it ends.
+    syncing: bool,
     /// The operations in flight on devices: node ID, and whether it spins the
     /// device's Refresh button.
     device_ops: Vec<(u64, bool)>,
@@ -400,8 +444,13 @@ struct App {
     /// Filter the device list to devices whose tags contain this substring.
     /// The device filter, as typed.
     filter: String,
-    /// In the app, the server typed into the connection popup, while open.
+    /// The server typed into the connection popup, while open (in a browser,
+    /// it only asks for the access token).
     connection: Option<String>,
+    /// The access token typed into it.
+    connection_token: String,
+    /// The server refused the access token kept.
+    refused: bool,
     filter_focus: bool,
     /// The completion picked with the arrow keys.
     filter_pick: usize,
@@ -525,15 +574,26 @@ impl Component for App {
     type Message = Msg;
     type Properties = ();
 
-    fn create(_ctx: &Context<Self>) -> Self {
+    fn create(ctx: &Context<Self>) -> Self {
+        let link = ctx.link().clone();
+        transport::on_refused(move || {
+            link.send_message(Msg::Connection(connection::ConnectionMsg::Refused))
+        });
+
         Self {
             tab: Tab::Devices,
             peer_addr: String::new(),
             setup_code: "20202021".into(),
             discover_filter: String::new(),
             remember: false,
-            via_ble: false,
+            via: Via::Network,
             can_ble: None,
+            can_play: false,
+            shared: None,
+            play_open: false,
+            handing_over: false,
+            android_fabric: None,
+            play_note: None,
             ble_addr: String::new(),
             network: Network::Wifi,
             wifi_ssid: String::new(),
@@ -547,6 +607,7 @@ impl Component for App {
             discovering: false,
             busy_stored: false,
             loading_list: false,
+            syncing: false,
             device_ops: Vec::new(),
             discovered: Vec::new(),
             discovered_ble: Vec::new(),
@@ -556,6 +617,8 @@ impl Component for App {
             tag_inputs: HashMap::new(),
             filter: String::new(),
             connection: None,
+            connection_token: String::new(),
+            refused: false,
             filter_focus: false,
             filter_pick: 0,
             steps: Vec::new(),
@@ -864,19 +927,92 @@ impl Component for App {
                 true
             }
             Msg::PickDevice(addr) => {
-                self.via_ble = false;
+                self.via = Via::Network;
                 self.peer_addr = addr;
                 self.discover_open = false;
                 true
             }
             Msg::PickBleDevice(addr) => {
-                self.via_ble = true;
+                self.via = Via::Bluetooth;
                 self.ble_addr = addr;
                 self.discover_open = false;
                 true
             }
-            Msg::SetViaBle(v) => {
-                self.via_ble = v;
+            Msg::SetVia(via) => {
+                self.via = via;
+                if via != Via::PlayServices {
+                    self.shared = None;
+                }
+                true
+            }
+            Msg::PlayAvailable(available) => {
+                self.can_play = available;
+                // On a phone, Google Play services is the way to add a device.
+                if available && self.via == Via::Network && !self.running {
+                    self.via = Via::PlayServices;
+                }
+                true
+            }
+            Msg::Shared(shared) => {
+                self.tab = Tab::Commission;
+                self.drawer_open = false;
+                if self.running {
+                    self.error =
+                        Some("a commission is running: share the device again once it ends".into());
+                    return true;
+                }
+                if shared.window_secs <= 0 {
+                    self.error = Some(
+                        "the device's commissioning window closed before matter-peek opened: share it again".into(),
+                    );
+                    return true;
+                }
+                self.via = Via::PlayServices;
+                self.shared = Some(shared);
+                self.start_commission(ctx)
+            }
+            Msg::Handover(handover) => {
+                self.handing_over = true;
+                self.steps.clear();
+                self.result = None;
+                let req = wire::Request::Commission {
+                    via: api::CommissionVia::Ip {
+                        addr: handover.addr,
+                    },
+                    setup_code: handover.passcode.to_string(),
+                    remember: self.remember,
+                    fabric: self.fabric_ref(),
+                };
+                send_request(ctx.link().clone(), Pending::Commission, req);
+                cancel_after(ctx, COMMISSION_TIMEOUT_SECS);
+                true
+            }
+            Msg::PlayEnded(ended) => {
+                self.play_open = false;
+                self.running = self.handing_over;
+                self.shared = None;
+                match ended {
+                    // How it went shows from our commission's answer.
+                    Ok(true) => {
+                        if let Some((node_id, fabric_index)) = self.android_fabric.take() {
+                            send_request(
+                                ctx.link().clone(),
+                                Pending::AndroidFabric,
+                                wire::Request::RemoveDeviceFabric {
+                                    node_id,
+                                    fabric_index,
+                                },
+                            );
+                        }
+                    }
+                    Ok(false) if self.result.is_none() && !self.handing_over => {
+                        self.result = Some(wire::Response::Error {
+                            message: "Google Play services did not commission the device".into(),
+                        });
+                    }
+                    Ok(false) => {}
+                    Err(e) => self.error = Some(e),
+                }
                 true
             }
             Msg::BleAddr(v) => {
@@ -1030,7 +1166,9 @@ impl Component for App {
                 // almost always a mistake — its commissioning window has closed,
                 // so PASE will hang. Warn + require confirmation instead.
                 let addr = self.peer_addr.trim().to_string();
-                if !self.via_ble && self.last_commissioned_addr.as_deref() == Some(addr.as_str()) {
+                if self.via == Via::Network
+                    && self.last_commissioned_addr.as_deref() == Some(addr.as_str())
+                {
                     self.confirm_recommission = true;
                     return true;
                 }
@@ -1507,7 +1645,8 @@ impl Component for App {
                 false
             }
             Msg::ModelEvent(node_id, model) => self.model_event(node_id, model),
-            Msg::DevicesChanged(devices) => {
+            Msg::DevicesChanged(devices, syncing) => {
+                self.syncing = syncing;
                 self.take_devices(ctx, devices);
                 true
             }
@@ -1633,6 +1772,26 @@ impl Component for App {
                 true
             }
             Msg::Done(pending, resp) => {
+                if pending == Pending::Commission && self.handing_over && self.shared.is_none() {
+                    if let wire::Response::Commissioned(result) = &resp {
+                        self.android_fabric = result
+                            .window_opener
+                            .map(|index| (result.handle.node_id, index));
+                    }
+                }
+                if pending == Pending::AndroidFabric {
+                    self.play_note = Some(match &resp {
+                        wire::Response::Error { message } => android_fabric_kept(message),
+                        _ => "Android's own fabric was removed from it: Google Play services only used it to hand the device over.".into(),
+                    });
+                }
+                if pending == Pending::Commission {
+                    self.answer_handover(match &resp {
+                        wire::Response::Commissioned(result) => Ok(result.handle.node_id),
+                        wire::Response::Error { message } => Err(message.clone()),
+                        _ => Err("the commission did not finish".into()),
+                    });
+                }
                 match resp {
                     wire::Response::Discovered {
                         devices,
@@ -1657,7 +1816,9 @@ impl Component for App {
                     }
                     wire::Response::Capabilities { capabilities } => {
                         self.can_ble = Some(capabilities.ble);
-                        self.via_ble &= capabilities.ble;
+                        if self.via == Via::Bluetooth && !capabilities.ble {
+                            self.via = Via::Network;
+                        }
                     }
                     wire::Response::Peek { node_id, health } => {
                         // A Refresh result: merge the fresh read into the device's
@@ -1743,7 +1904,7 @@ impl Component for App {
                     other @ wire::Response::Commissioned(_) => {
                         // Its commissioning window is closed now — remember its
                         // address to guard a re-commission.
-                        if !self.via_ble {
+                        if self.via == Via::Network {
                             self.last_commissioned_addr = Some(self.peer_addr.trim().to_string());
                         }
                         if let wire::Response::Commissioned(result) = &other {
@@ -1771,6 +1932,12 @@ impl Component for App {
                 true
             }
             Msg::Error(pending, e) => {
+                if pending == Pending::Commission {
+                    self.answer_handover(Err(e.clone()));
+                }
+                if pending == Pending::AndroidFabric {
+                    self.play_note = Some(android_fabric_kept(&e));
+                }
                 self.finish(pending);
                 self.error = Some(e);
                 self.set_status(None);
@@ -1847,6 +2014,7 @@ impl Component for App {
             );
             ctx.link().send_message(Msg::SelectTab(Tab::Devices));
             self.open_sub_ws(ctx, 0);
+            self.watch_play(ctx);
         }
 
         if std::mem::take(&mut self.scroll_chat) {
@@ -2015,7 +2183,9 @@ impl App {
                 self.waking.remove(&node_id);
             }
             Pending::Discover => self.discovering = false,
-            Pending::Commission => self.running = false,
+            // Google Play services' screens may still be open.
+            Pending::Commission => self.running = self.play_open,
+            Pending::AndroidFabric => {}
             Pending::Upload => self.uploading = None,
         }
     }
@@ -2160,8 +2330,8 @@ impl App {
                             wire::Event::Model { node_id, model } => {
                                 link.send_message(Msg::ModelEvent(node_id, model))
                             }
-                            wire::Event::Devices { devices } => {
-                                link.send_message(Msg::DevicesChanged(devices))
+                            wire::Event::Devices { devices, syncing } => {
+                                link.send_message(Msg::DevicesChanged(devices, syncing))
                             }
                             wire::Event::Step { .. } | wire::Event::Chat { .. } => {}
                         },
@@ -2260,17 +2430,20 @@ impl App {
     /// Whether the commission form is filled in usably: how to reach the device,
     /// and its setup code.
     fn can_commission(&self) -> bool {
-        let reach = if self.via_ble {
-            let addr = self.ble_addr.trim();
-            let network = match self.network {
-                Network::Wifi => !self.wifi_ssid.is_empty(),
-                Network::Thread => valid_hex(&self.thread_dataset),
-                Network::None => true,
-            };
+        let reach = match self.via {
+            Via::Network => self.peer_addr.trim().parse::<SocketAddr>().is_ok(),
+            Via::Bluetooth => {
+                let addr = self.ble_addr.trim();
+                let network = match self.network {
+                    Network::Wifi => !self.wifi_ssid.is_empty(),
+                    Network::Thread => valid_hex(&self.thread_dataset),
+                    Network::None => true,
+                };
 
-            (addr.is_empty() || valid_bt_addr(addr)) && network
-        } else {
-            self.peer_addr.trim().parse::<SocketAddr>().is_ok()
+                (addr.is_empty() || valid_bt_addr(addr)) && network
+            }
+            // Google Play services asks for the rest.
+            Via::PlayServices => return true,
         };
 
         reach && valid_setup_code(&self.setup_code)
@@ -2278,7 +2451,7 @@ impl App {
 
     /// How the commission reaches the device, from the form.
     fn commission_via(&self) -> api::CommissionVia {
-        if !self.via_ble {
+        if self.via != Via::Bluetooth {
             return api::CommissionVia::Ip {
                 addr: self.peer_addr.trim().to_string(),
             };
@@ -2302,10 +2475,11 @@ impl App {
         }
     }
 
-    /// Kick off a commission (shared by `Commission` and `CommissionAnyway`).
+    /// Kick off a commission (shared by `Commission`, `CommissionAnyway` and
+    /// `Shared`).
     fn start_commission(&mut self, ctx: &Context<Self>) -> bool {
         let setup_code = self.setup_code.trim().to_string();
-        if setup_code.is_empty() {
+        if setup_code.is_empty() && self.via != Via::PlayServices {
             self.error = Some("enter the device's setup code".into());
             return true;
         }
@@ -2314,6 +2488,25 @@ impl App {
         self.result = None;
         self.notice = None;
         self.error = None;
+        self.android_fabric = None;
+        self.play_note = None;
+
+        // Google Play services hands the device over once it is on the
+        // network: the commission proper starts then (`Handover`).
+        if self.via == Via::PlayServices {
+            self.play_open = true;
+            let shared = self.shared.clone();
+            let link = ctx.link().clone();
+            spawn_local(async move {
+                let handover = link.clone();
+                let ended = play::commission(shared.as_ref(), move |device| {
+                    handover.send_message(Msg::Handover(device))
+                })
+                .await;
+                link.send_message(Msg::PlayEnded(ended));
+            });
+            return true;
+        }
 
         let req = wire::Request::Commission {
             via: self.commission_via(),
@@ -2323,19 +2516,38 @@ impl App {
         };
         send_request(ctx.link().clone(), Pending::Commission, req);
 
-        // Safety net: auto-cancel if the commission runs too long. When the timer
-        // fires we only act if still `running` (a completed run cleared it).
-        let timeout_secs = if self.via_ble {
+        let timeout_secs = if self.via == Via::Bluetooth {
             BLE_COMMISSION_TIMEOUT_SECS
         } else {
             COMMISSION_TIMEOUT_SECS
         };
+        cancel_after(ctx, timeout_secs);
+        true
+    }
+
+    /// Answer Google Play services, which waits for how the commission of the
+    /// device it handed over went.
+    fn answer_handover(&mut self, outcome: Result<u64, String>) {
+        if std::mem::take(&mut self.handing_over) {
+            play::handed_over(outcome);
+        }
+    }
+
+    /// In the Android app: whether Google Play services commissions, and the
+    /// devices other Matter apps share with us.
+    fn watch_play(&self, ctx: &Context<Self>) {
+        if !transport::in_app() {
+            return;
+        }
+
         let link = ctx.link().clone();
         spawn_local(async move {
-            gloo_timers::future::TimeoutFuture::new(timeout_secs * 1000).await;
-            link.send_message(Msg::Cancel);
+            let available = play::available().await;
+            link.send_message(Msg::PlayAvailable(available));
+            if available {
+                play::watch_shares(move |shared| link.send_message(Msg::Shared(shared)));
+            }
         });
-        true
     }
 
     /// The top bar: the brand, the pages and, apart from them, the assistant;
@@ -2568,6 +2780,25 @@ fn log_intent_file(intent: api::LogIntent) -> &'static str {
         api::LogIntent::NetworkDiag => "network",
         api::LogIntent::CrashLogs => "crash",
     }
+}
+
+/// What is said with the commission's result when Android's own fabric could
+/// not be removed from the device.
+fn android_fabric_kept(error: &str) -> String {
+    format!(
+        "Android's own fabric is still on it ({error}): remove it from the device's Fabrics if it is not wanted."
+    )
+}
+
+/// Safety net: cancel the commission if it runs longer than `secs`. When the
+/// timer fires, it only acts if one is still `running` (a completed run
+/// cleared it).
+fn cancel_after(ctx: &Context<App>, secs: u32) {
+    let link = ctx.link().clone();
+    spawn_local(async move {
+        gloo_timers::future::TimeoutFuture::new(secs * 1000).await;
+        link.send_message(Msg::Cancel);
+    });
 }
 
 /// Open a WS, send the request, and pump server frames back as component
@@ -3071,5 +3302,6 @@ fn checkbox_checked(e: Event) -> bool {
 
 fn main() {
     wasm_logger::init(wasm_logger::Config::default());
+    transport::take_url_token();
     yew::Renderer::<App>::new().render();
 }

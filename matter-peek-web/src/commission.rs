@@ -12,21 +12,17 @@ use crate::icons::{icon, Icon};
 use crate::ui;
 use crate::{
     checkbox_checked, input_value, phase_name, picked_file, textarea_value, valid_bt_addr,
-    valid_hex, valid_setup_code, App, Msg, Network, Tab, BLE_COMMISSION_TIMEOUT_SECS,
+    valid_hex, valid_setup_code, App, Msg, Network, Tab, Via, BLE_COMMISSION_TIMEOUT_SECS,
     COMMISSION_TIMEOUT_SECS,
 };
 
 impl App {
     pub(crate) fn view_commission_tab(&self, link: &Scope<Self>) -> Html {
-        let code = self.setup_code.trim();
-        let code_valid = valid_setup_code(&self.setup_code);
-        let code_invalid = !code.is_empty() && !code_valid;
-
-        let choice = |ble: bool, glyph: Icon, title: &str, text: &str| {
+        let choice = |via: Via, glyph: Icon, title: &str, text: &str| {
             html! {
-                <button class={classes!("choice", (self.via_ble == ble).then_some("is-selected"))}
+                <button class={classes!("choice", (self.via == via).then_some("is-selected"))}
                     disabled={self.running}
-                    onclick={link.callback(move |_| Msg::SetViaBle(ble))}>
+                    onclick={link.callback(move |_| Msg::SetVia(via))}>
                     <span class="choice-icon">{ icon(glyph, 22) }</span>
                     <span class="choice-title">{ title.to_string() }</span>
                     <span class="choice-text">{ text.to_string() }</span>
@@ -52,63 +48,33 @@ impl App {
                 <div class="form-card">
                     { step(1, "How to reach it", html! {
                         <div class="choices">
-                            { choice(false, Icon::Globe, "Over the network",
+                            if self.can_play {
+                                { choice(Via::PlayServices, Icon::QrCode, "With Google Play services",
+                                    "Android scans its QR code and puts it on your Wi-Fi or Thread network.") }
+                            }
+                            { choice(Via::Network, Icon::Globe, "Over the network",
                                 "It is on your network already, with its commissioning window open.") }
                             // Unless the controller has no Bluetooth.
                             if self.can_ble != Some(false) {
-                                { choice(true, Icon::Bluetooth, "Over Bluetooth",
+                                { choice(Via::Bluetooth, Icon::Bluetooth, "Over Bluetooth",
                                     "A new device: it joins your Wi-Fi or Thread network as it is commissioned.") }
                             }
                         </div>
                     }) }
 
-                    { step(2, "Which device", if self.via_ble {
-                        self.view_ble_fields(link)
+                    if self.via == Via::PlayServices {
+                        { step(2, "The device", self.view_play_device()) }
                     } else {
-                        self.view_ip_fields(link)
-                    }) }
+                        { step(2, "Which device", if self.via == Via::Bluetooth {
+                            self.view_ble_fields(link)
+                        } else {
+                            self.view_ip_fields(link)
+                        }) }
 
-                    { step(3, "Its setup code", html! {
-                        <>
-                            <div class="field has-addons">
-                                <div class="control is-expanded has-icons-left has-icons-right">
-                                    <input class={classes!("input", "mono",
-                                        code_invalid.then_some("is-danger"), code_valid.then_some("is-success"))}
-                                        placeholder="20202021, 3497-0112-332 or MT:…"
-                                        value={self.setup_code.clone()}
-                                        oninput={link.callback(|e: InputEvent| Msg::SetupCode(input_value(e)))} />
-                                    <span class="icon is-left">{ icon(Icon::Key, 18) }</span>
-                                    if code_valid {
-                                        <span class="icon is-right has-text-success">{ icon(Icon::Check, 18) }</span>
-                                    }
-                                </div>
-                                <div class="control">
-                                    <button class="button" title="Scan the device's QR code with the camera"
-                                        disabled={self.running}
-                                        onclick={link.callback(|_| Msg::OpenCamera)}>
-                                        <span class="icon">{ icon(Icon::Camera, 18) }</span>
-                                        <span class="is-hidden-mobile">{ "Camera" }</span>
-                                    </button>
-                                </div>
-                                <div class="control">
-                                    <div class="file">
-                                        <label class="file-label"
-                                            title="Read the setup code from a picture of the device's QR code">
-                                            <input class="file-input" type="file" accept="image/png,image/jpeg"
-                                                onchange={link.batch_callback(|e: Event| picked_file(e).map(Msg::QrImage))} />
-                                            <span class="file-cta">
-                                                <span class="file-icon">{ icon(Icon::QrCode, 18) }</span>
-                                                <span class="file-label is-hidden-mobile">{ "Picture" }</span>
-                                            </span>
-                                        </label>
-                                    </div>
-                                </div>
-                            </div>
-                            <p class="help">{ "Its passcode, manual pairing code or QR code payload, as printed on it or its box." }</p>
-                        </>
-                    }) }
+                        { self.view_setup_code(link) }
+                    }
 
-                    { step(4, "Keep a record", html! {
+                    { step(if self.via == Via::PlayServices { 3 } else { 4 }, "Keep a record", html! {
                         <label class="switch-row">
                             <input type="checkbox" class="switch" checked={self.remember}
                                 onchange={link.callback(|e: Event| Msg::SetRemember(checkbox_checked(e)))} />
@@ -137,6 +103,83 @@ impl App {
 
                 { self.view_progress(link) }
             </div>
+        }
+    }
+
+    /// Its setup code, typed or read from its QR code.
+    fn view_setup_code(&self, link: &Scope<Self>) -> Html {
+        let code = self.setup_code.trim();
+        let code_valid = valid_setup_code(&self.setup_code);
+        let code_invalid = !code.is_empty() && !code_valid;
+
+        step(
+            3,
+            "Its setup code",
+            html! {
+                <>
+                    <div class="field has-addons">
+                        <div class="control is-expanded has-icons-left has-icons-right">
+                            <input class={classes!("input", "mono",
+                                code_invalid.then_some("is-danger"), code_valid.then_some("is-success"))}
+                                placeholder="20202021, 3497-0112-332 or MT:…"
+                                value={self.setup_code.clone()}
+                                oninput={link.callback(|e: InputEvent| Msg::SetupCode(input_value(e)))} />
+                            <span class="icon is-left">{ icon(Icon::Key, 18) }</span>
+                            if code_valid {
+                                <span class="icon is-right has-text-success">{ icon(Icon::Check, 18) }</span>
+                            }
+                        </div>
+                        <div class="control">
+                            <button class="button" title="Scan the device's QR code with the camera"
+                                disabled={self.running}
+                                onclick={link.callback(|_| Msg::OpenCamera)}>
+                                <span class="icon">{ icon(Icon::Camera, 18) }</span>
+                                <span class="is-hidden-mobile">{ "Camera" }</span>
+                            </button>
+                        </div>
+                        <div class="control">
+                            <div class="file">
+                                <label class="file-label"
+                                    title="Read the setup code from a picture of the device's QR code">
+                                    <input class="file-input" type="file" accept="image/png,image/jpeg"
+                                        onchange={link.batch_callback(|e: Event| picked_file(e).map(Msg::QrImage))} />
+                                    <span class="file-cta">
+                                        <span class="file-icon">{ icon(Icon::QrCode, 18) }</span>
+                                        <span class="file-label is-hidden-mobile">{ "Picture" }</span>
+                                    </span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    <p class="help">{ "Its passcode, manual pairing code or QR code payload, as printed on it or its box." }</p>
+                </>
+            },
+        )
+    }
+
+    /// With Google Play services: what happens, or the device shared with us.
+    fn view_play_device(&self) -> Html {
+        match &self.shared {
+            Some(shared) => {
+                let name = shared.name.as_deref().unwrap_or("A device");
+                let room = shared
+                    .room
+                    .as_deref()
+                    .map(|room| format!(", in {room}"))
+                    .unwrap_or_default();
+
+                html! {
+                    <p>
+                        <strong>{ name.to_string() }</strong>{ room }
+                        { ": another Matter app shared it with us. Google Play services hands it over, and it is commissioned onto our fabric." }
+                    </p>
+                }
+            }
+            None => html! {
+                <p class="help">
+                    { "Google Play services scans its QR code and, over Bluetooth, puts it on your Wi-Fi or Thread network. It then hands it over, and it is commissioned onto our fabric." }
+                </p>
+            },
         }
     }
 
@@ -313,7 +356,7 @@ impl App {
         });
 
         let (class, glyph, title, text, action) = if self.running {
-            let secs = if self.via_ble {
+            let secs = if self.via == Via::Bluetooth {
                 BLE_COMMISSION_TIMEOUT_SECS
             } else {
                 COMMISSION_TIMEOUT_SECS
@@ -331,8 +374,12 @@ impl App {
                 Some(Icon::CheckCircle),
                 "Commissioned".to_string(),
                 format!(
-                    "The device is on our fabric as node {}.",
-                    display::hex_u64(result.handle.node_id)
+                    "The device is on our fabric as node {}.{}",
+                    display::hex_u64(result.handle.node_id),
+                    self.play_note
+                        .as_deref()
+                        .map(|note| format!(" {note}"))
+                        .unwrap_or_default(),
                 ),
                 ui::icon_button(
                     Icon::Devices,

@@ -34,6 +34,8 @@ ureq = "3.5"
 # The web UI's files are kept gzipped; a client that takes no gzip gets them
 # unpacked.
 flate2 = "1"
+# The API's access token.
+rand = { workspace = true }
 
 [build-dependencies]
 # The web UI's files, gzipped into the library.

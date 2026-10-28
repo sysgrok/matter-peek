@@ -830,8 +830,10 @@ pub trait ModelListener: Send + Sync {
 /// the controller's thread: return quickly.
 #[cfg_attr(feature = "uniffi", uniffi::export(with_foreign))]
 pub trait DevicesListener: Send + Sync {
-    /// The listed devices, on all our fabrics.
-    fn on_devices(&self, devices: Vec<DeviceInfo>);
+    /// The listed devices, on all our fabrics. `syncing` while the list is
+    /// being synced with the network: from the start until the first sync
+    /// ends, and while a sync runs; devices may be added when it ends.
+    fn on_devices(&self, devices: Vec<DeviceInfo>, syncing: bool);
 }
 
 /// Follows a commission; see [`MatterPeek::commission`]. Called on the

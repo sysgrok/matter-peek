@@ -2,12 +2,18 @@
 //! on the core in-process, Tauri's IPC (`wire_open` / `wire_send` /
 //! `wire_close`, answers on a channel). Each carries the wire messages of one
 //! client, as a server's WebSocket does.
+//!
+//! A server wants its access token, as `?token=` on the WebSocket's URL. The
+//! page keeps it in local storage: given in the page's own URL (as the server
+//! shows it), typed in when the server refused it, or with the server chosen
+//! in the app.
 
+use std::cell::RefCell;
 use std::pin::Pin;
 
 use futures::channel::mpsc;
 use futures::{Sink, SinkExt, Stream, StreamExt};
-use gloo_net::websocket::{futures::WebSocket, Message};
+use gloo_net::websocket::{futures::WebSocket, Message, WebSocketError};
 use js_sys::{Object, Reflect};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
@@ -17,6 +23,18 @@ const ENDPOINT_KEY: &str = "matter-peek.endpoint";
 
 /// [`ENDPOINT_KEY`]'s value for the core in the app.
 const IN_APP: &str = "app";
+
+/// Where the page keeps the server's access token.
+const TOKEN_KEY: &str = "matter-peek.token";
+
+/// The close code of a server that refused the access token (the server's
+/// `UNAUTHORIZED`).
+const UNAUTHORIZED: u16 = 4401;
+
+thread_local! {
+    /// Told when a server refuses the access token.
+    static ON_REFUSED: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+}
 
 /// What the page sends on a connection.
 pub type Writer = Pin<Box<dyn Sink<Message, Error = String>>>;
@@ -37,20 +55,20 @@ pub enum Endpoint {
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], catch)]
-    async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
+    pub(crate) async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
 }
 
 #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"])]
 extern "C" {
     /// Tauri's channel: what the app sends the page on a connection.
     #[wasm_bindgen(js_name = Channel)]
-    type IpcChannel;
+    pub(crate) type IpcChannel;
 
     #[wasm_bindgen(constructor, js_class = "Channel")]
-    fn new() -> IpcChannel;
+    pub(crate) fn new() -> IpcChannel;
 
     #[wasm_bindgen(method, setter = onmessage, js_class = "Channel")]
-    fn set_onmessage(this: &IpcChannel, handler: &js_sys::Function);
+    pub(crate) fn set_onmessage(this: &IpcChannel, handler: &js_sys::Function);
 }
 
 /// Whether the page runs in the app.
@@ -74,9 +92,11 @@ pub fn endpoint() -> Endpoint {
     }
 }
 
-/// Have the app use the server at `address` (`host:port`, or a `ws://` URL),
-/// or its own core if `None`, and reload the page on it.
-pub fn use_server(address: Option<&str>) {
+/// Have the app use the server at `address` (`host:port`, a `ws://` URL, or
+/// the `http://` URL the server shows, with its token), with access token
+/// `token` (if not in the URL), or its own core if `None`; and reload the page
+/// on it.
+pub fn use_server(address: Option<&str>, token: &str) {
     let value = match address {
         Some(address) => server_url(address),
         None => Some(IN_APP.to_string()),
@@ -84,18 +104,83 @@ pub fn use_server(address: Option<&str>) {
     if let (Some(storage), Some(value)) = (storage(), value) {
         let _ = storage.set_item(ENDPOINT_KEY, &value);
     }
+
+    let token = address.and_then(url_token).unwrap_or(token.trim());
+    set_token(token);
+}
+
+/// Use access token `token` from now on, and reload the page with it.
+pub fn set_token(token: &str) {
+    if let Some(storage) = storage() {
+        let _ = if token.is_empty() {
+            storage.remove_item(TOKEN_KEY)
+        } else {
+            storage.set_item(TOKEN_KEY, token)
+        };
+    }
     if let Some(window) = web_sys::window() {
         let _ = window.location().reload();
     }
+}
+
+/// The access token kept, if any.
+pub fn token() -> Option<String> {
+    storage()?
+        .get_item(TOKEN_KEY)
+        .ok()
+        .flatten()
+        .filter(|token| !token.is_empty())
+}
+
+/// Keep the access token the page's URL gives (`?token=`, as the server shows
+/// it), and take it out of the URL: it stays out of the address bar and the
+/// history.
+pub fn take_url_token() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let search = window.location().search().unwrap_or_default();
+    let Some(token) = url_token(&search) else {
+        return;
+    };
+
+    if let Some(storage) = storage() {
+        let _ = storage.set_item(TOKEN_KEY, token);
+    }
+    let path = window.location().pathname().unwrap_or_else(|_| "/".into());
+    if let Ok(history) = window.history() {
+        let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&path));
+    }
+}
+
+/// Have `on_refused` called whenever a server refuses the access token.
+pub fn on_refused(on_refused: impl Fn() + 'static) {
+    ON_REFUSED.with(|hook| *hook.borrow_mut() = Some(Box::new(on_refused)));
 }
 
 /// Open a connection to the API.
 pub fn open() -> Result<(Writer, Reader), String> {
     match endpoint() {
         Endpoint::Server(url) => {
+            let url = match token() {
+                Some(token) => format!("{url}?token={token}"),
+                None => url,
+            };
             let (write, read) = WebSocket::open(&url).map_err(|e| e.to_string())?.split();
             let write = write.sink_map_err(|e| e.to_string());
-            let read = read.map(|frame| frame.map_err(|e| e.to_string()));
+            let read = read.map(|frame| {
+                frame.map_err(|e| match e {
+                    WebSocketError::ConnectionClose(close) if close.code == UNAUTHORIZED => {
+                        ON_REFUSED.with(|hook| {
+                            if let Some(hook) = hook.borrow().as_ref() {
+                                hook();
+                            }
+                        });
+                        "the server wants its access token".to_string()
+                    }
+                    e => e.to_string(),
+                })
+            });
 
             Ok((Box::pin(write), Box::pin(read)))
         }
@@ -159,7 +244,7 @@ fn page_server() -> String {
     let host = location
         .as_ref()
         .and_then(|location| location.host().ok())
-        .unwrap_or_else(|| "127.0.0.1:8087".into());
+        .unwrap_or_else(|| "127.0.0.1:17335".into());
     let secure = location
         .and_then(|location| location.protocol().ok())
         .is_some_and(|protocol| protocol == "https:");
@@ -167,14 +252,24 @@ fn page_server() -> String {
     format!("{}://{host}/ws", if secure { "wss" } else { "ws" })
 }
 
-/// The WebSocket URL of the server at `address`: `host:port` or a URL.
+/// The WebSocket URL of the server at `address`: `host:port`, a `ws://` URL,
+/// or the server's page (`http://host:port/?token=…`).
 fn server_url(address: &str) -> Option<String> {
-    let address = address.trim().trim_end_matches('/');
+    let address = address.trim();
+    let address = address
+        .split('?')
+        .next()
+        .unwrap_or(address)
+        .trim_end_matches('/');
     if address.is_empty() {
         return None;
     }
 
-    let url = if address.contains("://") {
+    let url = if let Some(rest) = address.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else if let Some(rest) = address.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if address.contains("://") {
         address.to_string()
     } else {
         format!("ws://{address}")
@@ -187,8 +282,18 @@ fn server_url(address: &str) -> Option<String> {
     Some(if path { url } else { format!("{url}/ws") })
 }
 
+/// The access token in URL or query `text` (`…?token=…`), if any.
+fn url_token(text: &str) -> Option<&str> {
+    let (_, query) = text.split_once('?')?;
+
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("token="))
+        .filter(|token| !token.is_empty())
+}
+
 /// An object of `fields`, the arguments of a command.
-fn args(fields: &[(&str, JsValue)]) -> JsValue {
+pub(crate) fn args(fields: &[(&str, JsValue)]) -> JsValue {
     let object = Object::new();
     for (name, value) in fields {
         let _ = Reflect::set(&object, &JsValue::from_str(name), value);
@@ -197,7 +302,7 @@ fn args(fields: &[(&str, JsValue)]) -> JsValue {
     object.into()
 }
 
-fn js_error(e: JsValue) -> String {
+pub(crate) fn js_error(e: JsValue) -> String {
     e.as_string().unwrap_or_else(|| format!("{e:?}"))
 }
 

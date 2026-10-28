@@ -21,12 +21,17 @@ use rs_matter::transport::session::{Session, SessionMode};
 use rs_matter::utils::sync::Notification;
 use rs_matter::Matter;
 
+use rs_matter::dm::clusters::decl::administrator_commissioning::{
+    self, AdministratorCommissioningAttrResponses as _,
+};
 use rs_matter::dm::clusters::decl::identify::IdentifyClient as _;
 use rs_matter::dm::clusters::decl::operational_credentials::{
-    OperationalCredentialsAttrReads as _, OperationalCredentialsAttrResponses as _,
+    self, OperationalCredentialsAttrReads as _, OperationalCredentialsAttrResponses as _,
     OperationalCredentialsClient as _,
 };
 use rs_matter::im::client::ImClient as _;
+use rs_matter::im::{AttrPath, GenericPath};
+use rs_matter::tlv::Nullable;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::network::mdns::CommissionableFilter;
 
@@ -169,14 +174,19 @@ impl<'a, C: Crypto> Controller<'a, C> {
         // and it is entirely pre-AddNOC, so abandoning it is always safe.
         let sweep =
             self.sweep_orphaned_fabrics(ca, controller_fab_idx, peer_addr, passcode, live_node_ids);
-        match race_cancel(with_timeout(sweep, "orphan-sweep"), &cancel).await {
+        let window_opener = match race_cancel(with_timeout(sweep, "orphan-sweep"), &cancel).await {
             Raced::Cancelled => return Ok(CommissionFlow::Cancelled),
-            Raced::Done(Ok(reclaimed)) if reclaimed > 0 => {
-                info!("orphaned-fabric sweep: reclaimed {reclaimed} stale fabric slot(s)");
+            Raced::Done(Ok((reclaimed, opener))) => {
+                if reclaimed > 0 {
+                    info!("orphaned-fabric sweep: reclaimed {reclaimed} stale fabric slot(s)");
+                }
+                opener
             }
-            Raced::Done(Ok(_)) => {}
-            Raced::Done(Err(e)) => info!("orphaned-fabric sweep skipped (non-fatal): {e:?}"),
-        }
+            Raced::Done(Err(e)) => {
+                info!("orphaned-fabric sweep skipped (non-fatal): {e:?}");
+                None
+            }
+        };
 
         if cancel() {
             return Ok(CommissionFlow::Cancelled);
@@ -234,6 +244,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
                 fabric_index: controller_fab_idx,
                 node_id: phase1.device_node_id,
             },
+            window_opener,
         }))
     }
 
@@ -257,7 +268,9 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// removed instead of re-commissioned. So those indices are skipped.
     ///
     /// Best-effort and non-destructive to *other* admins: only our own fabrics
-    /// match. Returns the count removed. Errors are surfaced to the caller, which
+    /// match. Returns the count removed, and the device's index of the fabric
+    /// whose administrator opened the commissioning window (`AdminFabricIndex`,
+    /// read along with the fabrics). Errors are surfaced to the caller, which
     /// treats the whole sweep as optional (a device with no orphans, or one that
     /// refuses the read, just proceeds to normal commissioning).
     async fn sweep_orphaned_fabrics(
@@ -267,7 +280,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
         peer_addr: SocketAddr,
         passcode: u32,
         live_node_ids: &[u64],
-    ) -> Result<usize, Error> {
+    ) -> Result<(usize, Option<u8>), Error> {
         const ROOT_ENDPOINT: rs_matter::dm::EndptId = 0;
 
         let our_rcac_pubkey = ca.rcac_public_key()?;
@@ -280,21 +293,39 @@ impl<'a, C: Crypto> Controller<'a, C> {
         // Read the full Fabrics list (non-fabric-filtered) over PASE and collect
         // the fabric indices whose root pubkey + fabric_id match ours. We copy
         // the small set of indices out of the borrowed response before it drops.
+        // The window's opener comes along.
+        let paths = [
+            AttrPath::from_gp(&GenericPath::new(
+                Some(ROOT_ENDPOINT),
+                Some(operational_credentials::FULL_CLUSTER.id),
+                Some(operational_credentials::AttributeId::Fabrics as _),
+            )),
+            AttrPath::from_gp(&GenericPath::new(
+                Some(ROOT_ENDPOINT),
+                Some(administrator_commissioning::FULL_CLUSTER.id),
+                Some(administrator_commissioning::AttributeId::AdminFabricIndex as _),
+            )),
+        ];
         let exchange = Exchange::initiate_pase(self.matter, self.crypto, peer, passcode).await?;
         let mut chunk = exchange
             .read_with(|msg| {
-                msg.attr_requests()?
-                    .operational_credentials_read()
-                    .fabrics(ROOT_ENDPOINT)?
-                    .end()?
+                msg.attr_requests_from(&paths)?
                     .fabric_filtered(false)?
                     .end()
             })
             .await?;
 
         let mut ours: Vec<u8> = Vec::new();
+        let mut opener = None;
         {
             let resp = chunk.response()?;
+            if let Some((_, Ok(index))) = resp
+                .administrator_commissioning_read_resp()
+                .admin_fabric_index()
+                .next()
+            {
+                opener = Nullable::into_option(index);
+            }
             for (_endpoint, result) in resp.operational_credentials_read_resp().fabrics() {
                 let list = result?;
                 for fabric in &list {
@@ -330,7 +361,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
         }
 
         if ours.is_empty() {
-            return Ok(0);
+            return Ok((0, opener));
         }
         info!(
             "orphaned-fabric sweep: {} fabric(s) on device belong to us {:?}",
@@ -361,7 +392,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
             }
         }
 
-        Ok(removed)
+        Ok((removed, opener))
     }
 
     /// Discover up to `max` commissionable devices matching `filter`, for a

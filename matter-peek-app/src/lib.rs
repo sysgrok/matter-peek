@@ -7,6 +7,10 @@
 //! The core, with its assistant, is a [`Hub`] of the server's: it starts with
 //! the first connection to it, so an app on a server never starts one. The
 //! page is the server's copy of the web UI, at `matter-peek://localhost/`.
+//!
+//! On Android, the page also reaches Google Play services' Matter
+//! commissioning: the `play` plugin's commands are answered by `PlayPlugin`
+//! (Kotlin), in `gen/android`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,8 +19,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use log::{error, info};
 use tauri::ipc::Channel;
+use tauri::plugin::TauriPlugin;
 use tauri::webview::{PermissionKind, PermissionResponse};
-use tauri::{Manager, State};
+use tauri::{Manager, Runtime, State};
 
 use matter_peek_core::api::wire::{ClientMsg, Response, ServerMsg};
 use matter_peek_core::api::PeekConfig;
@@ -71,6 +76,7 @@ pub fn run() {
                 .level(log::LevelFilter::Info)
                 .build(),
         )
+        .plugin(play())
         // The page reads QR codes with the camera, when asked to; it wants
         // nothing else.
         .on_permission_request(|_, kind| match kind {
@@ -95,6 +101,19 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![wire_open, wire_send, wire_close])
         .run(tauri::generate_context!())
         .expect("the app failed to run");
+}
+
+/// Google Play services' Matter commissioning, for the page: `PlayPlugin` on
+/// Android, nothing elsewhere (the page then finds no commands).
+fn play<R: Runtime>() -> TauriPlugin<R> {
+    tauri::plugin::Builder::new("play")
+        .setup(|_app, _api| {
+            #[cfg(target_os = "android")]
+            _api.register_android_plugin("com.sysgrok.matterpeek", "PlayPlugin")?;
+
+            Ok(())
+        })
+        .build()
 }
 
 /// The web UI's file at `path`, from the server's copy: the window's page is

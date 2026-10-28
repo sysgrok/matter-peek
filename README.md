@@ -3,6 +3,7 @@
 **A health and diagnostics tool for Matter devices, to use next to your existing controller.**
 
 [![CI](https://github.com/sysgrok/matter-peek/actions/workflows/ci.yml/badge.svg)](https://github.com/sysgrok/matter-peek/actions/workflows/ci.yml)
+[![Download](https://img.shields.io/badge/download-Linux%20%C2%B7%20Windows%20%C2%B7%20Android-2ea44f)](#download)
 [![crates.io](https://img.shields.io/crates/v/matter-peek.svg)](https://crates.io/crates/matter-peek)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![Matrix](https://img.shields.io/matrix/rs-matter:matrix.org?label=join%20matrix&color=BEC5C9&logo=matrix)](https://matrix.to/#/#rs-matter:matrix.org)
@@ -15,7 +16,7 @@ It is added to your Matter devices as an additional admin, next to the controlle
 
 It can also commission devices, show and edit their full data model, and update their firmware. Optionally, an AI assistant can look through all of this for you and answer your questions about it.
 
-It runs locally on your network and does not need an account. It is a single self-contained executable, written in Rust and built on [rs-matter](https://github.com/project-chip/rs-matter).
+It runs locally on your network and does not need an account. It is a single self-contained executable, written in Rust and built on [rs-matter](https://github.com/project-chip/rs-matter). Builds for Linux, Windows and Android are under [Download](#download).
 
 <a href="https://github.com/sysgrok/matter-peek/blob/main/docs/SCREENSHOTS.md">
   <picture>
@@ -37,26 +38,37 @@ See the [screenshots](https://github.com/sysgrok/matter-peek/blob/main/docs/SCRE
 
 Other features include [multiple fabrics, network management, a time source and a common filter language](https://github.com/sysgrok/matter-peek/blob/main/docs/GUIDE.md). The web UI, the CLI and the app all use the same API.
 
-## Status
-
-matter-peek is fully usable, but not yet released. It runs on Linux today, and on Android through the app. Planned next:
-
-- `cargo install matter-peek` from crates.io: the names are reserved, but the real crates wait for an rs-matter release that has everything matter-peek uses.
-- Pre-built binaries for Linux, Windows and macOS.
-- Ready-made apps for Android and iPhone.
-
-Until then, build it from GIT, as below. Builds of the latest commit on `main`, for Linux, Windows and Android, are also in the [`ci` pre-release](https://github.com/sysgrok/matter-peek/releases/tag/ci). They are made by CI and not tested any further, and the Windows ones have not been tried on Windows yet.
-
-> **Note:** the server has no authentication yet. Whoever reaches it controls your devices, so keep `matter-peek serve` on localhost (its default) or behind something that guards it.
-
-## Install
+## Download
 
 matter-peek consists of two executables:
 
 - **`matter-peek`**: the server with the web UI, the CLI, the MCP server and the terminal chat, in a single file. It also runs on headless machines, such as a Raspberry Pi, a NAS or a container.
-- **`matter-peek-app`**: the web UI as a desktop app. It either runs its own controller, or connects to a `matter-peek` server.
+- **`matter-peek-app`**: the web UI as an app, on the desktop and on Android. It either runs its own controller, or connects to a `matter-peek` server.
 
-Both can be built on Linux (x86_64 or aarch64) with Rust 1.91 or newer. You can use the Rust packaged by your distribution, or install it with [rustup](https://rustup.rs).
+There are no releases yet. Until there are, CI builds both from the latest commit on `main`, and publishes them in the [`ci` pre-release](https://github.com/sysgrok/matter-peek/releases/tag/ci). Each push to `main` replaces them. They are only as tested as CI tests them.
+
+| Platform | File | What is in it |
+|---|---|---|
+| Linux, x86_64 | `matter-peek-x86_64-linux-<time>.tar.gz` | `matter-peek`, static, for any distribution; `matter-peek-app`, for glibc 2.35 or newer (Ubuntu 22.04, Debian 12) with WebKitGTK 4.1 (`libwebkit2gtk-4.1-0`) |
+| Linux, aarch64 (Raspberry Pi) | `matter-peek-aarch64-linux-<time>.tar.gz` | `matter-peek`, static, for any distribution |
+| Windows 10 and 11, x86_64 | `matter-peek-x86_64-windows-<time>.zip` | `matter-peek.exe` and `matter-peek-app.exe`, without Bluetooth commissioning; not tried on Windows yet |
+| Android 7 and newer, 64-bit ARM | `matter-peek-aarch64-android-<time>.apk` | the app: open the file on the phone to install it |
+
+`<time>` is when the build was made, in UTC (for example `20261028143005`). The Linux and Windows archives also contain a script that installs `matter-peek` as a service: see [Run as a service](#run-as-a-service).
+
+## Status
+
+matter-peek is fully usable, but not yet released. Planned next:
+
+- `cargo install matter-peek` from crates.io: the names are reserved, but the real crates wait for an rs-matter release that has everything matter-peek uses.
+- Releases for Linux, Windows and macOS, in place of the CI builds above.
+- The app in Google Play, and an app for iPhone.
+
+> **Note:** the server asks for an access token, which it shows when it starts. There is no TLS yet: the token and everything else travel unencrypted, so use the server on a network you trust, or reach it through a VPN or an SSH tunnel.
+
+## Build from source
+
+Both executables can be built on Linux (x86_64 or aarch64) with Rust 1.91 or newer. You can use the Rust packaged by your distribution, or install it with [rustup](https://rustup.rs).
 
 ```sh
 # Option 1: Rust from your distribution (this also installs the C toolchain Rust needs for linking)
@@ -88,12 +100,12 @@ Notes:
 - The package names above are for Debian, Ubuntu and Raspberry Pi OS. Other distributions provide the same packages under their own names.
 - At run time, both executables use Avahi to find devices and BlueZ to commission over Bluetooth. Most desktop systems already run both. If yours does not, install them with `sudo apt install avahi-daemon bluez`.
 
-Static builds, Raspberry Pi builds and the Android app are described in [Building](https://github.com/sysgrok/matter-peek/blob/main/docs/BUILDING.md).
+Static builds, Raspberry Pi builds and the Android app are described in [Building](https://github.com/sysgrok/matter-peek/blob/main/docs/BUILDING.md). To run `matter-peek` as a service, see [Run as a service](#run-as-a-service).
 
 ## Quick start
 
 ```sh
-matter-peek serve        # then open http://127.0.0.1:8087
+matter-peek serve        # then open the address it shows: http://127.0.0.1:17335/?token=…
 ```
 
 To add devices, either commission a new device from the **Commission** page, or add a device you already use with another controller. For the latter, first share the device from that controller (Google Home: *Linked Matter apps & services*; Apple Home: *Turn On Pairing Mode*; Home Assistant: *Share device*), then commission it with the code it shows.
@@ -110,18 +122,47 @@ matter-peek thread findings                  # show the problems found in the Th
 matter-peek --help
 ```
 
-If a server is running, pass `--server ws://127.0.0.1:8087` so that the CLI uses it. Without a server, the CLI runs its own controller.
+If a server is running, pass `--server ws://127.0.0.1:17335` so that the CLI uses it. As the user who runs the server, the CLI finds its access token by itself; otherwise, give it with `--token` (`matter-peek token` prints it). Without a server, the CLI runs its own controller.
+
+`matter-peek serve` listens on this machine alone by default. `--listen 0.0.0.0:17335` makes it reachable from the network, for example from the app on a phone or a browser on another computer.
 
 Using AI:
 
 ```sh
 # Claude Code, or any other MCP client (read-only unless you add --allow-mutate)
-claude mcp add matter-peek -- matter-peek --server ws://127.0.0.1:8087 mcp
+claude mcp add matter-peek -- matter-peek --server ws://127.0.0.1:17335 mcp
 
 # The built-in assistant, here with a local model
 matter-peek assistant set --url http://localhost:11434/v1 --model qwen3.5:9b
 matter-peek chat "Which of my Thread devices have weak links?"
 ```
+
+## Run as a service
+
+To keep `matter-peek serve` running in the background, and start it at boot, the Linux and Windows downloads come with a script that sets this up. For a build from source, the scripts are in [`service/`](https://github.com/sysgrok/matter-peek/tree/main/service).
+
+**Linux** (systemd), in the unpacked download:
+
+```sh
+sudo ./install-service.sh                   # with a build from source: --bin ~/.cargo/bin/matter-peek
+journalctl -u matter-peek -f                # its log
+sudo ./install-service.sh --uninstall
+```
+
+The service runs as the system user `matter-peek`, which the script creates, with its store and its access token in `/var/lib/matter-peek`. The script copies the executable to `/usr/local/bin`; running it again updates it.
+
+**Windows**, in the unpacked download, from a PowerShell started as administrator:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-service.ps1
+powershell -ExecutionPolicy Bypass -File .\install-service.ps1 -Uninstall
+```
+
+This runs `matter-peek serve` at boot, as a scheduled task of the SYSTEM account, with its store and its access token in `C:\ProgramData\matter-peek`. It lets private and domain networks reach it through Windows Firewall. It keeps no log yet, and it has not been tried on Windows yet.
+
+Both listen on the whole network, at port 17335, and end by showing the address to open, with the server's access token in it. `--listen` (`-Listen` on Windows) changes that: `127.0.0.1:17335` keeps the server to the machine it runs on. Read the note under [Status](#status): there is no TLS yet. Uninstalling keeps the store, because it holds the keys of our fabrics: without them, our devices can only be factory reset.
+
+To set up a service another way, `matter-peek --store-dir <dir> serve` keeps the store in `<dir>`, as both scripts do.
 
 ## Documentation
 

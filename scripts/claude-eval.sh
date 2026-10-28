@@ -5,7 +5,7 @@
 #
 #   scripts/claude-eval.sh                          # the read-only tools (and identify)
 #   scripts/claude-eval.sh --allow-mutate           # also the ones that change things
-#   scripts/claude-eval.sh --server ws://127.0.0.1:8087   # through a running server
+#   scripts/claude-eval.sh --server ws://127.0.0.1:17335  # through a running server
 #   scripts/claude-eval.sh -- -p "Which devices are offline?"   # more Claude Code flags
 #
 # Claude Code asks before each tool call, as usual.
