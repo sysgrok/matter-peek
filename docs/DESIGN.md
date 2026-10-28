@@ -550,11 +550,11 @@ with `--no-default-features` (the API types, messages and MCP tools) and with
 ### Desktop
 
 Linux is supported today. There, the `matter-peek` executable and the app use
-the Avahi backend and BlueZ (`ble`). macOS needs the executables to use the
-Bonjour backend (`mdns-astro`) there, and it has no BLE central yet. Windows
-would use the builtin mDNS backend, but that backend finds its network
-interface with `nix`, which is Unix-only. It needs another way to do that
-first.
+the Avahi backend and BlueZ (`ble`). On Windows, both use the builtin mDNS
+backend, which finds its network interface with `if-addrs` there (`nix` is
+Unix-only), and they have no BLE. CI builds them for Windows, but they have not
+been tried on Windows yet. macOS needs the executables to use the Bonjour
+backend (`mdns-astro`) there, and it has no BLE central yet.
 
 ### Mobile
 

@@ -57,7 +57,7 @@ std = [
 mdns-avahi = ["std", "rs-matter/zbus"]                         # Linux + Avahi
 mdns-resolve = ["std", "rs-matter/zbus"]                       # Linux + systemd-resolved
 mdns-astro = ["std", "rs-matter/astro-dnssd"]                  # macOS / iOS (Bonjour)
-mdns-builtin = ["std", "dep:socket2", "dep:nix"]               # fallback / Windows / same-host tests
+mdns-builtin = ["std", "dep:socket2", "dep:nix", "dep:if-addrs"] # fallback / Windows / same-host tests
 
 # BLE commissioning (Commissioner over BTP/GATT Central). Linux + BlueZ over
 # D-Bus, via rs-matter's `zbus` feature (the same one Avahi uses).
@@ -105,3 +105,7 @@ nix = { workspace = true, optional = true }
 
 # --- Mobile bindings (`uniffi`). ---
 uniffi = { version = "0.32", optional = true, default-features = false }
+
+# mDNS builtin backend on Windows: the interface enum, which `nix` has not.
+[target.'cfg(windows)'.dependencies]
+if-addrs = { version = "0.15", optional = true }

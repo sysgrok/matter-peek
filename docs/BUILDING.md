@@ -68,6 +68,28 @@ to a web UI in another place than `matter-peek-web/dist`.
 builds it. It then uses the copy of the web UI that is kept in git, in
 `matter-peek-server/web-dist` (see [Packaging](#packaging)).
 
+## Windows
+
+Both executables can be cross-compiled for Windows from Linux with
+[cargo-xwin](https://github.com/rust-cross/cargo-xwin). It downloads the MSVC
+C runtime and the Windows SDK, and builds with clang and LLVM's linker:
+
+```sh
+# Needs clang and LLVM (`sudo apt install clang llvm`)
+rustup target add x86_64-pc-windows-msvc
+cargo install --locked cargo-xwin
+
+# With the C runtime linked in, so that no Visual C++ redistributable is needed
+RUSTFLAGS="-C target-feature=+crt-static" \
+    cargo xwin build --profile dist --target x86_64-pc-windows-msvc -p matter-peek
+
+# The app links the C runtime statically by default (tauri-build)
+cargo xwin build --profile dist --target x86_64-pc-windows-msvc -p matter-peek-app
+```
+
+On Windows, both use the builtin mDNS backend, and there is no Bluetooth
+commissioning.
+
 ## Running from the source tree
 
 ```sh
@@ -112,6 +134,37 @@ Neither `cargo install --git` nor a packaged `matter-peek-server` has a built
 kept in git, in `matter-peek-server/web-dist`, and it is included in the
 package. Run `scripts/vendor-web.sh` to refresh this copy whenever the web UI
 changes, and before `cargo package` or `cargo publish`.
+
+## CI builds
+
+The Builds workflow (`.github/workflows/builds.yml`) builds, on each run:
+
+- `matter-peek`, static, for Linux on x86_64 and aarch64;
+- the app for Linux, on Ubuntu 22.04, so that it runs with glibc 2.35 and newer;
+- both for Windows, as above;
+- the app for Android (arm64), as an APK.
+
+For x86_64 Linux and for Windows, the executable and the app are in one archive.
+The files are named with the UTC time of the run (`20261028143005`). Each run
+keeps them as its artifacts. Pushes to `main` also publish them in the
+[`ci` pre-release](https://github.com/sysgrok/matter-peek/releases/tag/ci),
+replacing the previous ones.
+
+The APK is signed with a key of its own, so that each new APK installs over the
+previous one. The key is in two repository secrets: `ANDROID_KEYSTORE` (the
+PKCS12 keystore, base64-encoded) and `ANDROID_KEYSTORE_PASSWORD`. Without them,
+as in pull requests from forks, the APK is built but not published. A new key
+can be made with:
+
+```sh
+keytool -genkeypair -storetype PKCS12 -keystore matter-peek-ci.p12 -alias ci \
+    -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=matter-peek CI"
+base64 -w0 matter-peek-ci.p12 | gh secret set ANDROID_KEYSTORE
+gh secret set ANDROID_KEYSTORE_PASSWORD
+```
+
+An APK signed with a new key does not install over one signed with the old
+key: the app has to be uninstalled first.
 
 ## Mobile bindings
 

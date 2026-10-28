@@ -45,7 +45,7 @@ matter-peek is fully usable, but not yet released. It runs on Linux today, and o
 - Pre-built binaries for Linux, Windows and macOS.
 - Ready-made apps for Android and iPhone.
 
-Until then, build it from GIT, as below.
+Until then, build it from GIT, as below. Builds of the latest commit on `main`, for Linux, Windows and Android, are also in the [`ci` pre-release](https://github.com/sysgrok/matter-peek/releases/tag/ci). They are made by CI and not tested any further, and the Windows ones have not been tried on Windows yet.
 
 > **Note:** the server has no authentication yet. Whoever reaches it controls your devices, so keep `matter-peek serve` on localhost (its default) or behind something that guards it.
 

@@ -16,8 +16,6 @@ name = "matter-peek"
 path = "src/main.rs"
 
 [dependencies]
-# The API, its controller (with Avahi's mDNS, and BLE) and its messages.
-matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", features = ["ble"] }
 # `serve`, and a controller in this process: the server, and the web UI.
 matter-peek-server = { version = "0.1.0", path = "../matter-peek-server" }
 clap = { version = "4", features = ["derive", "env"] }
@@ -44,3 +42,11 @@ termimad = "0.35"
 rustyline = "18"
 # `assistant set --api-key`: the key, typed without echo.
 rpassword = "7"
+
+# The API, its controller and its messages: with Avahi's mDNS, and BLE.
+[target.'cfg(not(windows))'.dependencies]
+matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", features = ["ble"] }
+
+# Its own mDNS on Windows, and no BLE.
+[target.'cfg(windows)'.dependencies]
+matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", default-features = false, features = ["mdns-builtin"] }

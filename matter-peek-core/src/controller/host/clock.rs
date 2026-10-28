@@ -18,10 +18,14 @@ const MAX_CHANGES: usize = 4;
 /// The longest time zone name the spec allows.
 const MAX_NAME_LEN: usize = 64;
 
+#[cfg(not(windows))]
 extern "C" {
     // POSIX; not in the `libc` crate for every target.
     fn tzset();
 }
+
+#[cfg(windows)]
+use libc::tzset;
 
 /// This host's clock; `None` if it is before the Matter epoch.
 pub(crate) fn now() -> Option<HostTime> {
@@ -113,6 +117,7 @@ pub(crate) fn zone(utc_us: u64) -> Option<HostZone> {
 }
 
 /// The offset from UTC (seconds) and DST flag at `unix_secs`.
+#[cfg(not(windows))]
 fn local(unix_secs: i64) -> Option<(i32, bool)> {
     // 32 bits on some targets.
     #[allow(clippy::useless_conversion)]
@@ -122,6 +127,34 @@ fn local(unix_secs: i64) -> Option<(i32, bool)> {
     let filled = unsafe { libc::localtime_r(&time, &mut tm) };
 
     (!filled.is_null()).then_some((tm.tm_gmtoff as i32, tm.tm_isdst > 0))
+}
+
+/// The offset from UTC (seconds) and DST flag at `unix_secs`.
+#[cfg(windows)]
+fn local(unix_secs: i64) -> Option<(i32, bool)> {
+    // 32 bits on some targets.
+    #[allow(clippy::useless_conversion)]
+    let time: libc::time_t = unix_secs.try_into().ok()?;
+    // SAFETY: both `tm`s are plain data, filled in by `localtime_s` and `gmtime_s`.
+    let mut tm: libc::tm = unsafe { core::mem::zeroed() };
+    let mut utc: libc::tm = unsafe { core::mem::zeroed() };
+    if unsafe { libc::localtime_s(&mut tm, &time) } != 0
+        || unsafe { libc::gmtime_s(&mut utc, &time) } != 0
+    {
+        return None;
+    }
+
+    // No `tm_gmtoff`: the two times differ by less than a day.
+    let days = if tm.tm_year == utc.tm_year {
+        tm.tm_yday - utc.tm_yday
+    } else {
+        (tm.tm_year - utc.tm_year).signum()
+    };
+    let offset = ((days * 24 + tm.tm_hour - utc.tm_hour) * 60 + tm.tm_min - utc.tm_min) * 60
+        + tm.tm_sec
+        - utc.tm_sec;
+
+    Some((offset, tm.tm_isdst > 0))
 }
 
 /// The first change after `from`, up to `until`: when, and to what.

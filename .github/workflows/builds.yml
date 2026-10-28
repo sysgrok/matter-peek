@@ -1,0 +1,365 @@
+name: Builds
+
+# The executables and the app, built for use: `matter-peek` static for Linux,
+# the app for Linux on an older glibc, both for Windows, and the app for
+# Android. Every run keeps them as its artifacts; pushes to main also publish
+# them in the `ci` pre-release, which anyone can download without logging in.
+# Each file is named with the UTC time of its run (`20261028143005`).
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# Cancel an in-progress run for the same ref when a new commit lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The web UI, built once and embedded by every build below (they find it in
+  # matter-peek-web/dist, instead of the copy kept in git); and the time stamp
+  # of the run.
+  web:
+    name: Web UI
+    runs-on: ubuntu-latest
+    outputs:
+      stamp: ${{ steps.stamp.outputs.stamp }}
+
+    steps:
+      - name: Stamp
+        id: stamp
+        run: echo "stamp=$(date -u +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (nightly + wasm32)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: matter-peek-web
+
+      - name: Install trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      - name: Build
+        working-directory: matter-peek-web
+        run: trunk build --release
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-ui
+          path: matter-peek-web/dist
+          retention-days: 1
+
+  # x86_64: `matter-peek`, static (musl), which runs on any Linux; and the app,
+  # built on the oldest Ubuntu with the WebKitGTK 4.1 that Tauri 2 needs, so
+  # that it runs on glibc 2.35 (Ubuntu 22.04, Debian 12) and newer.
+  linux:
+    name: matter-peek and the app (Linux x86_64)
+    needs: web
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    env:
+      TARGET: x86_64-unknown-linux-musl
+      FILE: matter-peek-x86_64-linux-${{ needs.web.outputs.stamp }}.tar.gz
+
+    steps:
+      # clang: ring's bit of C, for musl (see .cargo/config.toml).
+      - name: Install the build tools, WebKitGTK and D-Bus
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates clang curl git pkg-config libwebkit2gtk-4.1-dev libdbus-1-dev
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the web UI
+        uses: actions/download-artifact@v8
+        with:
+          name: web-ui
+          path: matter-peek-web/dist
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-x86_64
+
+      - name: Build matter-peek
+        run: cargo build --locked --profile dist --target "$TARGET" -p matter-peek
+
+      - name: Build the app
+        run: cargo build --locked --profile dist -p matter-peek-app
+
+      - name: Package
+        run: |
+          tar -czf "$FILE" -C "$GITHUB_WORKSPACE/target/$TARGET/dist" matter-peek \
+            -C "$GITHUB_WORKSPACE/target/dist" matter-peek-app \
+            -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.FILE }}
+          archive: false
+
+  # aarch64 (a Raspberry Pi, say): `matter-peek` only, static. ring's bit of C
+  # takes a cross gcc, which links too (see .cargo/config.toml).
+  linux-aarch64:
+    name: matter-peek (Linux aarch64)
+    needs: web
+    runs-on: ubuntu-latest
+    env:
+      TARGET: aarch64-unknown-linux-musl
+      FILE: matter-peek-aarch64-linux-${{ needs.web.outputs.stamp }}.tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the web UI
+        uses: actions/download-artifact@v8
+        with:
+          name: web-ui
+          path: matter-peek-web/dist
+
+      - name: Install the cross gcc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}
+
+      - name: Build
+        run: cargo build --locked --profile dist --target "$TARGET" -p matter-peek
+
+      - name: Package
+        run: tar -czf "$FILE" -C "target/$TARGET/dist" matter-peek -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.FILE }}
+          archive: false
+
+  # Both for Windows, cross-compiled with cargo-xwin, which fetches the MSVC
+  # C runtime and Windows SDK, and builds with clang and LLVM's linker. The app
+  # links the WebView2 loader statically, and uses the WebView2 runtime that
+  # comes with Windows 10 and 11.
+  windows:
+    name: matter-peek and the app (Windows x86_64)
+    needs: web
+    runs-on: ubuntu-24.04
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      FILE: matter-peek-x86_64-windows-${{ needs.web.outputs.stamp }}.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the web UI
+        uses: actions/download-artifact@v8
+        with:
+          name: web-ui
+          path: matter-peek-web/dist
+
+      - name: Install clang and LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Install cargo-xwin
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-xwin
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}
+          cache-directories: ~/.cache/cargo-xwin
+
+      # The C runtime linked in, so that no Visual C++ redistributable is
+      # needed. The app's build does this by itself (tauri-build).
+      - name: Build matter-peek
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo xwin build --locked --profile dist --target "$TARGET" -p matter-peek
+
+      - name: Build the app
+        run: cargo xwin build --locked --profile dist --target "$TARGET" -p matter-peek-app
+
+      - name: Package
+        run: |
+          zip -j "$FILE" "target/$TARGET/dist/matter-peek.exe" "target/$TARGET/dist/matter-peek-app.exe" \
+            LICENSE-MIT LICENSE-APACHE
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.FILE }}
+          archive: false
+
+  # The app for Android (arm64), as an APK that installs when opened on the
+  # phone. It is signed with the CI key from the repository's secrets
+  # (`ANDROID_KEYSTORE`, base64, and `ANDROID_KEYSTORE_PASSWORD`), so that each
+  # one installs over the last. Without them (pull requests from forks), it is
+  # only built.
+  android:
+    name: App (Android arm64)
+    needs: web
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 27.3.13750724
+      FILE: matter-peek-aarch64-android-${{ needs.web.outputs.stamp }}.apk
+      SIGN: ${{ secrets.ANDROID_KEYSTORE != '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the web UI
+        uses: actions/download-artifact@v8
+        with:
+          name: web-ui
+          path: matter-peek-web/dist
+
+      - name: Install Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install the NDK
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install the Tauri CLI
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+          cache-directories: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+
+      - name: Build
+        working-directory: matter-peek-app
+        run: cargo tauri android build --apk --target aarch64
+
+      - name: Sign
+        if: env.SIGN == 'true'
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/ci.p12"
+          tools="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)"
+          "$tools/zipalign" -p -f 4 \
+            matter-peek-app/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk \
+            "$RUNNER_TEMP/aligned.apk"
+          "$tools/apksigner" sign --ks "$RUNNER_TEMP/ci.p12" --ks-pass env:KEYSTORE_PASSWORD \
+            --out "$FILE" "$RUNNER_TEMP/aligned.apk"
+          rm "$RUNNER_TEMP/ci.p12"
+
+      - name: Upload
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.FILE }}
+          archive: false
+
+  # Pushes to main: this run's files replace the last run's in the `ci`
+  # pre-release, and its tag moves to this commit. The release is edited in
+  # place, not re-created, so that watchers are not notified on each push.
+  publish:
+    name: Publish (ci pre-release)
+    needs: [web, linux, linux-aarch64, windows, android]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      STAMP: ${{ needs.web.outputs.stamp }}
+
+    steps:
+      - name: Download
+        uses: actions/download-artifact@v8
+        with:
+          pattern: matter-peek-*
+          path: files
+          merge-multiple: true
+
+      - name: Publish
+        run: |
+          cat > notes.md <<'EOF'
+          Builds of the latest commit on `main`, made by the Builds workflow on each push. They are not releases: they are only as tested as CI tests them, and the next push replaces them.
+
+          - `matter-peek-x86_64-linux-*.tar.gz`: the `matter-peek` executable, static, for any Linux on x86_64; and the app, for Linux with glibc 2.35 or newer (Ubuntu 22.04, Debian 12) and WebKitGTK 4.1 (`libwebkit2gtk-4.1-0`).
+          - `matter-peek-aarch64-linux-*.tar.gz`: the `matter-peek` executable, static, for any Linux on aarch64 (for example a Raspberry Pi).
+          - `matter-peek-x86_64-windows-*.zip`: the executable and the app, for Windows 10 and 11. There is no Bluetooth commissioning on Windows.
+          - `matter-peek-aarch64-android-*.apk`: the app, for 64-bit ARM Android phones (Android 7 and newer). Open it on the phone to install it.
+          EOF
+          printf '\nBuilt from %s at %s UTC.\n' "$GITHUB_SHA" "$STAMP" >> notes.md
+
+          if ! gh release view ci > /dev/null 2>&1; then
+            gh release create ci --prerelease --title "CI builds" --notes-file notes.md --target "$GITHUB_SHA"
+          fi
+
+          old=$(gh release view ci --json assets --jq '.assets[].name')
+          new=$(find files -type f -printf '%f\n')
+
+          gh api -X PATCH "repos/$GH_REPO/git/refs/tags/ci" -f sha="$GITHUB_SHA" -F force=true
+          find files -type f -exec gh release upload ci --clobber {} +
+          for name in $old; do
+            echo "$new" | grep -qxF "$name" || gh release delete-asset ci "$name" --yes
+          done
+          gh release edit ci --notes-file notes.md

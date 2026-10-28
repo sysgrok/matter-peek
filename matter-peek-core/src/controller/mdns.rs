@@ -505,7 +505,7 @@ async fn system_bus() -> Result<rs_matter::utils::zbus::Connection, Error> {
 
 /// The first non-loopback, up, broadcast-capable interface with both an IPv4 and
 /// an IPv6 address.
-#[cfg(feature = "mdns-builtin")]
+#[cfg(all(feature = "mdns-builtin", not(windows)))]
 #[inline(never)]
 fn interface() -> Result<(Ipv4Addr, rs_matter::transport::network::Ipv6Addr, u32), Error> {
     use nix::{net::if_::InterfaceFlags, sys::socket::SockaddrIn6};
@@ -547,6 +547,45 @@ fn interface() -> Result<(Ipv4Addr, rs_matter::transport::network::Ipv6Addr, u32
         log::error!("mdns: no index for interface {iname}: {e}");
         Error::from(rs_matter::error::ErrorCode::NoNetworkInterface)
     })?;
+
+    log::info!("mdns: using interface {iname} (#{index}, {ip}/{ipv6})");
+    Ok((ip.octets().into(), ipv6.octets().into(), index))
+}
+
+/// The first non-loopback, up, not point-to-point interface with both an IPv4
+/// and an IPv6 address.
+#[cfg(all(feature = "mdns-builtin", windows))]
+#[inline(never)]
+fn interface() -> Result<(Ipv4Addr, rs_matter::transport::network::Ipv6Addr, u32), Error> {
+    use std::net::IpAddr;
+
+    let interfaces: Vec<_> = if_addrs::get_if_addrs()
+        .map_err(|_| Error::from(rs_matter::error::ErrorCode::NoNetworkInterface))?
+        .into_iter()
+        .filter(|ia| {
+            ia.oper_status == if_addrs::IfOperStatus::Up && !ia.is_loopback() && !ia.is_p2p
+        })
+        .collect();
+
+    let (iname, ip, ipv6, index) = interfaces
+        .iter()
+        .filter_map(|ia| match ia.ip() {
+            IpAddr::V6(ipv6) => Some((ia, ipv6)),
+            IpAddr::V4(_) => None,
+        })
+        .find_map(|(ia, ipv6)| {
+            interfaces
+                .iter()
+                .filter(|ia2| ia2.name == ia.name)
+                .find_map(|ia2| match ia2.ip() {
+                    IpAddr::V4(ip) => Some((&ia.name, ip, ipv6, ia.index?)),
+                    IpAddr::V6(_) => None,
+                })
+        })
+        .ok_or_else(|| {
+            log::error!("mdns: no network interface suitable for mDNS broadcasting");
+            Error::from(rs_matter::error::ErrorCode::NoNetworkInterface)
+        })?;
 
     log::info!("mdns: using interface {iname} (#{index}, {ip}/{ipv6})");
     Ok((ip.octets().into(), ipv6.octets().into(), index))
