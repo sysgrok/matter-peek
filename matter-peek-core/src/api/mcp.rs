@@ -519,7 +519,7 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
                 "properties": {
                     "peer_addr": { "type": "string", "description": "Over the network: e.g. \"192.168.1.20:5540\" or \"[fe80::1]:5540\"." },
                     "ble": { "type": "boolean", "description": "Over Bluetooth LE instead (see discover). Default false." },
-                    "ble_addr": { "type": "string", "description": "Over Bluetooth: the device's address (e.g. \"E8:F6:0A:60:E4:72\"); else the one matching the setup code." },
+                    "ble_addr": { "type": "string", "description": "Over Bluetooth: the device's address (e.g. \"E8:F6:0A:12:34:56\"); else the one matching the setup code." },
                     "wifi_ssid": { "type": "string", "description": "Over Bluetooth: the Wi-Fi network the device joins." },
                     "wifi_password": { "type": "string", "description": "The password of that Wi-Fi network." },
                     "thread_dataset": { "type": "string", "description": "Over Bluetooth: the Thread network the device joins, as its operational dataset in hex." },

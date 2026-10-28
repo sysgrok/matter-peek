@@ -87,9 +87,10 @@ impl WireSession {
                     .await
                     .map(Response::Commissioned)
             }
-            Request::Capabilities => Ok(Response::Capabilities {
-                capabilities: peek.capabilities(),
-            }),
+            Request::Capabilities => peek
+                .capabilities()
+                .await
+                .map(|capabilities| Response::Capabilities { capabilities }),
             Request::Fabrics => peek.fabrics().await.map(fabrics),
             Request::CreateFabric { name } => peek.create_fabric(name).await.map(fabrics),
             Request::RenameFabric { fabric, name } => {
@@ -336,6 +337,9 @@ impl WireSession {
             | Request::AssistantModels { .. }
             | Request::AssistantTest { .. } => Err(PeekError::failed(
                 "the assistant runs in the server (matter-peek serve), not in this process",
+            )),
+            Request::ExportStore { .. } | Request::ImportStore { .. } => Err(PeekError::failed(
+                "the store is exported and imported by the server or the app, not in this process",
             )),
         };
 

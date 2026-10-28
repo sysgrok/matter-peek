@@ -22,6 +22,7 @@ use icons::{icon, Icon};
 use network::{Confirm, NetworkView};
 
 mod assistant;
+mod backup;
 mod camera;
 mod clock;
 mod commission;
@@ -195,6 +196,8 @@ enum Msg {
     Fabrics(fabrics::FabricsMsg),
     /// Our fabrics: the one shown, and managing them.
     OurFabrics(our_fabrics::FabricsMsg),
+    /// Backing up the store, restoring it, moving it to a server.
+    Backup(backup::BackupMsg),
     /// On the Thread page.
     Thread(thread::ThreadMsg),
     /// Open or close the navigation drawer (on phones).
@@ -399,8 +402,9 @@ struct App {
     remember: bool,
     /// How to reach the device to commission.
     via: Via,
-    /// Whether the controller commissions over Bluetooth, once it said.
-    can_ble: Option<bool>,
+    /// Whether the controller was built to commission over Bluetooth, and why
+    /// it cannot now if it cannot, once it said.
+    can_ble: Option<(bool, Option<String>)>,
     /// Whether Google Play services commissions here (in the Android app).
     can_play: bool,
     /// The device another Matter app shared with us, while it is commissioned.
@@ -556,6 +560,8 @@ struct App {
     fabric_menu: bool,
     /// The fabrics popup, while open.
     manage: Option<our_fabrics::ManageView>,
+    /// The store's popup, while open.
+    backup: Option<backup::BackupView>,
     thread: thread::ThreadPage,
     /// The network popup, when open.
     network_view: Option<NetworkView>,
@@ -690,6 +696,7 @@ impl Component for App {
             all_devices: Vec::new(),
             fabric_menu: false,
             manage: None,
+            backup: None,
             thread: Default::default(),
             network_view: None,
             awake: HashMap::new(),
@@ -711,6 +718,14 @@ impl Component for App {
             Msg::SelectTab(tab) => {
                 self.tab = tab;
                 self.drawer_open = false;
+                // Bluetooth may have come or gone since.
+                if tab == Tab::Commission {
+                    send_request(
+                        ctx.link().clone(),
+                        Pending::None,
+                        wire::Request::Capabilities,
+                    );
+                }
                 if tab == Tab::Assistant {
                     ctx.link().send_message(Msg::Assistant(AssistantMsg::Load));
                     self.scroll_chat = true;
@@ -751,6 +766,7 @@ impl Component for App {
             Msg::Clock(msg) => self.update_clock(ctx, msg),
             Msg::Fabrics(msg) => self.update_fabrics(msg),
             Msg::OurFabrics(msg) => self.update_fabrics_list(ctx, msg),
+            Msg::Backup(msg) => self.update_backup(ctx, msg),
             Msg::Thread(msg) => self.update_thread(ctx, msg),
             Msg::ToggleDrawer => {
                 self.drawer_open = !self.drawer_open;
@@ -1700,7 +1716,14 @@ impl Component for App {
                 self.sync_model_scopes(ctx);
                 true
             }
-            Msg::Turned(node_id) => self.turning.remove(&node_id),
+            Msg::Turned(node_id) => {
+                // The back keeps its controls until it is turned away.
+                if !self.flipped.contains(&node_id) {
+                    self.card_models.remove(&node_id);
+                    self.card_errors.remove(&node_id);
+                }
+                self.turning.remove(&node_id)
+            }
             Msg::CardAct(node_id, action) => {
                 self.card_errors.remove(&node_id);
                 self.start_device_op(node_id, false);
@@ -1868,8 +1891,9 @@ impl Component for App {
                         self.advertised = Some(devices);
                     }
                     wire::Response::Capabilities { capabilities } => {
-                        self.can_ble = Some(capabilities.ble);
-                        if self.via == Via::Bluetooth && !capabilities.ble {
+                        let usable = capabilities.ble && capabilities.ble_unavailable.is_none();
+                        self.can_ble = Some((capabilities.ble, capabilities.ble_unavailable));
+                        if self.via == Via::Bluetooth && !usable && !self.running {
                             self.via = Via::Network;
                         }
                     }
@@ -1906,7 +1930,9 @@ impl Component for App {
                     | wire::Response::ThreadMesh { .. }
                     | wire::Response::Assistant { .. }
                     | wire::Response::Models { .. }
-                    | wire::Response::Tested { .. } => {}
+                    | wire::Response::Tested { .. }
+                    | wire::Response::StoreFile { .. }
+                    | wire::Response::Imported { .. } => {}
                     wire::Response::Cancelled { decommissioned } => {
                         self.notice = Some(if decommissioned {
                             "Commission cancelled — the device had been added to our fabric and was cleaned up (decommissioned).".into()
@@ -2041,6 +2067,7 @@ impl Component for App {
                 { self.view_model_modal(link) }
                 { self.view_fabrics_modal(link) }
                 { self.view_manage_modal(link) }
+                { self.view_backup_popup(link) }
                 { self.view_share_modal(link) }
                 { self.view_clock_modal(link) }
                 { self.view_settings_modal(link) }
@@ -2335,10 +2362,10 @@ impl App {
                 self.sub_send(&wire::Request::UnsubscribeModel { node_id: *node_id });
             }
         }
-        self.card_models
-            .retain(|node_id, _| self.flipped.contains(node_id));
-        self.card_errors
-            .retain(|node_id, _| self.flipped.contains(node_id));
+        let shown =
+            |node_id: &u64| self.flipped.contains(node_id) || self.turning.contains(node_id);
+        self.card_models.retain(|node_id, _| shown(node_id));
+        self.card_errors.retain(|node_id, _| shown(node_id));
         self.model_scopes = wanted;
 
         if !self.model_scopes.is_empty() {
@@ -2675,7 +2702,9 @@ impl App {
                             onclick={link.callback(|_| Msg::ToggleDrawer)}>
                             { icon(Icon::Menu, 22) }
                         </button>
-                        <a class="brand" onclick={link.callback(|_| Msg::SelectTab(Tab::Devices))}>
+                        <a class="brand" href={PROJECT_URL} target="_blank" rel="noopener"
+                            title="Matter health and diagnostics: matter-peek on GitHub"
+                            onclick={Callback::from(open_project)}>
                             <span class="brand-mark">{ icon(Icon::Logo, 20) }</span>
                             <span class="brand-name">{ "matter-peek" }</span>
                         </a>
@@ -3034,7 +3063,26 @@ const UPLOAD_CHUNK_LEN: u64 = 256 * 1024;
 
 /// Upload an OTA image file in chunks, on its own connection.
 /// The file picked in a file input.
-fn picked_file(e: Event) -> Option<web_sys::File> {
+/// The project's page, which the name in the top bar opens.
+const PROJECT_URL: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// Open the project's page: in the app, in the browser (a link would open it
+/// in the app's window).
+fn open_project(e: MouseEvent) {
+    if !transport::in_app() {
+        return;
+    }
+
+    e.prevent_default();
+    spawn_local(async {
+        let args = transport::args(&[("url", PROJECT_URL.into())]);
+        if let Err(e) = transport::invoke("plugin:opener|open_url", args).await {
+            log::warn!("cannot open {PROJECT_URL}: {}", transport::js_error(e));
+        }
+    });
+}
+
+pub(crate) fn picked_file(e: Event) -> Option<web_sys::File> {
     use wasm_bindgen::JsCast;
 
     e.target()

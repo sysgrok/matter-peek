@@ -36,6 +36,8 @@ mod controller {
     pub mod ble;
     pub mod ca;
     pub mod datamodel;
+    #[cfg(any(feature = "mdns-avahi", feature = "mdns-resolve", feature = "ble"))]
+    pub mod dbus;
     pub mod diagnostics;
     pub mod discovery;
     pub mod explain;

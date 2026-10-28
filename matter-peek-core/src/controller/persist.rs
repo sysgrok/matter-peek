@@ -43,6 +43,11 @@ const KV_BUF_LEN: usize = 64 * 1024;
 /// of these (e.g. as a `static`/stack value) and hand it to [`ControllerStore`].
 pub type KvBuf = Mutex<RefCell<[u8; KV_BUF_LEN]>>;
 
+/// Whether `keys` are those of a controller's store: it has our fabrics.
+pub fn is_controller_store(keys: impl IntoIterator<Item = u16>) -> bool {
+    keys.into_iter().any(|key| key == FABRICS_KEY)
+}
+
 /// Allocate a fresh, zeroed [`KvBuf`] for a [`ControllerStore`].
 pub const fn kv_buf() -> KvBuf {
     Mutex::new(RefCell::new([0u8; KV_BUF_LEN]))
@@ -62,6 +67,9 @@ const ASSISTANT_KEY: u16 = VENDOR_KEYS_START + 3;
 const FABRICS_KEY: u16 = VENDOR_KEYS_START + 4;
 /// Our registrations for devices' Check-Ins.
 const ICD_CLIENTS_KEY: u16 = VENDOR_KEYS_START + 5;
+/// The end of the keys a store may hold: rs-matter's, below
+/// `VENDOR_KEYS_START`, and ours, from there.
+const KEYS_END: u16 = VENDOR_KEYS_START + 0x100;
 
 /// The ICD features stored: as the ICD Management FeatureMap has them.
 const ICD_CHECK_IN: u32 = 0x1;
@@ -85,6 +93,22 @@ impl<'a, S: KvBlobStore> ControllerStore<'a, S> {
         Self {
             kv: SharedKvBlobStore::new(store, buf),
         }
+    }
+
+    /// Every entry of the store, by key: rs-matter's and ours, to export it.
+    /// Taken in one go: nothing writes the store meanwhile.
+    pub fn entries(&self) -> Result<Vec<(u16, Vec<u8>)>, Error> {
+        let mut entries = Vec::new();
+        for key in 0..KEYS_END {
+            let data = self
+                .kv
+                .access(|kv, buf| kv.load(key, buf).map(|data| data.map(<[u8]>::to_vec)))?;
+            if let Some(data) = data {
+                entries.push((key, data));
+            }
+        }
+
+        Ok(entries)
     }
 
     /// The shared KV, for `Matter::load_persist` (load our persisted fabric on

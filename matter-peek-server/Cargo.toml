@@ -34,8 +34,12 @@ ureq = "3.5"
 # The web UI's files are kept gzipped; a client that takes no gzip gets them
 # unpacked.
 flate2 = "1"
-# The API's access token.
+# The API's access token, and the salts of the store's files.
 rand = { workspace = true }
+# The store's files: base64 on the wire, and sealed with a passphrase (rustls
+# already brings ring).
+base64 = "0.22"
+ring = "0.17"
 
 [build-dependencies]
 # The web UI's files, gzipped into the library.

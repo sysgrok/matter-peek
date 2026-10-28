@@ -48,7 +48,9 @@ commissioned devices that are advertised on the network, both ours and those of
 other controllers.
 
 Bluetooth commissioning needs BlueZ. It works on Linux, but not in the Android
-app. On Android, the app commissions with Google Play services instead: choose
+app. When BlueZ does not run, or there is no Bluetooth adapter or it is off, the
+Commission page shows *Over Bluetooth* disabled, saying which. Builds for other
+systems do not offer it at all. On Android, the app commissions with Google Play services instead: choose
 *With Google Play services* on the Commission page. Android scans the QR code,
 puts the device on your Wi-Fi or Thread network, and then hands it over to
 matter-peek, which commissions it onto our fabric. This works both with the
@@ -156,6 +158,39 @@ default.
 
 Node IDs are unique across all fabrics. Every command or tool that works on a
 single device therefore identifies it by its node ID alone.
+
+## Backing up and moving the store
+
+The store holds our fabrics and their keys, the devices, and the assistant's
+model with its API key. Without the fabrics' keys, our devices can only be
+factory reset, so it is worth a backup. A backup also holds the assistant's
+chats. It does not hold the OTA images, nor the server's access token.
+
+In the web UI, the fabric menu at the top of the page has "Back up or
+restore…". Back up asks for a passphrase twice, and then saves the store as a
+file encrypted with it (`matter-peek-backup-<date>.mpeek`, compressed; it is
+not meant to be read). Restore takes such a file and its passphrase, and
+replaces the store with the one in the file. A server restarts with it, and the
+app restarts its own controller. In the app, the file is saved in the Downloads
+folder on the desktop; on Android, the app asks where to save it.
+
+In the CLI, `matter-peek export <file>` (e.g. `backup.mpeek`) asks for a
+passphrase twice and writes the file (`--plain` writes it unencrypted, `--passphrase-stdin` reads the
+passphrase from stdin). `matter-peek import <file>` asks for the passphrase if
+the file is encrypted. With `--server`, both work on the server's store: an
+import restarts it. Without, an import is used from the next start.
+
+A store is imported only while there are no devices on our fabrics. Otherwise
+they would keep a fabric that nobody holds any more. The store the file came
+from stays as it is: two controllers on the same fabrics get in each other's
+way, so use one of the two.
+
+The app, when it runs its own controller, can also move its store to a server
+that has no devices: "Move to a server…" in the fabric menu, with the server's
+address and access token. The app hands its store
+over, puts its own aside (in a `retired-<time>` directory next to it), and
+shows the server from then on. On the way, the store is not encrypted, as
+nothing between the app and a server is yet.
 
 ## Sharing a device with another ecosystem
 

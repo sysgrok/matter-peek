@@ -287,6 +287,22 @@ pub enum Request {
     /// Ask the assistant's model to say a word; with `update`, the model it
     /// would have after it. Answered with [`Response::Tested`].
     AssistantTest { update: Option<AssistantUpdate> },
+    /// The store as a file: the controller's (its fabrics and their keys, its
+    /// devices, the assistant's model) and the assistant's chats; encrypted
+    /// with `passphrase`, if given. Answered with [`Response::StoreFile`].
+    ExportStore {
+        #[serde(default)]
+        passphrase: Option<String>,
+    },
+    /// Replace the store with the file `data` (base64) of an `ExportStore`,
+    /// decrypted with `passphrase` if it is encrypted, from the controller's
+    /// next start. Only while it has no devices. Answered with
+    /// [`Response::Imported`].
+    ImportStore {
+        data: String,
+        #[serde(default)]
+        passphrase: Option<String>,
+    },
 }
 
 impl Request {
@@ -307,6 +323,12 @@ impl Request {
                 | Self::AssistantModels { .. }
                 | Self::AssistantTest { .. }
         )
+    }
+
+    /// Whether it is about the store as a whole, with the assistant's chats,
+    /// which the side that keeps them answers.
+    pub fn is_store_file(&self) -> bool {
+        matches!(self, Self::ExportStore { .. } | Self::ImportStore { .. })
     }
 
     /// Have a request that names no fabric of ours be about `fabric`: the
@@ -434,6 +456,15 @@ pub enum Response {
     },
     Capabilities {
         capabilities: Capabilities,
+    },
+    /// A file of the store, its contents in base64.
+    StoreFile {
+        data: String,
+    },
+    /// The store is imported. `restarts`: the server restarts with it now;
+    /// else it is used from the next start.
+    Imported {
+        restarts: bool,
     },
     Error {
         message: String,

@@ -118,7 +118,7 @@ impl App {
                             </p>
                         }
                         <div class="field">
-                            <input class="input" type="text" placeholder="192.168.10.9:17335"
+                            <input class="input" type="text" placeholder="192.168.0.10:17335"
                                 value={address.clone()} spellcheck="false" autocomplete="off"
                                 oninput={link.callback(|e: InputEvent| connection(ConnectionMsg::Input(input_value(e))))} />
                         </div>

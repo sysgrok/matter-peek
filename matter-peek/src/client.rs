@@ -18,7 +18,6 @@ use futures_util::{SinkExt, StreamExt};
 
 use log::{debug, warn};
 
-use matter_peek_core::api::platform::data_dir;
 use matter_peek_core::api::wire::{ClientMsg, Event, ReqId, Request, Response, ServerMsg};
 use matter_peek_core::api::PeekConfig;
 use matter_peek_server::llm::model_from_env;
@@ -196,11 +195,7 @@ pub async fn connect(url: &str, token: Option<&str>) -> io::Result<Connection> {
 /// store. Fails if another matter-peek process (e.g. a running server) holds
 /// the store.
 pub fn connect_in_process(config: PeekConfig) -> io::Result<Connection> {
-    let dir = config
-        .store_dir
-        .as_ref()
-        .map_or_else(data_dir, PathBuf::from);
-    let hub = Hub::start(config, model_from_env(), dir.join("chats"))?;
+    let hub = Hub::start(config, model_from_env(), false)?;
 
     let (client_tx, client_rx) = async_channel::unbounded::<ClientMsg>();
     let (server_tx, server_rx) = async_channel::unbounded::<ServerMsg>();

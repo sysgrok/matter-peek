@@ -1046,7 +1046,7 @@ fn merge_sleep(into: &mut Option<MeshSleep>, from: Option<MeshSleep>) {
     into.idle_mode_secs = into.idle_mode_secs.or(from.idle_mode_secs);
 }
 
-/// An IPv6 prefix like `fdac:bcdf:a3c9:1::/64`.
+/// An IPv6 prefix like `fd12:3456:789a:1::/64`.
 fn prefix(text: &str) -> Option<(u128, u32)> {
     let (address, len) = text.split_once('/')?;
     let address: core::net::Ipv6Addr = address.parse().ok()?;
@@ -1158,7 +1158,7 @@ fn signal_text(signal: LinkSignal) -> String {
 }
 
 /// A border router by its model, with what tells it from others of the same
-/// model (`Google Nest Hub #9206`), else by its name.
+/// model (`Google Nest Hub #1234`), else by its name.
 pub(crate) fn border_router_label(router: &BorderRouter) -> String {
     match router.model.as_deref() {
         Some(model) => match router.name.find(model) {
@@ -1199,8 +1199,8 @@ mod tests {
 
     use super::*;
 
-    const XPAN: u64 = 0xB566_147D_38E3_8420;
-    const HUB: u64 = 0x6A94_7054_0026_9206;
+    const XPAN: u64 = 0x0123_4567_89AB_CDEF;
+    const HUB: u64 = 0x1A2B_3C4D_5E6F_1234;
     const ROUTER: u64 = 0xEA87_0265_6CD6_3E20;
     const SLEEPY: u64 = 0x1111_2222_3333_4444;
     const FAR: u64 = 0x5555_6666_7777_8888;
@@ -1208,9 +1208,9 @@ mod tests {
     fn diag(role: ThreadRole, ext: u64) -> ThreadDiag {
         ThreadDiag {
             role: Some(role),
-            network_name: Some("NEST-PAN-0FD8".into()),
+            network_name: Some("NEST-PAN-1A2B".into()),
             channel: Some(25),
-            pan_id: Some(0x0FD8),
+            pan_id: Some(0x1A2B),
             extended_pan_id: Some(XPAN),
             ext_address: Some(ext),
             partition_id: Some(614005346),
@@ -1263,10 +1263,10 @@ mod tests {
 
     fn hub() -> BorderRouter {
         BorderRouter {
-            name: "Google Inc. Google Nest Hub #9206".into(),
+            name: "Google Inc. Google Nest Hub #1234".into(),
             vendor: Some("Google Inc.".into()),
             model: Some("Google Nest Hub".into()),
-            network_name: Some("NEST-PAN-0FD8".into()),
+            network_name: Some("NEST-PAN-1A2B".into()),
             extended_pan_id: Some(XPAN),
             ext_address: Some(HUB),
             partition_id: Some(614005346),
@@ -1305,7 +1305,7 @@ mod tests {
         let labels: Vec<&str> = mesh.nodes.iter().map(|n| n.label.as_str()).collect();
         assert_eq!(
             labels,
-            ["ACME Test", "Door sensor", "Google Nest Hub #9206"]
+            ["ACME Test", "Door sensor", "Google Nest Hub #1234"]
         );
         assert_eq!(mesh.nodes[0].kind, MeshNodeKind::Device { node_id: 1 });
         assert_eq!(mesh.nodes[1].parent, Some(ROUTER));
@@ -1323,7 +1323,7 @@ mod tests {
 
         assert_eq!(mesh.networks.len(), 1);
         assert_eq!(mesh.networks[0].devices, [1, 2]);
-        assert_eq!(mesh.networks[0].border_routers, ["Google Nest Hub #9206"]);
+        assert_eq!(mesh.networks[0].border_routers, ["Google Nest Hub #1234"]);
 
         // Only the one border router is worth knowing.
         assert_eq!(kinds(&mesh), [FindingKind::SingleBorderRouter]);
@@ -1363,7 +1363,7 @@ mod tests {
 
         let mut input = healthy();
         input.our_fabrics = alloc::vec![OURS];
-        input.border_routers[0].omr_prefix = Some("fdac:bcdf:a3c9:1::/64".into());
+        input.border_routers[0].omr_prefix = Some("fd12:3456:789a:1::/64".into());
         input.devices[1].network.icd = Some(IcdInfo {
             mode: Some(IcdMode::Lit),
             idle_mode_secs: Some(3600),
@@ -1388,7 +1388,7 @@ mod tests {
                 OURS,
                 2,
                 "430500CDAE446BE3.local",
-                "fdac:bcdf:a3c9:1::2",
+                "fd12:3456:789a:1::2",
                 Some(30_000),
             ),
             // On Thread, on two other fabrics, polling every 5 s.
@@ -1396,18 +1396,18 @@ mod tests {
                 0xAB,
                 0x77,
                 "36C29F8DB1F0D7F3.local",
-                "fdac:bcdf:a3c9:1::77",
+                "fd12:3456:789a:1::77",
                 Some(5000),
             ),
             host(
                 0xCD,
                 0x5,
                 "36C29F8DB1F0D7F3.local",
-                "fdac:bcdf:a3c9:1::77",
+                "fd12:3456:789a:1::77",
                 None,
             ),
             // On the LAN, not on Thread: same node ID as ours, other fabric.
-            host(0xEF, 2, "DCA6322885670000.local", "192.168.10.50", None),
+            host(0xEF, 2, "DCA6320A1B2C0000.local", "192.168.0.50", None),
         ];
 
         let mesh = build(input);
@@ -1544,9 +1544,9 @@ mod tests {
         sleepy.detached_role_count = Some(1);
         input.wifi_channels = vec![("Shelly 2PM".into(), 13), ("Shelly 1PM".into(), 6)];
         input.host_routes = vec![HostRoute {
-            prefix: "fdac:bcdf:a3c9:1::/64".into(),
+            prefix: "fd12:3456:789a:1::/64".into(),
             border_router: "Google Nest Hub".into(),
-            network: Some("NEST-PAN-0FD8".into()),
+            network: Some("NEST-PAN-1A2B".into()),
             routed: Some(false),
         }];
         input.unread = vec![UnreadDevice {
@@ -1638,7 +1638,7 @@ mod tests {
         let labels: Vec<&str> = mesh.nodes.iter().map(|n| n.label.as_str()).collect();
         assert_eq!(
             labels,
-            ["ACME Test", "Door sensor", "Google Nest Hub #9206"]
+            ["ACME Test", "Door sensor", "Google Nest Hub #1234"]
         );
         assert_eq!(mesh.links.len(), 2);
     }
@@ -1646,14 +1646,14 @@ mod tests {
     #[test]
     fn our_device_on_another_fabric_is_not_a_stranger() {
         let mut input = healthy();
-        input.border_routers[0].omr_prefix = Some("fdac:bcdf:a3c9:1::/64".into());
+        input.border_routers[0].omr_prefix = Some("fd12:3456:789a:1::/64".into());
         input.devices[0].network.interfaces = vec![crate::api::NetworkInterfaceInfo {
             name: "ot1".into(),
             kind: NetworkKind::Thread,
             operational: true,
             hardware_address: "EA:87:02:65:6C:D6:3E:20".into(),
             ipv4_addresses: Vec::new(),
-            ipv6_addresses: vec!["FDAC:BCDF:A3C9:0001:C3FE:B236:F78E:75F7".into()],
+            ipv6_addresses: vec!["FD12:3456:789A:0001:C3FE:B236:F78E:75F7".into()],
             off_premise_ipv4: None,
             off_premise_ipv6: None,
         }];
@@ -1661,7 +1661,7 @@ mod tests {
             compressed_fabric_id: 0x095B_A2B5_25E1_16BE,
             node_id: 0x85F0_9903,
             host: "E88702FFFE656CD6.local".into(),
-            address: "fdac:bcdf:a3c9:1:c3fe:b236:f78e:75f7".into(),
+            address: "fd12:3456:789a:1:c3fe:b236:f78e:75f7".into(),
             idle_interval_ms: Some(2000),
             active_interval_ms: Some(300),
             active_threshold_ms: None,

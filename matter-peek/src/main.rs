@@ -281,6 +281,28 @@ enum Command {
         #[command(subcommand)]
         view: Option<ThreadView>,
     },
+    /// Write the store to FILE: our fabrics and their keys, the devices, the
+    /// assistant's model with its API key, and its chats. Encrypted with a
+    /// passphrase, which it asks for. The store stays: use one of the two.
+    Export {
+        file: PathBuf,
+        /// Do not encrypt it: anyone with the file can control the devices.
+        #[arg(long, conflicts_with = "passphrase_stdin")]
+        plain: bool,
+        /// Read the passphrase from the first line of stdin.
+        #[arg(long)]
+        passphrase_stdin: bool,
+    },
+    /// Replace the store with the one `export` wrote to FILE, asking for its
+    /// passphrase if it is encrypted. Only while there are no devices on our
+    /// fabrics. A server restarts with it; without --server, it is used from
+    /// the next start.
+    Import {
+        file: PathBuf,
+        /// Read the passphrase from the first line of stdin.
+        #[arg(long)]
+        passphrase_stdin: bool,
+    },
     /// Run the server: the controller, its API over WebSocket (at /ws) and the
     /// web UI (at /), on one port, until stopped. The assistant's model is
     /// the stored one, unless MATTER_PEEK_LLM_URL, MATTER_PEEK_LLM_MODEL and
@@ -1193,6 +1215,43 @@ async fn run(cli: Cli) -> io::Result<bool> {
             ota_updates(&out, call(&conn, &out, wire::Request::OtaUpdates).await?)
         }
         Command::Ota(Ota::Upload { file }) => upload(&conn, &out, &file).await,
+        Command::Export {
+            file,
+            plain,
+            passphrase_stdin,
+        } => {
+            let passphrase = new_passphrase(plain, passphrase_stdin)?;
+            export(&conn, &out, &file, passphrase).await
+        }
+        Command::Import {
+            file,
+            passphrase_stdin,
+        } => {
+            let data = std::fs::read(&file)?;
+            let passphrase = if !matter_peek_server::is_sealed(&data) {
+                None
+            } else if passphrase_stdin {
+                Some(read_line()?)
+            } else {
+                Some(rpassword::prompt_password("Passphrase: ")?)
+            };
+            let request = wire::Request::ImportStore {
+                data: BASE64.encode(data),
+                passphrase,
+            };
+
+            Ok(match call(&conn, &out, request).await? {
+                Some(wire::Response::Imported { restarts }) if !out.json => {
+                    if restarts {
+                        println!("Imported: the server restarts with it.");
+                    } else {
+                        println!("Imported: matter-peek uses it from its next start.");
+                    }
+                    true
+                }
+                response => response.is_some(),
+            })
+        }
         Command::Ota(Ota::Delete { name }) => images(
             &out,
             call(&conn, &out, wire::Request::OtaDelete { name }).await?,
@@ -2137,6 +2196,91 @@ fn log(intent: api::LogIntent, data: &str, output: Option<PathBuf>) -> io::Resul
 }
 
 /// Upload an OTA image file in chunks.
+/// Write the store to `file`, encrypted with `passphrase` if given. Its
+/// contents are not printed, not even with --json.
+async fn export(
+    conn: &Connection,
+    out: &Out,
+    file: &Path,
+    passphrase: Option<String>,
+) -> io::Result<bool> {
+    let encrypted = passphrase.is_some();
+    let request = wire::Request::ExportStore { passphrase };
+    let data = match conn.call(request, |event| out.event(&event)).await? {
+        wire::Response::StoreFile { data } => BASE64.decode(data).map_err(io::Error::other)?,
+        wire::Response::Error { message } => {
+            if out.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&wire::Response::Error { message })
+                        .unwrap_or_default()
+                );
+            } else {
+                eprintln!("error: {message}");
+            }
+            return Ok(false);
+        }
+        _ => return Err(io::Error::other("an unexpected answer")),
+    };
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // It holds our fabrics' keys.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(file)?.write_all(&data)?;
+
+    if out.json {
+        println!(
+            "{}",
+            serde_json::json!({ "file": file, "encrypted": encrypted })
+        );
+    } else if encrypted {
+        println!("Exported to {}, encrypted.", file.display());
+    } else {
+        println!(
+            "Exported to {}, not encrypted: keep it where nobody else reads it.",
+            file.display()
+        );
+    }
+
+    Ok(true)
+}
+
+/// The passphrase to encrypt the store with: none with `plain`, else read
+/// from stdin, else asked for twice.
+fn new_passphrase(plain: bool, stdin: bool) -> io::Result<Option<String>> {
+    if plain {
+        return Ok(None);
+    }
+    if stdin {
+        return read_line().map(Some);
+    }
+
+    let passphrase = rpassword::prompt_password("Passphrase to encrypt it with: ")?;
+    if passphrase.is_empty() {
+        return Err(io::Error::other(
+            "no passphrase given (--plain writes the store unencrypted)",
+        ));
+    }
+    if rpassword::prompt_password("The same again: ")? != passphrase {
+        return Err(io::Error::other("the two passphrases differ"));
+    }
+
+    Ok(Some(passphrase))
+}
+
+/// The first line of stdin, without its line ending; not empty.
+fn read_line() -> io::Result<String> {
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+
+    match line.trim_end_matches(['\r', '\n']) {
+        "" => Err(io::Error::other("no passphrase given")),
+        line => Ok(line.into()),
+    }
+}
+
 async fn upload(conn: &Connection, out: &Out, file: &PathBuf) -> io::Result<bool> {
     let image = std::fs::read(file)?;
 

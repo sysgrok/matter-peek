@@ -420,7 +420,7 @@ impl App {
     }
 
     /// The back of a device's card: the controls of its application
-    /// endpoints, while `flipped`.
+    /// endpoints, while `flipped`, and while it turns away.
     fn view_device_back(
         &self,
         d: &api::DeviceInfo,
@@ -431,7 +431,8 @@ impl App {
     ) -> Html {
         let node_id = d.handle.node_id;
         let busy = self.device_busy(node_id);
-        let model = self.card_models.get(&node_id).filter(|_| flipped);
+        let shown = flipped || self.turning.contains(&node_id);
+        let model = self.card_models.get(&node_id).filter(|_| shown);
         // The application endpoints with controls, or with events.
         let endpoints: Vec<_> = model
             .map(|model| {
@@ -449,7 +450,7 @@ impl App {
         let on_act = link.callback(move |action| Msg::CardAct(node_id, action));
 
         let body = match model {
-            _ if !flipped => html! {},
+            _ if !shown => html! {},
             None if self.asleep(d) => html! {
                 <div class="card-controls-state">
                     { icon(Icon::Clock, 16) }

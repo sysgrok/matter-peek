@@ -263,6 +263,7 @@ impl App {
                     { icon(Icon::Sliders, 15) }
                     <span class="fabric-choice-name">{ "Manage fabrics…" }</span>
                 </a>
+                { self.view_backup_choice(link) }
             </>
         }
     }

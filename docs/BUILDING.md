@@ -31,8 +31,10 @@ architecture.
 - For the web UI: nightly Rust with the `wasm32-unknown-unknown` target, and
   [trunk](https://trunkrs.dev). `matter-peek-web/rust-toolchain.toml` selects
   nightly.
-- Linux, with Avahi for mDNS and BlueZ for Bluetooth commissioning. Both are
-  used over D-Bus, so there is nothing to link against.
+- Linux. For mDNS, the executables use Avahi when it runs, else
+  systemd-resolved with `MulticastDNS=yes`, else their own responder; for
+  Bluetooth commissioning, BlueZ. Avahi, systemd-resolved and BlueZ are used
+  over D-Bus, so there is nothing to link against.
 - For the app on Linux:
   `sudo apt install pkg-config libwebkit2gtk-4.1-dev libdbus-1-dev`. On Windows
   and macOS, the web view (WebView2 and WKWebView) comes with the OS.

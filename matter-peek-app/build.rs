@@ -17,10 +17,16 @@ fn main() {
         .commands(&["set_theme"])
         .default_permission(DefaultPermissionRule::AllowAllCommands);
 
+    // Saving a file where the page's downloads do not work:
+    let files = InlinedPlugin::new()
+        .commands(&["save"])
+        .default_permission(DefaultPermissionRule::AllowAllCommands);
+
     tauri_build::try_build(
         Attributes::new()
             .plugin("play", play)
-            .plugin("theme", theme),
+            .plugin("theme", theme)
+            .plugin("files", files),
     )
     .expect("the Tauri build script failed");
 }

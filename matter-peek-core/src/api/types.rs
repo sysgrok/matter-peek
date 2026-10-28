@@ -67,7 +67,7 @@ impl core::error::Error for PeekError {}
 pub enum CommissionVia {
     /// Over IP, at `addr` (e.g. `"[fdb5::1]:5540"`).
     Ip { addr: String },
-    /// Over Bluetooth LE: the device at `addr` (e.g. `"E8:F6:0A:60:E4:72"`), or
+    /// Over Bluetooth LE: the device at `addr` (e.g. `"E8:F6:0A:12:34:56"`), or
     /// else the first one matching the setup code. It then joins `network`;
     /// none for a device already on its network (Ethernet).
     Ble {
@@ -481,12 +481,57 @@ pub enum FabricDeletion {
     Forget,
 }
 
-/// What a controller can do, as it was built.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// A controller's store, to move the controller or to keep a copy of it: its
+/// key-value entries (our fabrics and their keys, the devices, the settings,
+/// the assistant's model and key), and other files of its directory, which its
+/// host adds (the server: the assistant's chats).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct StoreArchive {
+    /// What it is: [`StoreArchive::FORMAT`].
+    pub format: String,
+    /// [`StoreArchive::VERSION`].
+    pub version: u32,
+    pub entries: Vec<StoreEntry>,
+    #[serde(default)]
+    pub files: Vec<StoreFile>,
+}
+
+impl StoreArchive {
+    pub const FORMAT: &'static str = "matter-peek-store";
+    pub const VERSION: u32 = 1;
+}
+
+/// A key-value entry of a controller's store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct StoreEntry {
+    pub key: u16,
+    /// Base64.
+    pub data: String,
+}
+
+/// Another file of a controller's store directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct StoreFile {
+    /// Its path in the directory, `/`-separated.
+    pub path: String,
+    /// Base64.
+    pub data: String,
+}
+
+/// What a controller can do: as it was built, and now on its host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct Capabilities {
-    /// Whether it commissions over Bluetooth LE ([`CommissionVia::Ble`]).
+    /// Whether it was built to commission over Bluetooth LE
+    /// ([`CommissionVia::Ble`]): on Linux, with BlueZ.
     pub ble: bool,
+    /// Why it cannot commission over Bluetooth LE now, though it was built to:
+    /// BlueZ does not run, there is no Bluetooth adapter, or it is off.
+    #[serde(default)]
+    pub ble_unavailable: Option<String>,
 }
 
 /// A device on our fabric. See also its [`display`](super::display) helpers.
@@ -1400,7 +1445,7 @@ impl fmt::Debug for KeyChange {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct BorderRouter {
-    /// As it names itself, e.g. `Google Inc. Google Nest Hub #9206`.
+    /// As it names itself, e.g. `Google Inc. Google Nest Hub #1234`.
     pub name: String,
     pub vendor: Option<String>,
     pub model: Option<String>,
@@ -1411,7 +1456,7 @@ pub struct BorderRouter {
     pub partition_id: Option<u32>,
     pub thread_version: Option<String>,
     /// Its off-mesh routable prefix, through which the LAN reaches the
-    /// Thread devices, e.g. `fdac:bcdf:a3c9:1::/64`.
+    /// Thread devices, e.g. `fd12:3456:789a:1::/64`.
     pub omr_prefix: Option<String>,
     /// Its address on the LAN.
     pub address: Option<String>,

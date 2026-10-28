@@ -40,6 +40,8 @@ web-sys = { version = "0.3", features = [
     "Location", "History",
     # Light or dark colours.
     "Element", "NodeList", "MediaQueryList",
+    # Saving the store's file.
+    "Blob", "BlobPropertyBag", "Url",
 ] }
 js-sys = "0.3"
 # OTA image uploads: read the picked file, send it base64-encoded.

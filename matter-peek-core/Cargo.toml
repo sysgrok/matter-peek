@@ -18,10 +18,11 @@ path = "src/bin/uniffi-bindgen.rs"
 required-features = ["uniffi-cli"]
 
 [features]
-# The desktop build: the controller, run on this host, with the Avahi backend.
+# The Linux desktop build: the controller, run on this host, with the mDNS
+# backends it chooses from when it starts (Avahi, systemd-resolved, its own).
 # Without default features, `core` is `no_std`: only the API types, unless
 # `controller` is on.
-default = ["mdns-avahi"]
+default = ["mdns-avahi", "mdns-resolve", "mdns-builtin"]
 
 # The controller: the Matter stack and the service behind `api::MatterPeek`.
 controller = [
@@ -52,8 +53,9 @@ std = [
     "dep:libc",
 ]
 
-# mDNS backend selection. Pick exactly one. OS-native daemons (preferred);
-# `mdns-builtin` is a same-host-test/fallback responder.
+# The mDNS backends a build has: when it starts, the controller uses the first
+# the host can use, the OS's daemons first, and `mdns-builtin`, its own
+# responder, last (see `controller/mdns.rs`).
 mdns-avahi = ["std", "rs-matter/zbus"]                         # Linux + Avahi
 mdns-resolve = ["std", "rs-matter/zbus"]                       # Linux + systemd-resolved
 mdns-astro = ["std", "rs-matter/astro-dnssd"]                  # macOS / iOS (Bonjour)

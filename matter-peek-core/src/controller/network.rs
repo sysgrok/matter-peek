@@ -785,15 +785,15 @@ mod test {
     #[test]
     fn thread_networks_named_by_their_diagnostics() {
         let diag = ThreadDiag {
-            network_name: Some("NEST-PAN-0FD8".into()),
-            extended_pan_id: Some(0xB566_147D_38E3_8420),
+            network_name: Some("NEST-PAN-1A2B".into()),
+            extended_pan_id: Some(0x0123_4567_89AB_CDEF),
             ..Default::default()
         };
-        let info = thread_device(0xB566_147D_38E3_8420, 0x1111_2222_3333_4444, Some(diag));
-        assert_eq!(names(&info), ["NEST-PAN-0FD8", "1111222233334444"]);
+        let info = thread_device(0x0123_4567_89AB_CDEF, 0x1111_2222_3333_4444, Some(diag));
+        assert_eq!(names(&info), ["NEST-PAN-1A2B", "1111222233334444"]);
         assert_eq!(
             info.configs[0].last_network.as_deref(),
-            Some("NEST-PAN-0FD8")
+            Some("NEST-PAN-1A2B")
         );
         assert_eq!(unnamed_thread_networks(&info), [0x1111_2222_3333_4444]);
 
@@ -809,17 +809,17 @@ mod test {
     #[test]
     fn thread_networks_named_by_border_routers() {
         // All null, as some devices report.
-        let mut info = thread_device(0xB566_147D_38E3_8420, 2, Some(ThreadDiag::default()));
-        assert_eq!(names(&info), ["B566147D38E38420", "0000000000000002"]);
-        assert_eq!(unnamed_thread_networks(&info), [2, 0xB566_147D_38E3_8420]);
+        let mut info = thread_device(0x0123_4567_89AB_CDEF, 2, Some(ThreadDiag::default()));
+        assert_eq!(names(&info), ["0123456789ABCDEF", "0000000000000002"]);
+        assert_eq!(unnamed_thread_networks(&info), [2, 0x0123_4567_89AB_CDEF]);
 
         name_thread_networks(&mut info, |xpan| {
-            (xpan == 0xB566_147D_38E3_8420).then(|| "NEST-PAN-0FD8".to_string())
+            (xpan == 0x0123_4567_89AB_CDEF).then(|| "NEST-PAN-1A2B".to_string())
         });
-        assert_eq!(names(&info), ["NEST-PAN-0FD8", "0000000000000002"]);
+        assert_eq!(names(&info), ["NEST-PAN-1A2B", "0000000000000002"]);
         assert_eq!(
             info.configs[0].last_network.as_deref(),
-            Some("NEST-PAN-0FD8")
+            Some("NEST-PAN-1A2B")
         );
     }
 }

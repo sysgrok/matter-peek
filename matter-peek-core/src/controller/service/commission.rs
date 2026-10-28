@@ -126,6 +126,15 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         let code = SetupCode::parse(setup_code).map_err(invalid_setup_code)?;
         let fabric = self.our_fabric(fabric)?;
 
+        #[cfg(feature = "ble")]
+        if matches!(via, CommissionVia::Ble { .. }) {
+            if let Some(why) = crate::ble::unavailable().await {
+                return Err(PeekError::failed(format!(
+                    "Bluetooth cannot be used: {why}"
+                )));
+            }
+        }
+
         let reach = match via {
             CommissionVia::Ble { .. } if !cfg!(feature = "ble") => {
                 return Err(PeekError::failed(

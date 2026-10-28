@@ -161,32 +161,47 @@ pub fn on_refused(on_refused: impl Fn() + 'static) {
 /// Open a connection to the API.
 pub fn open() -> Result<(Writer, Reader), String> {
     match endpoint() {
-        Endpoint::Server(url) => {
-            let url = match token() {
-                Some(token) => format!("{url}?token={token}"),
-                None => url,
-            };
-            let (write, read) = WebSocket::open(&url).map_err(|e| e.to_string())?.split();
-            let write = write.sink_map_err(|e| e.to_string());
-            let read = read.map(|frame| {
-                frame.map_err(|e| match e {
-                    WebSocketError::ConnectionClose(close) if close.code == UNAUTHORIZED => {
-                        ON_REFUSED.with(|hook| {
-                            if let Some(hook) = hook.borrow().as_ref() {
-                                hook();
-                            }
-                        });
-                        "the server wants its access token".to_string()
-                    }
-                    e => e.to_string(),
-                })
-            });
-
-            Ok((Box::pin(write), Box::pin(read)))
-        }
+        Endpoint::Server(url) => open_ws(&url, token().as_deref(), true),
         Endpoint::App => Ok(open_in_app()),
         Endpoint::Unset => Err("choose where matter-peek runs first".into()),
     }
+}
+
+/// Open a connection to the server at `address` (as [`use_server`] takes it),
+/// with access token `token` (if not in the URL), whatever the page uses.
+pub fn open_server(address: &str, token: &str) -> Result<(Writer, Reader), String> {
+    let url = server_url(address).ok_or("no server given")?;
+    let token = url_token(address).unwrap_or(token.trim());
+
+    open_ws(&url, Some(token).filter(|token| !token.is_empty()), false)
+}
+
+/// A WebSocket to the API at `url`, with `token`; `refused`: a refused token
+/// is the page's to ask for.
+fn open_ws(url: &str, token: Option<&str>, refused: bool) -> Result<(Writer, Reader), String> {
+    let url = match token {
+        Some(token) => format!("{url}?token={token}"),
+        None => url.to_string(),
+    };
+    let (write, read) = WebSocket::open(&url).map_err(|e| e.to_string())?.split();
+    let write = write.sink_map_err(|e| e.to_string());
+    let read = read.map(move |frame| {
+        frame.map_err(|e| match e {
+            WebSocketError::ConnectionClose(close) if close.code == UNAUTHORIZED => {
+                if refused {
+                    ON_REFUSED.with(|hook| {
+                        if let Some(hook) = hook.borrow().as_ref() {
+                            hook();
+                        }
+                    });
+                }
+                "the server wants its access token".to_string()
+            }
+            e => e.to_string(),
+        })
+    });
+
+    Ok((Box::pin(write), Box::pin(read)))
 }
 
 /// A connection to the core in the app: open until its writer is dropped.

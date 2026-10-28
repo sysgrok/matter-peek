@@ -1,7 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window: Tauri's core API, the window's colours, and Google Play services on Android",
+  "description": "The main window: Tauri's core API, the window's colours, saving files, the project's page in the browser, and Google Play services on Android",
   "windows": ["main"],
-  "permissions": ["core:default", "play:default", "theme:default"]
+  "permissions": [
+    "core:default",
+    "play:default",
+    "theme:default",
+    "files:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://github.com/sysgrok/matter-peek" }]
+    }
+  ]
 }

@@ -1,7 +1,7 @@
 /* matter-peek, on top of Bulma 1: its variables keep dark mode working. */
 
 :root {
-  --page-max: 1180px;
+  --page-max: 1440px;
   --narrow-max: 780px;
   --radius-card: 16px;
   --shadow-card: 0 1px 2px rgba(0, 0, 0, .04), 0 8px 24px -16px rgba(0, 0, 0, .2);
@@ -45,8 +45,8 @@ html, body { background: var(--bulma-scheme-main-bis); min-height: 100vh; }
 
 /* The app bar, and the drawer it folds into on phones. */
 .appbar { position: sticky; top: 0; z-index: 30; background: color-mix(in srgb, var(--bulma-scheme-main) 88%, transparent); backdrop-filter: saturate(180%) blur(12px); -webkit-backdrop-filter: saturate(180%) blur(12px); border-bottom: 1px solid var(--bulma-border-weak); }
-.appbar-inner { max-width: var(--page-max); margin: 0 auto; height: 3.75rem; display: flex; align-items: center; gap: 2rem; padding: 0 1.25rem; }
-.brand { display: flex; align-items: center; gap: .65rem; color: var(--bulma-text-strong); font-weight: 700; font-size: 1.1rem; letter-spacing: -.01em; white-space: nowrap; }
+.appbar-inner { max-width: var(--page-max); margin: 0 auto; height: 3.75rem; display: flex; align-items: center; gap: 1.5rem; padding: 0 1.25rem; }
+.brand { display: flex; align-items: center; gap: .65rem; margin-right: .5rem; color: var(--bulma-text-strong); font-weight: 700; font-size: 1.1rem; letter-spacing: -.01em; white-space: nowrap; }
 .brand:hover { color: var(--bulma-text-strong); }
 .brand-mark { flex: none; width: 2.15rem; height: 2.15rem; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; color: #fff; background: linear-gradient(135deg, #00c4a7, #2f7cf6); box-shadow: 0 4px 12px -4px rgba(47, 124, 246, .6); }
 .appbar-nav { flex: 1; display: flex; gap: .25rem; }
@@ -1115,6 +1115,10 @@ button.dm-chip:hover { border-color: var(--bulma-link); color: var(--bulma-link)
 .connection-button.is-drawer { margin: .6rem .75rem 0; }
 .modal .modal-card.connection-card { width: min(480px, calc(100vw - 32px)); }
 .connection-card.is-required .modal-card-head .delete { display: none; }
+.backup-card { max-width: 34rem; }
+.backup-section + .backup-section { margin-top: 1.25rem; padding-top: 1.25rem; border-top: 1px solid var(--bulma-border-weak); }
+.backup-title { margin-bottom: .35rem; font-weight: 600; }
+.backup-text { margin-bottom: .85rem; font-size: .85rem; color: var(--bulma-text-weak); }
 .connection-text { margin-bottom: 1rem; font-size: .88rem; color: var(--bulma-text-weak); }
 .connection-warning { margin: -.25rem 0 1rem; }
 /* Light or dark colours. */

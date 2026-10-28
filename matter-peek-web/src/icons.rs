@@ -26,6 +26,7 @@ pub enum Icon {
     EyeOff,
     Refresh,
     Router,
+    Server,
     Channel,
     Gauge,
     Interfaces,
@@ -170,6 +171,13 @@ pub fn icon(glyph: Icon, size: u32) -> Html {
                 <rect x="2" y="14" width="20" height="8" rx="2" />
                 <path d="M6 18h.01M10 18h.01M15 10v4" />
                 <path d="M17.84 7.17a4 4 0 0 0-5.66 0M20.66 4.34a8 8 0 0 0-11.31 0" />
+            </>
+        },
+        Icon::Server => html! {
+            <>
+                <rect x="2" y="2" width="20" height="8" rx="2" />
+                <rect x="2" y="14" width="20" height="8" rx="2" />
+                <path d="M6 6h.01M6 18h.01" />
             </>
         },
         Icon::Channel => html! { <path d="M4 9h16M4 15h16M10 3L8 21M16 3l-2 18" /> },

@@ -132,6 +132,48 @@ pub async fn scan_ble(filter: &CommissionableFilter, secs: u16) -> Result<Vec<Bl
 
     Ok(found)
 }
+/// Why commissioning over BLE cannot run now, if it cannot: BlueZ does not run,
+/// it has no Bluetooth adapter, or every adapter is off.
+pub(crate) async fn unavailable() -> Option<alloc::string::String> {
+    use rs_matter::utils::zbus::fdo::ObjectManagerProxy;
+    use rs_matter::utils::zbus::zvariant::OwnedValue;
+
+    use crate::dbus::{has_owner, system_bus};
+
+    let Ok(bus) = system_bus().await else {
+        return Some("the system D-Bus, where BlueZ is, cannot be reached".into());
+    };
+    if !has_owner(&bus, "org.bluez").await {
+        return Some("BlueZ is not installed, or does not run".into());
+    }
+
+    let objects = match ObjectManagerProxy::new(&bus, "org.bluez", "/").await {
+        Ok(manager) => manager.get_managed_objects().await.ok(),
+        Err(_) => None,
+    };
+    let Some(objects) = objects else {
+        return Some("BlueZ does not answer".into());
+    };
+
+    let adapters: Vec<bool> = objects
+        .values()
+        .filter_map(|interfaces| interfaces.get("org.bluez.Adapter1"))
+        .map(|adapter| {
+            adapter
+                .get("Powered")
+                .and_then(|on| bool::try_from(OwnedValue::clone(on)).ok())
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if adapters.is_empty() {
+        Some("there is no Bluetooth adapter".into())
+    } else if !adapters.contains(&true) {
+        Some("the Bluetooth adapter is off".into())
+    } else {
+        None
+    }
+}
 
 /// Commission a device that is currently only reachable over BLE, provisioning it
 /// with the given operational-network credentials so it joins its network and

@@ -38,8 +38,8 @@ use rs_matter::transport::network::{NetworkReceive, NetworkSend, NoNetwork};
 use rs_matter::Matter;
 
 use crate::api::{
-    BorderRouter, DeviceInfo, DevicesListener, FabricRef, ModelScope, Op, PeekConfig, PeekError,
-    Service,
+    BorderRouter, Capabilities, DeviceInfo, DevicesListener, FabricRef, ModelScope, Op, PeekConfig,
+    PeekError, Service,
 };
 use crate::fabrics::OurFabrics;
 use crate::matter::Controller;
@@ -66,6 +66,7 @@ mod locks;
 mod mesh;
 mod netconfig;
 mod ota;
+mod store;
 mod time;
 mod watch;
 mod window;
@@ -281,6 +282,8 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     fn keys(&self, op: &Op) -> Option<Vec<(Key, Mode)>> {
         let keys = match op {
             Op::ReadQrImage { .. }
+            | Op::ExportStore(_)
+            | Op::ImportCheck(_)
             | Op::Fabrics(_)
             | Op::CreateFabric { .. }
             | Op::RenameFabric { .. }
@@ -303,7 +306,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             | Op::OtaUploadEnd { .. }
             | Op::OtaUploadDiscard { .. }
             | Op::OtaDelete { .. } => return None,
-            Op::Discover { .. } | Op::AdvertisedDevices(_) => Vec::new(),
+            Op::Discover { .. } | Op::AdvertisedDevices(_) | Op::Capabilities(_) => Vec::new(),
             Op::Sync { .. } => self.sync_keys(),
             // The fabric must not go meanwhile.
             Op::Commission { fabric, .. }
@@ -384,6 +387,9 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             Op::AdvertisedDevices(reply) => {
                 let _ = reply.send(self.advertised_devices().await).await;
             }
+            Op::Capabilities(reply) => {
+                let _ = reply.send(Ok(capabilities().await)).await;
+            }
             Op::ReadModel {
                 node_id,
                 endpoint,
@@ -448,6 +454,12 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             }
             Op::Fabrics(reply) => {
                 let _ = reply.send(Ok(self.fabric_infos())).await;
+            }
+            Op::ExportStore(reply) => {
+                let _ = reply.send(self.export_store()).await;
+            }
+            Op::ImportCheck(reply) => {
+                let _ = reply.send(self.import_check()).await;
             }
             Op::CreateFabric { name, reply } => {
                 let _ = reply.send(self.create_fabric(&name)).await;
@@ -881,6 +893,19 @@ fn failed(context: &str, e: Error) -> PeekError {
     PeekError::failed(format!("{context}: {}", crate::explain::describe(e.code())))
 }
 
+/// What the controller can do: as built, and now on its host.
+async fn capabilities() -> Capabilities {
+    #[cfg(feature = "ble")]
+    let ble_unavailable = crate::ble::unavailable().await;
+    #[cfg(not(feature = "ble"))]
+    let ble_unavailable = None;
+
+    Capabilities {
+        ble: cfg!(feature = "ble"),
+        ble_unavailable,
+    }
+}
+
 /// Answer every operation with `error`, until every handle is dropped.
 pub(crate) async fn refuse_all(service: Service, error: PeekError) {
     while let Ok(op) = service.ops.recv().await {
@@ -889,6 +914,9 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
         match op {
             Op::Discover { reply, .. } => refuse(reply, error).await,
             Op::AdvertisedDevices(reply) => refuse(reply, error).await,
+            Op::Capabilities(reply) => refuse(reply, error).await,
+            Op::ExportStore(reply) => refuse(reply, error).await,
+            Op::ImportCheck(reply) => refuse(reply, error).await,
             Op::ReadModel { reply, .. } | Op::WriteAttribute { reply, .. } => {
                 refuse(reply, error).await
             }

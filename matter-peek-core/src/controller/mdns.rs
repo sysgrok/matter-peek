@@ -3,15 +3,15 @@
 //! its current address), so the service runs one for its whole lifetime.
 //!
 //! An embedded host passes [`Builtin`] over its own multicast socket, or its own
-//! [`Mdns`]. This host's backend is chosen by cargo feature, the OS daemons
-//! first:
+//! [`Mdns`]. Cargo features choose the backends a build has; [`HostMdns`] takes
+//! the first of them the host can use when the service starts, in this order:
 //!
-//! | feature        | backend                       | platform                   |
+//! | feature        | backend                       | used when, where           |
 //! |----------------|-------------------------------|----------------------------|
-//! | `mdns-avahi`   | Avahi (D-Bus)                 | Linux + Avahi (default)    |
-//! | `mdns-resolve` | systemd-resolved (D-Bus)      | Linux + systemd-resolved   |
+//! | `mdns-avahi`   | Avahi (D-Bus)                 | it runs (Linux; default)   |
+//! | `mdns-resolve` | systemd-resolved (D-Bus)      | it runs with `MulticastDNS=yes` (Linux; default) |
 //! | `mdns-astro`   | Bonjour                       | macOS / iOS                |
-//! | `mdns-builtin` | rs-matter's own, on :5353     | Android / Windows / tests  |
+//! | `mdns-builtin` | rs-matter's own, on :5353     | otherwise (default); Android, Windows |
 
 use core::future::Future;
 
@@ -27,6 +27,8 @@ use rs_matter::transport::network::{Ipv4Addr, NetworkReceive, NetworkSend};
 use rs_matter::Matter;
 
 use crate::api::BorderRouter;
+#[cfg(any(feature = "mdns-avahi", feature = "mdns-resolve"))]
+use crate::dbus::{has_owner, system_bus};
 
 /// An mDNS backend for the controller's stack. It carries what it needs (a
 /// D-Bus connection, sockets, …). Only one may run against a stack: two would
@@ -79,35 +81,126 @@ impl<S: NetworkSend, R: NetworkReceive> Mdns for Builtin<'_, S, R> {
     }
 }
 
-/// This host's backend, as the build's features choose it.
+/// This host's backend: of those the build has (by cargo feature), the first
+/// the host can use, as it finds when the service starts. Avahi if it runs,
+/// then systemd-resolved if it runs with mDNS on (it publishes our record, so
+/// `MulticastDNS=yes`), then Bonjour, then our own.
+pub(crate) struct HostMdns;
+
+impl Mdns for HostMdns {
+    async fn run<C: Crypto>(&mut self, matter: &Matter<'_>, crypto: C) -> Result<(), Error> {
+        match Backend::choose().await {
+            #[cfg(feature = "mdns-avahi")]
+            Backend::Avahi => Avahi.run(matter, crypto).await,
+            #[cfg(feature = "mdns-resolve")]
+            Backend::Resolve => Resolve.run(matter, crypto).await,
+            #[cfg(feature = "mdns-astro")]
+            Backend::Astro => Astro.run(matter, crypto).await,
+            #[cfg(feature = "mdns-builtin")]
+            Backend::Builtin => HostBuiltin.run(matter, crypto).await,
+            Backend::None => {
+                let _ = (matter, crypto);
+                log::error!("mdns: this build has no mDNS backend");
+                Err(rs_matter::error::ErrorCode::NoNetworkInterface.into())
+            }
+        }
+    }
+}
+
+/// The backends a build may have.
+enum Backend {
+    #[cfg(feature = "mdns-avahi")]
+    Avahi,
+    #[cfg(feature = "mdns-resolve")]
+    Resolve,
+    #[cfg(feature = "mdns-astro")]
+    Astro,
+    #[cfg(feature = "mdns-builtin")]
+    Builtin,
+    #[allow(dead_code)]
+    None,
+}
+
+impl Backend {
+    /// The first of the build's backends that the host can use.
+    #[allow(unreachable_code)]
+    async fn choose() -> Self {
+        #[cfg(feature = "mdns-avahi")]
+        if avahi_running().await {
+            log::info!("mdns: using Avahi");
+            return Self::Avahi;
+        }
+
+        #[cfg(feature = "mdns-resolve")]
+        if resolved_publishing().await {
+            log::info!("mdns: using systemd-resolved");
+            return Self::Resolve;
+        }
+
+        #[cfg(feature = "mdns-astro")]
+        {
+            log::info!("mdns: using Bonjour");
+            return Self::Astro;
+        }
+
+        #[cfg(feature = "mdns-builtin")]
+        {
+            #[cfg(any(feature = "mdns-avahi", feature = "mdns-resolve"))]
+            log::info!(
+                "mdns: using our own: neither Avahi nor systemd-resolved with MulticastDNS=yes runs"
+            );
+            #[cfg(not(any(feature = "mdns-avahi", feature = "mdns-resolve")))]
+            log::info!("mdns: using our own");
+            return Self::Builtin;
+        }
+
+        Self::None
+    }
+}
+
+/// Whether Avahi runs (its name on the bus is asked about first: see
+/// [`has_owner`]).
 #[cfg(feature = "mdns-avahi")]
-pub(crate) type HostMdns = Avahi;
-#[cfg(all(feature = "mdns-resolve", not(feature = "mdns-avahi")))]
-pub(crate) type HostMdns = Resolve;
-#[cfg(all(
-    feature = "mdns-astro",
-    not(any(feature = "mdns-avahi", feature = "mdns-resolve"))
-))]
-pub(crate) type HostMdns = Astro;
-#[cfg(all(
-    feature = "mdns-builtin",
-    not(any(
-        feature = "mdns-avahi",
-        feature = "mdns-resolve",
-        feature = "mdns-astro"
-    ))
-))]
-pub(crate) type HostMdns = HostBuiltin;
-#[cfg(all(
-    feature = "std",
-    not(any(
-        feature = "mdns-avahi",
-        feature = "mdns-resolve",
-        feature = "mdns-astro",
-        feature = "mdns-builtin"
-    ))
-))]
-pub(crate) type HostMdns = NoMdns;
+async fn avahi_running() -> bool {
+    use rs_matter::utils::zbus_proxies::avahi::server2::Server2Proxy;
+
+    /// Avahi's state when it serves (`AVAHI_SERVER_RUNNING`).
+    const RUNNING: i32 = 2;
+
+    let Ok(bus) = system_bus().await else {
+        return false;
+    };
+    if !has_owner(&bus, "org.freedesktop.Avahi").await {
+        return false;
+    }
+
+    match Server2Proxy::new(&bus).await {
+        Ok(avahi) => avahi.get_state().await.is_ok_and(|state| state == RUNNING),
+        Err(_) => false,
+    }
+}
+
+/// Whether systemd-resolved runs, and publishes and resolves mDNS
+/// (`MulticastDNS=yes`; `resolve` only resolves).
+#[cfg(feature = "mdns-resolve")]
+async fn resolved_publishing() -> bool {
+    use rs_matter::utils::zbus_proxies::resolve::manager::ManagerProxy;
+
+    let Ok(bus) = system_bus().await else {
+        return false;
+    };
+    if !has_owner(&bus, "org.freedesktop.resolve1").await {
+        return false;
+    }
+
+    match ManagerProxy::new(&bus).await {
+        Ok(resolved) => resolved
+            .multicast_dns()
+            .await
+            .is_ok_and(|mdns| mdns == "yes"),
+        Err(_) => false,
+    }
+}
 
 /// Avahi, over the system D-Bus.
 #[cfg(feature = "mdns-avahi")]
@@ -207,39 +300,10 @@ impl Mdns for HostBuiltin {
     }
 }
 
-/// No mDNS: discovery and operational resolves fail.
-#[cfg(all(
-    feature = "std",
-    not(any(
-        feature = "mdns-avahi",
-        feature = "mdns-resolve",
-        feature = "mdns-astro",
-        feature = "mdns-builtin"
-    ))
-))]
-#[derive(Default)]
-pub(crate) struct NoMdns;
-
-#[cfg(all(
-    feature = "std",
-    not(any(
-        feature = "mdns-avahi",
-        feature = "mdns-resolve",
-        feature = "mdns-astro",
-        feature = "mdns-builtin"
-    ))
-))]
-impl Mdns for NoMdns {
-    async fn run<C: Crypto>(&mut self, _matter: &Matter<'_>, _crypto: C) -> Result<(), Error> {
-        log::error!("mdns: this build has no mDNS backend");
-        Err(rs_matter::error::ErrorCode::NoNetworkInterface.into())
-    }
-}
-
 /// The Thread border routers on the local network (MeshCoP, `_meshcop._udp`).
 /// Looks until every extended PAN ID of `wanted` (if any) is found, the daemon
-/// has nothing more, or [`BROWSE_WINDOW`] has passed. Avahi only; none with
-/// the other backends.
+/// has nothing more, or [`BROWSE_WINDOW`] has passed. From Avahi, when it
+/// runs; none otherwise.
 pub(crate) async fn border_routers(wanted: &[u64]) -> Vec<BorderRouter> {
     #[cfg(feature = "mdns-avahi")]
     {
@@ -251,6 +315,10 @@ pub(crate) async fn border_routers(wanted: &[u64]) -> Vec<BorderRouter> {
                         .any(|r| border_router(r).extended_pan_id == Some(*xpan))
                 })
         };
+
+        if !avahi_running().await {
+            return Vec::new();
+        }
 
         match avahi_browse("_meshcop._udp", done).await {
             Ok(found) => {
@@ -305,18 +373,16 @@ pub(crate) struct MatterHost {
 }
 
 /// The Matter nodes the local network advertises (`_matter._tcp`), looking
-/// for [`BROWSE_WINDOW`] at most. Avahi only.
+/// for [`BROWSE_WINDOW`] at most. From Avahi, when it runs; none otherwise.
 pub(crate) async fn matter_hosts() -> Vec<MatterHost> {
     #[cfg(feature = "mdns-avahi")]
-    match avahi_browse("_matter._tcp", |_| false).await {
-        Ok(found) => found.iter().filter_map(matter_host).collect(),
-        Err(e) => {
-            log::debug!("mdns: no Matter hosts from Avahi: {e}");
-            Vec::new()
+    if avahi_running().await {
+        match avahi_browse("_matter._tcp", |_| false).await {
+            Ok(found) => return found.iter().filter_map(matter_host).collect(),
+            Err(e) => log::debug!("mdns: no Matter hosts from Avahi: {e}"),
         }
     }
 
-    #[cfg(not(feature = "mdns-avahi"))]
     Vec::new()
 }
 
@@ -495,14 +561,6 @@ fn matter_host(resolved: &Resolved) -> Option<MatterHost> {
     })
 }
 
-/// A connection to the system D-Bus.
-#[cfg(any(feature = "mdns-avahi", feature = "mdns-resolve"))]
-async fn system_bus() -> Result<rs_matter::utils::zbus::Connection, Error> {
-    rs_matter::utils::zbus::Connection::system()
-        .await
-        .map_err(|_| rs_matter::error::ErrorCode::NoNetworkInterface.into())
-}
-
 /// The first non-loopback, up, broadcast-capable interface with both an IPv4 and
 /// an IPv6 address.
 #[cfg(all(feature = "mdns-builtin", not(windows)))]
@@ -601,27 +659,27 @@ mod tests {
     fn meshcop_txt_describes_a_border_router() {
         // As a Google Nest Hub advertises it.
         let resolved = Resolved {
-            name: "Google Inc. Google Nest Hub #9206".into(),
-            host: "fuchsia-1c53-f9d6-9dfe.local".into(),
-            address: "192.168.10.170".into(),
+            name: "Google Inc. Google Nest Hub #1234".into(),
+            host: "fuchsia-1a2b-3c4d-5e6f.local".into(),
+            address: "192.168.0.170".into(),
             txt: vec![
                 b"mn=Google Nest Hub".to_vec(),
                 b"vn=Google Inc.".to_vec(),
-                b"nn=NEST-PAN-0FD8".to_vec(),
+                b"nn=NEST-PAN-1A2B".to_vec(),
                 [
                     b"xp=".as_slice(),
-                    &[0xB5, 0x66, 0x14, 0x7D, 0x38, 0xE3, 0x84, 0x20],
+                    &[0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF],
                 ]
                 .concat(),
                 [
                     b"xa=".as_slice(),
-                    &[0x6A, 0x94, 0x70, 0x54, 0x00, 0x26, 0x92, 0x06],
+                    &[0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F, 0x12, 0x34],
                 ]
                 .concat(),
-                [b"pt=".as_slice(), &[0x24, 0x98, 0xFA, 0x62]].concat(),
+                [b"pt=".as_slice(), &[0x11, 0x22, 0x33, 0x44]].concat(),
                 [
                     b"omr=".as_slice(),
-                    &[0x40, 0xFD, 0xAC, 0xBC, 0xDF, 0xA3, 0xC9, 0x00, 0x01],
+                    &[0x40, 0xFD, 0x12, 0x34, 0x56, 0x78, 0x9A, 0x00, 0x01],
                 ]
                 .concat(),
                 b"tv=1.4.0".to_vec(),
@@ -631,11 +689,11 @@ mod tests {
         let router = border_router(&resolved);
         assert_eq!(router.vendor.as_deref(), Some("Google Inc."));
         assert_eq!(router.model.as_deref(), Some("Google Nest Hub"));
-        assert_eq!(router.network_name.as_deref(), Some("NEST-PAN-0FD8"));
-        assert_eq!(router.extended_pan_id, Some(0xB566_147D_38E3_8420));
-        assert_eq!(router.ext_address, Some(0x6A94_7054_0026_9206));
-        assert_eq!(router.partition_id, Some(0x2498_FA62));
-        assert_eq!(router.omr_prefix.as_deref(), Some("fdac:bcdf:a3c9:1::/64"));
+        assert_eq!(router.network_name.as_deref(), Some("NEST-PAN-1A2B"));
+        assert_eq!(router.extended_pan_id, Some(0x0123_4567_89AB_CDEF));
+        assert_eq!(router.ext_address, Some(0x1A2B_3C4D_5E6F_1234));
+        assert_eq!(router.partition_id, Some(0x1122_3344));
+        assert_eq!(router.omr_prefix.as_deref(), Some("fd12:3456:789a:1::/64"));
         assert_eq!(router.thread_version.as_deref(), Some("1.4.0"));
 
         // A short `xp`: no extended PAN ID.
@@ -651,7 +709,7 @@ mod tests {
         let resolved = |name: &str, txt: Vec<Vec<u8>>| Resolved {
             name: name.into(),
             host: "430500CDAE446BE3.local".into(),
-            address: "fdac:bcdf:a3c9:1:62cb:eb4c:4e4a:8c73".into(),
+            address: "fd12:3456:789a:1:62cb:eb4c:4e4a:8c73".into(),
             txt,
         };
 

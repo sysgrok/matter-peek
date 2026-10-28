@@ -1079,7 +1079,7 @@ mod tests {
                 endpoints: Some(1),
                 power: vec![PowerKind::Wired],
                 icd: None,
-                network_name: "NEST-PAN-0FD8".into(),
+                network_name: "NEST-PAN-1A2B".into(),
                 thread_role: Some(ThreadRole::Router),
             },
         }

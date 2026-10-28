@@ -10,7 +10,7 @@ use alloc::sync::Arc;
 
 use std::fs::{File, TryLockError};
 use std::net::UdpSocket;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_io::Async;
 use directories::ProjectDirs;
@@ -23,7 +23,7 @@ use rs_matter::persist::DirKvBlobStore;
 use rs_matter::utils::init::InitMaybeUninit;
 use rs_matter::Matter;
 
-use crate::api::{MatterPeek, PeekConfig, PeekError, Service};
+use crate::api::{MatterPeek, PeekConfig, PeekError, Service, StoreArchive};
 use crate::mdns::HostMdns;
 use crate::persist::kv_buf;
 use crate::service::{self, Platform};
@@ -32,9 +32,13 @@ use dir_ota::DirOtaStore;
 
 pub(crate) mod clock;
 mod dir_ota;
+mod import;
 
 /// The stack size of the controller's thread.
 const THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+/// The file a controller locks in its store's directory while it runs.
+const LOCK_FILE: &str = "lock";
 
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 impl MatterPeek {
@@ -44,7 +48,10 @@ impl MatterPeek {
     #[cfg_attr(feature = "uniffi", uniffi::constructor)]
     pub fn start(config: PeekConfig) -> Result<Arc<Self>, PeekError> {
         let store = Store::lock(config.store_dir.as_deref())?;
-        let (peek, service) = MatterPeek::new();
+        import::apply(&store.dir);
+
+        let (mut peek, service) = MatterPeek::new();
+        peek.store_dir = Some(store.dir.clone());
 
         std::thread::Builder::new()
             .name("matter-peek".into())
@@ -53,6 +60,22 @@ impl MatterPeek {
             .map_err(|e| PeekError::failed(format!("cannot start the controller: {e}")))?;
 
         Ok(Arc::new(peek))
+    }
+
+    /// Replace this controller's store with `archive` (see
+    /// [`MatterPeek::export_store`]) from its next start, which is for the
+    /// host to do. Only while it has no devices on its fabrics: they would
+    /// keep a fabric nobody holds then.
+    pub async fn import_store(&self, archive: StoreArchive) -> Result<(), PeekError> {
+        import::check(&archive)?;
+        let Some(dir) = &self.store_dir else {
+            return Err(PeekError::failed(
+                "this controller keeps no store to replace",
+            ));
+        };
+        self.import_check().await?;
+
+        import::stage(dir, &archive)
     }
 }
 
@@ -79,7 +102,7 @@ impl Store {
             .create(true)
             .truncate(false)
             .write(true)
-            .open(dir.join("lock"))
+            .open(dir.join(LOCK_FILE))
             .map_err(|e| PeekError::failed(format!("cannot lock the store: {e}")))?;
 
         match lock.try_lock() {
@@ -130,7 +153,7 @@ async fn run(service: Service, store: Store, config: PeekConfig) {
         kv_buf,
         ota: DirOtaStore::new(store.dir.join("ota")),
         network: &socket,
-        mdns: HostMdns::default(),
+        mdns: HostMdns,
     };
 
     service.run(platform, &config).await;
@@ -146,6 +169,16 @@ fn bind_socket() -> std::io::Result<Async<UdpSocket>> {
     );
 
     Ok(socket)
+}
+
+/// Whether a controller runs on the store in `dir`.
+pub fn store_in_use(dir: &Path) -> bool {
+    File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(LOCK_FILE))
+        .is_ok_and(|lock| matches!(lock.try_lock(), Err(TryLockError::WouldBlock)))
 }
 
 /// The platform's per-user data directory (`~/.local/share/matter-peek` on
@@ -182,7 +215,7 @@ pub(crate) fn read_qr_image(image: &[u8]) -> Result<String, PeekError> {
     Ok(text)
 }
 
-/// Whether this host has a route to `prefix` (e.g. `fdac:bcdf:a3c9:1::/64`)
+/// Whether this host has a route to `prefix` (e.g. `fd12:3456:789a:1::/64`)
 /// other than its default route; `None` where it cannot tell.
 pub(crate) fn routes_to(prefix: &str) -> Option<bool> {
     let (address, len) = prefix.split_once('/')?;
@@ -240,15 +273,15 @@ mod tests {
 
     #[test]
     fn routes_cover_prefixes() {
-        let thread: std::net::Ipv6Addr = "fdac:bcdf:a3c9:1::".parse().unwrap();
+        let thread: std::net::Ipv6Addr = "fd12:3456:789a:1::".parse().unwrap();
 
         assert!(covers(thread, 64, thread, 64));
-        assert!(covers("fdac::".parse().unwrap(), 16, thread, 64));
+        assert!(covers("fd12::".parse().unwrap(), 16, thread, 64));
         // The default route does not count, nor a route narrower than the prefix.
         assert!(!covers(std::net::Ipv6Addr::UNSPECIFIED, 0, thread, 64));
         assert!(!covers(thread, 80, thread, 64));
         assert!(!covers(
-            "fdac:bcdf:a3c9:2::".parse().unwrap(),
+            "fd12:3456:789a:2::".parse().unwrap(),
             64,
             thread,
             64
@@ -258,11 +291,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn proc_routes_parse() {
-        let line = "fdacbcdfa3c900010000000000000000 40 00000000000000000000000000000000 00 \
+        let line = "fd123456789a00010000000000000000 40 00000000000000000000000000000000 00 \
                     fe80000000000000b6feb90a7b4e64a8 00000258 0000000d 00000000 00000003  wlp44s0";
         assert_eq!(
             ipv6_route(line),
-            Some(("fdac:bcdf:a3c9:1::".parse().unwrap(), 64))
+            Some(("fd12:3456:789a:1::".parse().unwrap(), 64))
         );
 
         let reject = "00000000000000000000000000000000 00 00000000000000000000000000000000 00 \

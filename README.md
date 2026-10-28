@@ -45,7 +45,9 @@ matter-peek consists of two executables:
 - **`matter-peek`**: the server with the web UI, the CLI, the MCP server and the terminal chat, in a single file. It also runs on headless machines, such as a Raspberry Pi, a NAS or a container.
 - **`matter-peek-app`**: the web UI as an app, on the desktop and on Android. It either runs its own controller, or connects to a `matter-peek` server.
 
-There are no releases yet. Until there are, CI builds both from the latest commit on `main`, and publishes them in the [`ci` pre-release](https://github.com/sysgrok/matter-peek/releases/tag/ci). Each push to `main` replaces them. They are only as tested as CI tests them.
+No official releases yet.
+
+[**Pre-release builds from the latest commit on `main` can be downloaded from here**](https://github.com/sysgrok/matter-peek/releases/tag/ci).
 
 | Platform | File | What is in it |
 |---|---|---|
@@ -98,7 +100,7 @@ Notes:
 
 - `cargo install` puts the executables in `~/.cargo/bin`. rustup adds that directory to your `PATH` automatically. If you installed Rust from your distribution, that is not the case, and you need to add it to your `PATH` yourself.
 - The package names above are for Debian, Ubuntu and Raspberry Pi OS. Other distributions provide the same packages under their own names.
-- At run time, both executables use Avahi to find devices and BlueZ to commission over Bluetooth. Most desktop systems already run both. If yours does not, install them with `sudo apt install avahi-daemon bluez`.
+- To find devices, both executables use Avahi when it runs, else systemd-resolved when its mDNS is on (`MulticastDNS=yes`), else their own mDNS responder. To commission over Bluetooth, they use BlueZ. Most desktop systems already run Avahi and BlueZ. If yours does not, install them with `sudo apt install avahi-daemon bluez`.
 
 Static builds, Raspberry Pi builds and the Android app are described in [Building](https://github.com/sysgrok/matter-peek/blob/main/docs/BUILDING.md). To run `matter-peek` as a service, see [Run as a service](#run-as-a-service).
 
@@ -165,6 +167,8 @@ This runs `matter-peek serve` at boot, as a scheduled task of the SYSTEM account
 Both listen on the whole network, at port 17335, and end by showing the address to open, with the server's access token in it. `--listen` (`-Listen` on Windows) changes that: `127.0.0.1:17335` keeps the server to the machine it runs on. Read the note under [Status](#status): there is no TLS yet. Uninstalling keeps the store, because it holds the keys of our fabrics: without them, our devices can only be factory reset.
 
 To set up a service another way, `matter-peek --store-dir <dir> serve` keeps the store in `<dir>`, as both scripts do.
+
+The store can be backed up to a file encrypted with a passphrase, and restored, from the web UI or with `matter-peek export` and `matter-peek import`. The app can also move its store to a server. The [guide](docs/GUIDE.md#backing-up-and-moving-the-store) describes how.
 
 ## Documentation
 

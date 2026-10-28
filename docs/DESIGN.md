@@ -168,9 +168,12 @@ image store (`OtaImageStore`), the UDP network (`NetworkSend + NetworkReceive`)
 and the mDNS backend (`Mdns`). A host gets a handle and the service with
 `MatterPeek::new()`, and runs the service with `Service::run(Platform { … })`.
 `MatterPeek::start` (`std`) does this for the current host. It locks the store
-directory (one controller per store), binds the socket, picks the mDNS backend
-by cargo feature (Avahi, systemd-resolved, Bonjour or rs-matter's own), and
-runs the service on its own thread. The thread ends once every handle has been
+directory (one controller per store), binds the socket, and runs the service on
+its own thread. The mDNS backend is chosen when the service starts, among those
+the cargo features build in: Avahi if it runs, systemd-resolved if it runs with
+`MulticastDNS=yes`, Bonjour, else rs-matter's own. Whether a daemon runs is
+asked of the D-Bus daemon (`NameHasOwner`) before calling it, since a call
+would start an Avahi that is installed but stopped. The thread ends once every handle has been
 dropped.
 
 Below the service, these modules wrap rs-matter's controller side:
@@ -238,8 +241,23 @@ words. All of this is private to `core`.
   handshake and closes the connection with code 4401, which a browser can see,
   unlike an HTTP status. The web UI's files are open: they are the same for
   everyone, and hold nothing of the devices. There is no TLS yet.
+- The store goes to a backup file and back (`ExportStore`, `ImportStore`):
+  the core's key-value entries (`StoreArchive`, base64) and the assistant's
+  chats, as gzipped JSON after a short header (`mpeek`, the version, and
+  whether it is encrypted; `.mpeek` files). With a passphrase, the gzipped
+  JSON is sealed with AES-256-GCM, under a key derived from the passphrase
+  with PBKDF2-HMAC-SHA256 (600 000 rounds), both from ring; the rounds, the
+  salt and the nonce follow the header, and the seal covers them too. A running controller cannot swap its fabrics, so an import is
+  only staged in the store's directory (`import-pending.json`), and
+  `MatterPeek::start` applies it before it loads anything. A server restarts
+  for it once it has answered: it executes itself again on Unix, and starts a
+  new process on Windows, which waits for the old one to let the store go.
+  The app stops its own controller instead (it stops once every connection
+  to it is closed), and the next connection starts it again. An import is
+  refused while there are devices on our fabrics.
 - The only C code the executable links is ring's (used by rustls, for the
-  assistant's model over HTTPS, with its own root certificates). It therefore
+  assistant's model over HTTPS, with its own root certificates, and for the
+  store's encrypted files). It therefore
   builds as a static executable with musl, for x86_64 and aarch64
   (`.cargo/config.toml` names the C compilers). The `dist` profile (LTO, one
   codegen unit, `opt-level = "s"`, stripped) makes it about 13 MB instead of
@@ -562,8 +580,9 @@ with `--no-default-features` (the API types, messages and MCP tools) and with
 
 ### Desktop
 
-Linux is supported today. There, the `matter-peek` executable and the app use
-the Avahi backend and BlueZ (`ble`). On Windows, both use the builtin mDNS
+Linux is supported today. There, the `matter-peek` executable and the app have
+the Avahi, systemd-resolved and builtin mDNS backends, and choose one when they
+start; they use BlueZ for BLE (`ble`). On Windows, both use the builtin mDNS
 backend, which finds its network interface with `if-addrs` there (`nix` is
 Unix-only), and they have no BLE. CI builds them for Windows, but they have not
 been tried on Windows yet. macOS needs the executables to use the Bonjour

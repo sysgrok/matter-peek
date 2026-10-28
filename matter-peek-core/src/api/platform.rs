@@ -28,7 +28,7 @@
 //! its own thread.
 
 #[cfg(feature = "std")]
-pub use crate::host::data_dir;
+pub use crate::host::{data_dir, store_in_use};
 pub use crate::mdns::{Builtin, Mdns};
 pub use crate::ota::{OtaImage, OtaImageStore, OtaStore};
 pub use crate::persist::{kv_buf, KvBuf};

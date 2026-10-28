@@ -1,7 +1,8 @@
 //! A controller and its assistant, for the connections to them: the server's
 //! WebSockets, a process's own (the CLI without a server), an app's. A
 //! connection's requests go to the controller, the `Chat…` and `…Assistant…`
-//! ones to the assistant, whose chats all connections share.
+//! ones to the assistant, whose chats all connections share, the
+//! `…Store` ones to the store's files.
 
 use std::io;
 use std::path::PathBuf;
@@ -9,37 +10,48 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use matter_peek_core::api::agent::ModelConfig;
+use matter_peek_core::api::platform::data_dir;
 use matter_peek_core::api::wire::{ClientMsg, ServerMsg, WireSession};
 use matter_peek_core::api::{MatterPeek, PeekConfig};
 
 use crate::chats::Chats;
+use crate::store::{StoreFiles, CHATS_DIR};
 
 /// A controller and its assistant.
 pub struct Hub {
     peek: Arc<MatterPeek>,
     chats: Rc<Chats>,
+    files: Rc<StoreFiles>,
 }
 
 /// A connection to a [`Hub`].
 pub struct Session {
     wire: Rc<WireSession>,
     chats: Rc<Chats>,
+    files: Rc<StoreFiles>,
     out: async_channel::Sender<ServerMsg>,
 }
 
 impl Hub {
     /// Start a controller as `config` says, with the assistant's model `env`
-    /// sets, else the stored one, and its chats kept in `chats_dir`. Fails if
-    /// another matter-peek process holds the store.
+    /// sets, else the stored one, and its chats kept next to the store.
+    /// `restart`: the process restarts after a store is imported, with it
+    /// (a server); else it is used from the next start. Fails if another
+    /// matter-peek process holds the store.
     pub fn start(
         config: PeekConfig,
         env: Option<ModelConfig>,
-        chats_dir: PathBuf,
+        restart: bool,
     ) -> io::Result<Rc<Self>> {
+        let dir = config
+            .store_dir
+            .as_ref()
+            .map_or_else(data_dir, PathBuf::from);
         let peek = MatterPeek::start(config).map_err(io::Error::other)?;
-        let chats = Chats::new(peek.clone(), env, chats_dir);
+        let chats = Chats::new(peek.clone(), env, dir.join(CHATS_DIR));
+        let files = Rc::new(StoreFiles::new(peek.clone(), dir, restart));
 
-        Ok(Rc::new(Self { peek, chats }))
+        Ok(Rc::new(Self { peek, chats, files }))
     }
 
     /// The controller.
@@ -53,6 +65,7 @@ impl Hub {
         Session {
             wire: Rc::new(WireSession::new(self.peek.clone(), out.clone())),
             chats: self.chats.clone(),
+            files: self.files.clone(),
             out,
         }
     }
@@ -66,6 +79,10 @@ impl Session {
             let chats = self.chats.clone();
             let out = self.out.clone();
             crate::spawn(async move { chats.handle(msg, out).await });
+        } else if msg.request.is_store_file() {
+            let files = self.files.clone();
+            let out = self.out.clone();
+            crate::spawn(async move { files.handle(msg, out).await });
         } else {
             let wire = self.wire.clone();
             crate::spawn(async move { wire.handle(msg).await });

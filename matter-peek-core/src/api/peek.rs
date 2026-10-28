@@ -21,6 +21,10 @@ pub struct MatterPeek {
     ops: async_channel::Sender<Op>,
     /// Shared with the service, which checks it while commissioning.
     cancel: Arc<AtomicBool>,
+    /// The directory of its store, when the host has one: an import is staged
+    /// there.
+    #[cfg(feature = "std")]
+    pub(crate) store_dir: Option<std::path::PathBuf>,
 }
 
 impl MatterPeek {
@@ -33,6 +37,8 @@ impl MatterPeek {
         let peek = Self {
             ops,
             cancel: cancel.clone(),
+            #[cfg(feature = "std")]
+            store_dir: None,
         };
 
         (
@@ -244,11 +250,24 @@ impl MatterPeek {
         .await
     }
 
-    /// What this controller can do: fixed by how it was built.
-    pub fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            ble: cfg!(feature = "ble"),
-        }
+    /// What this controller can do: as it was built, and now on its host.
+    pub async fn capabilities(&self) -> Result<Capabilities, PeekError> {
+        self.call(Op::Capabilities).await
+    }
+
+    /// This controller's store, to move the controller or to keep a copy of
+    /// it: its key-value entries (our fabrics and their keys, the devices, the
+    /// settings, the assistant's model and key). Whoever has it controls our
+    /// devices.
+    pub async fn export_store(&self) -> Result<StoreArchive, PeekError> {
+        self.call(Op::ExportStore).await
+    }
+
+    /// Whether another store may replace this one: see
+    /// `MatterPeek::import_store`.
+    #[cfg(feature = "std")]
+    pub(crate) async fn import_check(&self) -> Result<(), PeekError> {
+        self.call(Op::ImportCheck).await
     }
 
     /// Cancel the running commission at its next safe point: before the device
@@ -869,6 +888,9 @@ pub(crate) enum Op {
         reply: Reply<Discovered>,
     },
     AdvertisedDevices(Reply<Vec<AdvertisedDevice>>),
+    Capabilities(Reply<Capabilities>),
+    ExportStore(Reply<StoreArchive>),
+    ImportCheck(Reply<()>),
     ReadModel {
         node_id: u64,
         endpoint: Option<u16>,

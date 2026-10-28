@@ -28,8 +28,14 @@ tauri-plugin-log = "2"
 log = { workspace = true }
 serde_json = { workspace = true }
 async-channel = { workspace = true }
+# Waiting for the core to stop.
+async-io = { workspace = true }
+# The files the page saves come base64-encoded.
+base64 = "0.22"
 # The core in the app, with its assistant: a hub of the server's.
 matter-peek-server = { version = "0.1.0", path = "../matter-peek-server" }
+# The project's page, opened in the browser.
+tauri-plugin-opener = "2"
 
 # The core, with each platform's mDNS and, where rs-matter has it, BLE.
 # Avahi and BlueZ on Linux (both over D-Bus).

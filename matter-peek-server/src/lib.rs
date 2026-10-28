@@ -29,12 +29,14 @@ use matter_peek_core::api::PeekConfig;
 
 pub use http::UNAUTHORIZED;
 pub use hub::{Hub, Session};
+pub use store::is_sealed;
 pub use web::web_file;
 
 mod chats;
 mod http;
 mod hub;
 pub mod llm;
+mod store;
 mod web;
 
 thread_local! {
@@ -75,11 +77,48 @@ pub fn run(addr: &str, env: Option<ModelConfig>, store_dir: Option<&Path>) -> io
         periodic_sync: true,
     };
     // The store is locked first: one server per store, and per token.
-    let hub = Hub::start(config, env, dir.join("chats"))?;
+    let hub = start(config, env)?;
     let token = access_token(&dir, false)?;
 
     block_on(http::serve(addr, hub, token))
 }
+
+/// Start the server's hub. Restarted after an import, it waits a while for
+/// the process before it to let the store go.
+fn start(config: PeekConfig, env: Option<ModelConfig>) -> io::Result<Rc<Hub>> {
+    let mut tries = if store::restarted() { 20 } else { 1 };
+    loop {
+        tries -= 1;
+        match Hub::start(config.clone(), env.clone(), true) {
+            Err(_) if tries > 0 => std::thread::sleep(std::time::Duration::from_millis(500)),
+            started => return started,
+        }
+    }
+}
+
+/// Put the store in `dir` aside, in a `retired-<seconds since 1970>`
+/// directory there, for a new one to start in its place: a store moved to
+/// another controller. Only while no controller runs on it.
+pub fn retire_store(dir: &Path) -> io::Result<std::path::PathBuf> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let retired = dir.join(format!("{RETIRED}{secs}"));
+    std::fs::create_dir(&retired)?;
+
+    for entry in std::fs::read_dir(dir)? {
+        let name = entry?.file_name();
+        let kept = name == "lock" || name.to_string_lossy().starts_with(RETIRED);
+        if !kept {
+            std::fs::rename(dir.join(&name), retired.join(&name))?;
+        }
+    }
+
+    Ok(retired)
+}
+
+/// The prefix of the directories of [`retire_store`].
+const RETIRED: &str = "retired-";
 
 /// The API's access token of the server whose store is in `dir`: the one kept
 /// there, else a new one, kept from now on. `renew` makes a new one anyway; a

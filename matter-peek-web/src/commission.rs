@@ -18,10 +18,10 @@ use crate::{
 
 impl App {
     pub(crate) fn view_commission_tab(&self, link: &Scope<Self>) -> Html {
-        let choice = |via: Via, glyph: Icon, title: &str, text: &str| {
+        let choice = |via: Via, glyph: Icon, title: &str, text: &str, usable: bool| {
             html! {
                 <button class={classes!("choice", (self.via == via).then_some("is-selected"))}
-                    disabled={self.running}
+                    disabled={self.running || !usable}
                     onclick={link.callback(move |_| Msg::SetVia(via))}>
                     <span class="choice-icon">{ icon(glyph, 22) }</span>
                     <span class="choice-title">{ title.to_string() }</span>
@@ -50,14 +50,19 @@ impl App {
                         <div class="choices">
                             if self.can_play {
                                 { choice(Via::PlayServices, Icon::QrCode, "With Google Play services",
-                                    "Android scans its QR code and puts it on your Wi-Fi or Thread network.") }
+                                    "Android scans its QR code and puts it on your Wi-Fi or Thread network.", true) }
                             }
                             { choice(Via::Network, Icon::Globe, "Over the network",
-                                "It is on your network already, with its commissioning window open.") }
-                            // Unless the controller has no Bluetooth.
-                            if self.can_ble != Some(false) {
-                                { choice(Via::Bluetooth, Icon::Bluetooth, "Over Bluetooth",
-                                    "A new device: it joins your Wi-Fi or Thread network as it is commissioned.") }
+                                "It is on your network already, with its commissioning window open.", true) }
+                            // Unless the controller was built without Bluetooth (all but Linux);
+                            // disabled, saying why, while it cannot use it.
+                            if let Some(unavailable) = self.ble_choice() {
+                                { match unavailable {
+                                    None => choice(Via::Bluetooth, Icon::Bluetooth, "Over Bluetooth",
+                                        "A new device: it joins your Wi-Fi or Thread network as it is commissioned.", true),
+                                    Some(why) => choice(Via::Bluetooth, Icon::Bluetooth, "Over Bluetooth",
+                                        &format!("Not available: {why}."), false),
+                                } }
                             }
                         </div>
                     }) }
@@ -103,6 +108,17 @@ impl App {
 
                 { self.view_progress(link) }
             </div>
+        }
+    }
+
+    /// Whether to offer commissioning over Bluetooth: `None` if the controller
+    /// was built without it, else why it cannot now, if it cannot.
+    fn ble_choice(&self) -> Option<Option<String>> {
+        match &self.can_ble {
+            Some((false, _)) => None,
+            Some((true, unavailable)) => Some(unavailable.clone()),
+            // Not known yet.
+            None => Some(None),
         }
     }
 

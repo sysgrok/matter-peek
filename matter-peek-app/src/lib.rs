@@ -6,17 +6,22 @@
 //!
 //! The core, with its assistant, is a [`Hub`] of the server's: it starts with
 //! the first connection to it, so an app on a server never starts one. The
-//! page is the server's copy of the web UI, at `matter-peek://localhost/`.
+//! page has it stop, to start again with a store imported (`restart_core`), or
+//! for good once its store moved to a server (`retire_core`, which puts the
+//! store aside). The page is the server's copy of the web UI, at
+//! `matter-peek://localhost/`.
 //!
 //! On Android, the page also reaches Google Play services' Matter
 //! commissioning: the `play` plugin's commands are answered by `PlayPlugin`
 //! (Kotlin), in `gen/android`. The `theme` plugin gives the window the page's
-//! colours, light or dark.
+//! colours, light or dark; the `files` plugin saves the files the page's
+//! downloads would; Tauri's `opener` opens the project's page in the browser.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use log::{error, info};
 use tauri::ipc::Channel;
@@ -24,9 +29,13 @@ use tauri::plugin::TauriPlugin;
 use tauri::webview::{PermissionKind, PermissionResponse};
 use tauri::{Manager, Runtime, State};
 
+use matter_peek_core::api::platform::store_in_use;
 use matter_peek_core::api::wire::{ClientMsg, Response, ServerMsg};
 use matter_peek_core::api::PeekConfig;
 use matter_peek_server::{Hub, Session};
+
+/// How long the core may take to stop.
+const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The connections of the page to the core in this process.
 struct Wire {
@@ -36,9 +45,23 @@ struct Wire {
 
 /// What the page asks of a connection.
 enum Cmd {
-    Open { id: u32, channel: Channel<String> },
-    Send { id: u32, msg: String },
-    Close { id: u32 },
+    Open {
+        id: u32,
+        channel: Channel<String>,
+    },
+    Send {
+        id: u32,
+        msg: String,
+    },
+    Close {
+        id: u32,
+    },
+    /// End every connection, and with them the core; `retire`: put its store
+    /// aside.
+    Stop {
+        retire: bool,
+        done: async_channel::Sender<Result<(), String>>,
+    },
 }
 
 /// A connection, to the core or, when it could not start, to why not.
@@ -68,6 +91,31 @@ fn wire_close(wire: State<'_, Wire>, id: u32) {
     let _ = wire.cmds.try_send(Cmd::Close { id });
 }
 
+/// Stop the core; the next connection starts it again, with a store imported.
+#[tauri::command]
+async fn restart_core(wire: State<'_, Wire>) -> Result<(), String> {
+    stop(&wire, false).await
+}
+
+/// Stop the core, and put its store aside: it moved to a server.
+#[tauri::command]
+async fn retire_core(wire: State<'_, Wire>) -> Result<(), String> {
+    stop(&wire, true).await
+}
+
+async fn stop(wire: &Wire, retire: bool) -> Result<(), String> {
+    let (done, done_rx) = async_channel::bounded(1);
+    wire.cmds
+        .send(Cmd::Stop { retire, done })
+        .await
+        .map_err(|_| "the app's connections ended".to_string())?;
+
+    done_rx
+        .recv()
+        .await
+        .map_err(|_| "the app's connections ended".to_string())?
+}
+
 /// Run the app.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -79,6 +127,8 @@ pub fn run() {
         )
         .plugin(play())
         .plugin(theme())
+        .plugin(files())
+        .plugin(tauri_plugin_opener::init())
         // The page reads QR codes with the camera, when asked to; it wants
         // nothing else.
         .on_permission_request(|_, kind| match kind {
@@ -100,7 +150,13 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![wire_open, wire_send, wire_close])
+        .invoke_handler(tauri::generate_handler![
+            wire_open,
+            wire_send,
+            wire_close,
+            restart_core,
+            retire_core
+        ])
         .run(tauri::generate_context!())
         .expect("the app failed to run");
 }
@@ -146,6 +202,72 @@ fn set_theme<R: Runtime>(window: tauri::Window<R>, dark: bool) -> Result<(), Str
     };
 
     window.set_theme(Some(theme)).map_err(|e| e.to_string())
+}
+
+/// Files for the user to keep, which the page's downloads do not save in the
+/// app: on the desktop, in the Downloads directory; on Android, `FilesPlugin`
+/// asks where.
+fn files<R: Runtime>() -> TauriPlugin<R> {
+    let builder = tauri::plugin::Builder::new("files").setup(|_app, _api| {
+        #[cfg(target_os = "android")]
+        _api.register_android_plugin("com.sysgrok.matterpeek", "FilesPlugin")?;
+
+        Ok(())
+    });
+
+    #[cfg(desktop)]
+    let builder = builder.invoke_handler(tauri::generate_handler![save]);
+
+    builder.build()
+}
+
+/// Save file `name`, its contents `data` (base64), in the Downloads
+/// directory, under another name if one has it; where it went.
+#[cfg(desktop)]
+#[tauri::command]
+fn save<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    name: String,
+    data: String,
+) -> Result<serde_json::Value, String> {
+    use base64::Engine as _;
+    use std::io::Write as _;
+
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|e| e.to_string())?;
+    let name = Path::new(&name)
+        .file_name()
+        .ok_or("not a file name")?
+        .to_string_lossy()
+        .into_owned();
+    let dir = app.path().download_dir().map_err(|e| e.to_string())?;
+
+    let (stem, extension) = name.rsplit_once('.').unwrap_or((&name, ""));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // It may hold keys.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    for n in 1..100 {
+        let file = match n {
+            1 => name.clone(),
+            n if extension.is_empty() => format!("{stem} ({n})"),
+            n => format!("{stem} ({n}).{extension}"),
+        };
+        let path = dir.join(file);
+        match options.open(&path) {
+            Ok(mut out) => {
+                out.write_all(&data).map_err(|e| e.to_string())?;
+                info!("app: saved {}", path.display());
+                return Ok(serde_json::json!({ "saved": true, "path": path }));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("cannot save to {}: {e}", dir.display())),
+        }
+    }
+
+    Err(format!("{} has too many files named {name}", dir.display()))
 }
 
 /// The web UI's file at `path`, from the server's copy: the window's page is
@@ -215,9 +337,41 @@ fn serve(store_dir: PathBuf, cmds: async_channel::Receiver<Cmd>) {
                 Cmd::Close { id } => {
                     conns.remove(&id);
                 }
+                Cmd::Stop { retire, done } => {
+                    conns.clear();
+                    hub = None;
+                    let _ = done.send(stop_core(&store_dir, retire).await).await;
+                }
             }
         }
     });
+}
+
+/// Wait for the core on the store in `store_dir` to stop, its connections
+/// gone, and put the store aside if `retire`.
+async fn stop_core(store_dir: &Path, retire: bool) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    while store_in_use(store_dir) {
+        if started.elapsed() > STOP_TIMEOUT {
+            error!("app: the core does not stop");
+            return Err("the controller does not stop: restart the app".into());
+        }
+        async_io::Timer::after(Duration::from_millis(200)).await;
+    }
+    info!("app: the core stopped");
+
+    if retire {
+        let retired = matter_peek_server::retire_store(store_dir).map_err(|e| {
+            error!("app: cannot put the store aside: {e}");
+            format!("cannot put the store aside: {e}")
+        })?;
+        info!(
+            "app: the store moved to a server; put aside in {}",
+            retired.display()
+        );
+    }
+
+    Ok(())
 }
 
 /// Start the core and its assistant, keeping the store and the chats in
@@ -232,7 +386,7 @@ fn start(store_dir: &Path) -> Result<Rc<Hub>, String> {
         store_dir: Some(store_dir.display().to_string()),
         periodic_sync: true,
     };
-    Hub::start(config, None, store_dir.join("chats")).map_err(|e| {
+    Hub::start(config, None, false).map_err(|e| {
         error!("app: the core does not start: {e}");
         format!("the controller does not start: {e}")
     })
