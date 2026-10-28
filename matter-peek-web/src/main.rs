@@ -9,6 +9,8 @@ use std::net::SocketAddr;
 
 use futures::{SinkExt, StreamExt};
 use gloo_net::websocket::Message;
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast as _;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
@@ -35,6 +37,7 @@ mod network;
 mod our_fabrics;
 mod play;
 mod share;
+mod theme;
 mod thread;
 mod transport;
 mod ui;
@@ -349,6 +352,13 @@ enum Msg {
     /// Filter the stored list by tag substring.
     Filter(filter::FilterMsg),
     Connection(connection::ConnectionMsg),
+    /// The window changed its size, or the top bar its content: fold or unfold
+    /// its pages' names, as it fits.
+    FitAppbar,
+    /// Pick dark colours (else light ones).
+    PickTheme(bool),
+    /// The system's colours changed.
+    SystemTheme,
     /// Whether the browser offers to install the page as an app.
     Installable(bool),
     /// Install it.
@@ -456,6 +466,8 @@ struct App {
     connection_token: String,
     /// The browser offers to install the page as an app.
     installable: bool,
+    /// The colours are dark.
+    dark: bool,
     /// The server refused the access token kept.
     refused: bool,
     filter_focus: bool,
@@ -562,6 +574,11 @@ struct App {
     assistant: Assistant,
     /// Its conversation, which scrolls.
     chat_scroll: NodeRef,
+    /// The top bar's row, measured to see whether it fits.
+    appbar: NodeRef,
+    /// The top bar shows its pages as icons only, and needs this width to
+    /// show their names.
+    appbar_folded: Option<i32>,
     /// Scroll the conversation to its end once shown.
     scroll_chat: bool,
     error: Option<String>,
@@ -588,11 +605,14 @@ impl Component for App {
         });
         let link = ctx.link().clone();
         install::watch(move |offered| link.send_message(Msg::Installable(offered)));
+        let link = ctx.link().clone();
+        theme::watch_system(move || link.send_message(Msg::SystemTheme));
+        watch_resize(ctx.link().clone());
 
         Self {
             tab: Tab::Devices,
             peer_addr: String::new(),
-            setup_code: "20202021".into(),
+            setup_code: String::new(),
             discover_filter: String::new(),
             remember: false,
             via: Via::Network,
@@ -628,6 +648,7 @@ impl Component for App {
             connection: None,
             connection_token: String::new(),
             installable: false,
+            dark: theme::dark(),
             refused: false,
             filter_focus: false,
             filter_pick: 0,
@@ -678,6 +699,8 @@ impl Component for App {
             status_on_ok: None,
             assistant: Assistant::default(),
             chat_scroll: NodeRef::default(),
+            appbar: NodeRef::default(),
+            appbar_folded: None,
             scroll_chat: false,
             error: None,
         }
@@ -1752,6 +1775,17 @@ impl Component for App {
             }
             Msg::Filter(msg) => self.update_filter(msg),
             Msg::Connection(msg) => self.update_connection(msg),
+            Msg::FitAppbar => self.fit_appbar(),
+            Msg::PickTheme(dark) => {
+                theme::pick(dark);
+                self.dark = dark;
+                true
+            }
+            Msg::SystemTheme => {
+                theme::apply();
+                self.dark = theme::dark();
+                true
+            }
             Msg::Installable(offered) => {
                 self.installable = offered;
                 true
@@ -2041,10 +2075,38 @@ impl Component for App {
                 scroll.set_scroll_top(scroll.scroll_height());
             }
         }
+
+        // Its content may have changed.
+        if self.appbar_folded.is_none() {
+            ctx.link().send_message(Msg::FitAppbar);
+        }
     }
 }
 
 impl App {
+    /// Fold the top bar's pages' names when it does not fit, and unfold them
+    /// once it has the width it needed with them; whether it changed. The
+    /// width depends on the fonts, which differ between browsers, so it is
+    /// measured.
+    fn fit_appbar(&mut self) -> bool {
+        let Some(bar) = self.appbar.cast::<web_sys::Element>() else {
+            return false;
+        };
+
+        match self.appbar_folded {
+            None if bar.scroll_width() > bar.client_width() => {
+                self.appbar_folded = Some(bar.scroll_width());
+                true
+            }
+            // Unfolded, it is measured again once shown.
+            Some(needs) if bar.client_width() >= needs => {
+                self.appbar_folded = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Turn a device's card to its controls (`true`), or its health; it turns
     /// over if it shows the other.
     fn flip(&mut self, node_id: u64, controls: bool) {
@@ -2592,9 +2654,10 @@ impl App {
             |class: &'static str, (tab, label, glyph, count): (Tab, &str, Icon, Option<usize>)| {
                 html! {
                     <a class={classes!(class, (self.tab == tab).then_some("is-active"))}
+                        title={label.to_string()}
                         onclick={link.callback(move |_| Msg::SelectTab(tab))}>
                         <span class="nav-icon">{ icon(glyph, 18) }</span>
-                        <span>{ label.to_string() }</span>
+                        <span class="nav-label">{ label.to_string() }</span>
                         if let Some(count) = count.filter(|count| *count > 0) {
                             <span class="nav-count">{ count }</span>
                         }
@@ -2606,8 +2669,8 @@ impl App {
 
         html! {
             <>
-                <header class="appbar">
-                    <div class="appbar-inner">
+                <header class={classes!("appbar", self.appbar_folded.is_some().then_some("is-folded"))}>
+                    <div class="appbar-inner" ref={self.appbar.clone()}>
                         <button class="appbar-burger" aria-label="Menu"
                             onclick={link.callback(|_| Msg::ToggleDrawer)}>
                             { icon(Icon::Menu, 22) }
@@ -2622,11 +2685,12 @@ impl App {
                         <nav class="appbar-nav">
                             { for pages.into_iter().map(|page| link_to("appbar-link", page)) }
                             <a class={classes!("appbar-link", "is-assistant", assistant)}
-                                onclick={open_assistant.clone()}>
+                                title="Assistant" onclick={open_assistant.clone()}>
                                 <span class="assistant-mark">{ icon(Icon::Sparkles, 13) }</span>
-                                <span>{ "Assistant" }</span>
+                                <span class="nav-label">{ "Assistant" }</span>
                             </a>
                         </nav>
+                        { self.view_theme_switch("is-appbar", true, link) }
                     </div>
                 </header>
 
@@ -2647,6 +2711,7 @@ impl App {
                     }
                     { self.view_connection_button("is-drawer", link) }
                     { self.view_install_button("is-drawer", link) }
+                    { self.view_theme_switch("is-drawer", false, link) }
                     <nav class="drawer-nav">
                         { for pages.into_iter().map(|page| link_to("drawer-link", page)) }
                     </nav>
@@ -2809,6 +2874,18 @@ fn android_fabric_kept(error: &str) -> String {
     format!(
         "Android's own fabric is still on it ({error}): remove it from the device's Fabrics if it is not wanted."
     )
+}
+
+/// Tell the page when the window changes its size.
+fn watch_resize(link: html::Scope<App>) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+
+    let resized = Closure::<dyn Fn()>::new(move || link.send_message(Msg::FitAppbar));
+    let _ = window.add_event_listener_with_callback("resize", resized.as_ref().unchecked_ref());
+    // For as long as the page lives.
+    resized.forget();
 }
 
 /// Safety net: cancel the commission if it runs longer than `secs`. When the
@@ -3323,6 +3400,8 @@ fn checkbox_checked(e: Event) -> bool {
 
 fn main() {
     wasm_logger::init(wasm_logger::Config::default());
+    // Before the first paint: no flash of the other colours.
+    theme::apply();
     transport::take_url_token();
     yew::Renderer::<App>::new().render();
 }

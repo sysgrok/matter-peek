@@ -8,6 +8,10 @@ use matter_peek_core::api;
 /// The icons of the UI, drawn in the current text color.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
+    /// Light colours.
+    Sun,
+    /// Dark colours.
+    Moon,
     Wifi,
     Thread,
     Ethernet,
@@ -193,6 +197,13 @@ pub fn icon(glyph: Icon, size: u32) -> Html {
         },
         Icon::Menu => html! { <path d="M4 6h16M4 12h16M4 18h16" /> },
         Icon::Close => html! { <path d="M18 6L6 18M6 6l12 12" /> },
+        Icon::Sun => html! {
+            <>
+                <circle cx="12" cy="12" r="4" />
+                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+            </>
+        },
+        Icon::Moon => html! { <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" /> },
         Icon::Logo => html! {
             <>
                 <path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2" />

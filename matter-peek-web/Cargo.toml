@@ -38,6 +38,8 @@ web-sys = { version = "0.3", features = [
     "Storage",
     # Taking the access token out of the page's URL.
     "Location", "History",
+    # Light or dark colours.
+    "Element", "NodeList", "MediaQueryList",
 ] }
 js-sys = "0.3"
 # OTA image uploads: read the picked file, send it base64-encoded.

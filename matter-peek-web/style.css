@@ -46,7 +46,7 @@ html, body { background: var(--bulma-scheme-main-bis); min-height: 100vh; }
 /* The app bar, and the drawer it folds into on phones. */
 .appbar { position: sticky; top: 0; z-index: 30; background: color-mix(in srgb, var(--bulma-scheme-main) 88%, transparent); backdrop-filter: saturate(180%) blur(12px); -webkit-backdrop-filter: saturate(180%) blur(12px); border-bottom: 1px solid var(--bulma-border-weak); }
 .appbar-inner { max-width: var(--page-max); margin: 0 auto; height: 3.75rem; display: flex; align-items: center; gap: 2rem; padding: 0 1.25rem; }
-.brand { display: flex; align-items: center; gap: .65rem; color: var(--bulma-text-strong); font-weight: 700; font-size: 1.1rem; letter-spacing: -.01em; }
+.brand { display: flex; align-items: center; gap: .65rem; color: var(--bulma-text-strong); font-weight: 700; font-size: 1.1rem; letter-spacing: -.01em; white-space: nowrap; }
 .brand:hover { color: var(--bulma-text-strong); }
 .brand-mark { flex: none; width: 2.15rem; height: 2.15rem; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; color: #fff; background: linear-gradient(135deg, #00c4a7, #2f7cf6); box-shadow: 0 4px 12px -4px rgba(47, 124, 246, .6); }
 .appbar-nav { flex: 1; display: flex; gap: .25rem; }
@@ -73,6 +73,11 @@ html, body { background: var(--bulma-scheme-main-bis); min-height: 100vh; }
 .assistant-mark { flex: none; width: 1.5rem; height: 1.5rem; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; color: #fff; background: var(--assistant-gradient); }
 .assistant-mark.is-large { width: 2.4rem; height: 2.4rem; border-radius: 12px; box-shadow: 0 6px 14px -6px var(--assistant-glow); }
 .appbar-link.is-assistant { margin-left: auto; padding-left: .5rem; }
+/* When the top bar does not fit, as the page measures it (fonts differ between
+   browsers), its pages are icons only, their names in the tooltips. */
+.appbar.is-folded .appbar-inner { gap: 1rem; }
+.appbar.is-folded .appbar-link { padding: .45rem .6rem; }
+.appbar.is-folded .appbar-link .nav-label, .appbar.is-folded .connection-button span { display: none; }
 .drawer-foot { margin-top: auto; padding: .75rem .75rem max(.75rem, env(safe-area-inset-bottom)); border-top: 1px solid var(--bulma-border-weak); }
 .drawer-assistant { display: flex; align-items: center; gap: .85rem; padding: .75rem .9rem; border-radius: 14px; color: var(--bulma-text); background: linear-gradient(135deg, rgba(139, 92, 246, .1), rgba(236, 72, 153, .1)); border: 1px solid hsla(var(--assistant-hsl), .22); transition: background .15s, border-color .15s; }
 .drawer-assistant:hover { background: linear-gradient(135deg, rgba(139, 92, 246, .16), rgba(236, 72, 153, .16)); }
@@ -1112,7 +1117,11 @@ button.dm-chip:hover { border-color: var(--bulma-link); color: var(--bulma-link)
 .connection-card.is-required .modal-card-head .delete { display: none; }
 .connection-text { margin-bottom: 1rem; font-size: .88rem; color: var(--bulma-text-weak); }
 .connection-warning { margin: -.25rem 0 1rem; }
+/* Light or dark colours. */
+.theme-switch { flex: none; }
+.theme-switch.is-drawer { margin: .6rem .75rem 0; }
 @media screen and (max-width: 768px) {
+  .theme-switch.is-appbar { display: none; }
   .connection-button.is-appbar { display: none; }
 }
 

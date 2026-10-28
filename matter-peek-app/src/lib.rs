@@ -10,7 +10,8 @@
 //!
 //! On Android, the page also reaches Google Play services' Matter
 //! commissioning: the `play` plugin's commands are answered by `PlayPlugin`
-//! (Kotlin), in `gen/android`.
+//! (Kotlin), in `gen/android`. The `theme` plugin gives the window the page's
+//! colours, light or dark.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -77,6 +78,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(play())
+        .plugin(theme())
         // The page reads QR codes with the camera, when asked to; it wants
         // nothing else.
         .on_permission_request(|_, kind| match kind {
@@ -114,6 +116,36 @@ fn play<R: Runtime>() -> TauriPlugin<R> {
             Ok(())
         })
         .build()
+}
+
+/// The page's colours, light or dark, for the window around it: on the
+/// desktop, its title bar (Tauri's window theme); on Android, `ThemePlugin`
+/// colours the system bars.
+fn theme<R: Runtime>() -> TauriPlugin<R> {
+    let builder = tauri::plugin::Builder::new("theme").setup(|_app, _api| {
+        #[cfg(target_os = "android")]
+        _api.register_android_plugin("com.sysgrok.matterpeek", "ThemePlugin")?;
+
+        Ok(())
+    });
+
+    #[cfg(desktop)]
+    let builder = builder.invoke_handler(tauri::generate_handler![set_theme]);
+
+    builder.build()
+}
+
+/// Give the window dark colours, or light ones.
+#[cfg(desktop)]
+#[tauri::command]
+fn set_theme<R: Runtime>(window: tauri::Window<R>, dark: bool) -> Result<(), String> {
+    let theme = if dark {
+        tauri::Theme::Dark
+    } else {
+        tauri::Theme::Light
+    };
+
+    window.set_theme(Some(theme)).map_err(|e| e.to_string())
 }
 
 /// The web UI's file at `path`, from the server's copy: the window's page is

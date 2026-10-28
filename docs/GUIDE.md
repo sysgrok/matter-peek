@@ -6,6 +6,11 @@ has one page for each task: **Devices**, **Commission**, **Updates**,
 functions. `matter-peek --help` lists the CLI commands, and [AI.md](AI.md)
 lists the MCP tools.
 
+The web UI uses light or dark colours as the system does, until they are picked
+with the sun and moon switch at the end of its top bar (in the menu, on a
+phone). The pick is kept, in each browser and in the app, and the app's window
+follows it.
+
 The web UI can also be installed as an app of its own, with its own window and
 icon:
 - Chrome and Edge offer it on the server's own machine (`localhost`) and over
