@@ -17,9 +17,10 @@ edition = "2021"
 authors = ["Ivan Markov <ivan.markov@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sysgrok/matter-peek"
-# Ubuntu 24.04's newest Rust (`cargo-1.91`), so it installs with apt's Rust
-# too; above rs-matter's own 1.87. CI checks it (the MSRV job).
-rust-version = "1.91"
+# The oldest Rust that builds rs-matter with its `send-sync` feature, which the
+# server uses (1.91 rejects some of its lifetimes); above rs-matter's own 1.87.
+# CI checks it (the MSRV job).
+rust-version = "1.92"
 
 [workspace.dependencies]
 rs-matter = { version = "0.4", default-features = false, features = ["os", "rustcrypto", "log"] }

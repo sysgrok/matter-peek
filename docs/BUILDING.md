@@ -26,7 +26,7 @@ architecture.
 
 ## Requirements
 
-- Rust 1.91 or newer for the workspace, and a C toolchain for linking (for
+- Rust 1.92 or newer for the workspace, and a C toolchain for linking (for
   example `build-essential`).
 - For the web UI: nightly Rust with the `wasm32-unknown-unknown` target, and
   [trunk](https://trunkrs.dev). `matter-peek-web/rust-toolchain.toml` selects

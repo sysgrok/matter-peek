@@ -70,13 +70,12 @@ matter-peek is fully usable, but not yet released. Planned next:
 
 ## Build from source
 
-Both executables can be built on Linux (x86_64 or aarch64) with Rust 1.91 or newer. You can use the Rust packaged by your distribution, or install it with [rustup](https://rustup.rs).
+Both executables can be built on Linux (x86_64 or aarch64) with Rust 1.92 or newer. You can use the Rust packaged by your distribution, or install it with [rustup](https://rustup.rs). On Ubuntu 24.04, whose newest packaged Rust is 1.91, use rustup.
 
 ```sh
 # Option 1: Rust from your distribution (this also installs the C toolchain Rust needs for linking)
 sudo apt install cargo                          # Ubuntu 26.04, Debian testing
 sudo apt install -t trixie-backports cargo      # Debian 13, Raspberry Pi OS (backports enabled)
-sudo apt install cargo-1.91                     # Ubuntu 24.04: then use `cargo-1.91` instead of `cargo`
 
 # Option 2: Rust from rustup
 sudo apt install build-essential                # the C toolchain Rust needs for linking
