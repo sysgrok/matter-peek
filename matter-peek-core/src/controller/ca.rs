@@ -28,6 +28,7 @@ use rs_matter::crypto::{
 use rs_matter::error::Error;
 use rs_matter::onboard::cac::{IcacGenerator, RcacGenerator};
 use rs_matter::onboard::noc::NocGenerator;
+use rs_matter::utils::sync::MaybeSend;
 
 use crate::matter::FabricIdentity;
 
@@ -112,7 +113,7 @@ impl ControllerCa {
     /// - otherwise [`Self::bootstrap`] a new CA/fabric and persist both.
     ///
     /// Returns the CA and our controller fabric index.
-    pub fn ensure<C: Crypto, S: rs_matter::persist::KvBlobStore>(
+    pub fn ensure<C: Crypto, S: rs_matter::persist::KvBlobStore + MaybeSend>(
         crypto: &C,
         matter: &rs_matter::Matter<'_>,
         store: &crate::persist::ControllerStore<'_, S>,

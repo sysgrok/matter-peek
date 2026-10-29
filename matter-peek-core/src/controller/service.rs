@@ -1,15 +1,18 @@
 //! The service behind [`MatterPeek`](crate::api::MatterPeek): it owns the
 //! Matter stack and runs the operations of its handles.
 //!
-//! One task, for the controller's lifetime: it loads the persisted controller
-//! fabric, ensures the CA, then runs side by side the transport pump, the mDNS
-//! backend (for operational resolves), our own node (OTA Provider, BDX,
-//! subscription reports), the operations (side by side unless they conflict,
-//! see [`locks`], plus a periodic sync), the health subscriptions (detached,
-//! so they never block operations) and the background health checks.
+//! For the controller's lifetime, it loads the persisted controller fabric,
+//! ensures the CA, then runs side by side the transport pump, the mDNS backend
+//! (for operational resolves) and the handlers of our own node (OTA Provider,
+//! BDX, subscription reports), each a [`Task`] the host's [`Runner`] may run on
+//! any thread; and, in one future on the host's thread, the operations (side by
+//! side unless they conflict, see [`locks`], plus a periodic sync), the health
+//! subscriptions (detached, so they never block operations) and the background
+//! health checks.
 //!
 //! It is `no_std`: the host hands it the stack, the crypto, the KV store, the OTA
-//! image store and the UDP network (see [`crate::host`] for this host's).
+//! image store, the UDP network and the runner (see [`crate::host`] for this
+//! host's).
 
 use core::cell::{Cell, RefCell};
 use core::future::Future;
@@ -19,12 +22,11 @@ use core::sync::atomic::AtomicBool;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
-use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
+use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_time::{Duration, Instant, Timer};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -36,6 +38,7 @@ use rs_matter::error::Error;
 use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::{NetworkReceive, NetworkSend, NoNetwork};
 use rs_matter::utils::sync::Notification;
+use rs_matter::utils::sync::{MaybeSend, MaybeSendSync};
 use rs_matter::Matter;
 
 use crate::api::{
@@ -47,13 +50,13 @@ use crate::matter::Controller;
 use crate::mdns::Mdns;
 use crate::model::StoredDevice;
 use crate::node;
-use crate::ota::{OtaEvent, OtaImageStore, OtaProvider};
+use crate::ota::{OtaImageStore, OtaProvider};
 use crate::persist::{ControllerStore, KvBuf};
 use crate::subscribe::{Coverage, Gate, Reports};
 
 use health::HealthChecks;
 use locks::{Key, Locks, Mode};
-use ota::{OtaFollower, TrackedUpdate, Upload};
+use ota::{OtaEventFn, OtaEvents, OtaFollower, Shared, TrackedUpdate, Upload};
 use watch::{SubJob, Watch};
 use window::OpenedWindow;
 
@@ -87,6 +90,22 @@ const CHECK_INS_QUEUED: usize = 8;
 
 /// How many devices on Thread prime a data model subscription at once.
 const MODEL_PRIMINGS_OVER_THREAD: usize = 2;
+
+/// A future of the controller's: with `send-sync`, `Send`, so that it may run
+/// on any thread of the host's.
+pub trait TaskFuture: Future<Output = ()> + MaybeSend {}
+
+impl<T: Future<Output = ()> + MaybeSend> TaskFuture for T {}
+
+/// A [`TaskFuture`], boxed.
+pub type Task<'a> = Pin<Box<dyn TaskFuture + 'a>>;
+
+/// How a host runs the controller's futures (see [`Service::run`]).
+pub trait Runner {
+    /// Run each of `tasks` as a task of its own, and `main` (not `Send`) on the
+    /// calling thread, until `main` or one of `tasks` ends.
+    fn run<'a>(self, tasks: Vec<Task<'a>>, main: impl Future<Output = ()> + 'a);
+}
 
 /// What the service runs on, provided by the host.
 pub struct Platform<'a, C, S, O, N, M> {
@@ -136,13 +155,13 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     /// Lets a few subscriptions over Thread at a time prime a data model.
     model_gate: Gate,
     /// Our OTA Provider.
-    ota: OtaProvider<O, Box<dyn Fn(OtaEvent)>>,
+    ota: OtaProvider<O, Box<dyn OtaEventFn>>,
     /// What it tells of the updates, and what the service finds out itself.
-    ota_events: Rc<dyn Fn(OtaEvent)>,
+    ota_events: OtaEvents,
     /// Who follows which OTA update.
-    ota_followers: Rc<RefCell<Vec<OtaFollower>>>,
+    ota_followers: Shared<Vec<OtaFollower>>,
     /// The latest OTA update of each device, by node ID.
-    ota_updates: Rc<RefCell<BTreeMap<u64, TrackedUpdate>>>,
+    ota_updates: Shared<BTreeMap<u64, TrackedUpdate>>,
     /// The commissioning windows we opened, by node ID.
     windows: RefCell<BTreeMap<u64, OpenedWindow>>,
     /// Until when the devices that sleep long are awake, as far as we know, by
@@ -185,7 +204,7 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     btp: &'a rs_matter::transport::network::btp::Btp,
 }
 
-impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
+impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// Run the operations, side by side unless they conflict (see [`Locks`]),
     /// syncing periodically if asked to, until every handle is dropped.
     async fn run_ops(&self, service: Service) {
@@ -713,33 +732,38 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
 }
 
 impl Service {
-    /// Run the controller on `platform`, until every handle to it is dropped.
-    pub async fn run<'a, C, S, O, N, M>(
+    /// Run the controller on `platform` with `runner`, until every handle to it
+    /// is dropped.
+    pub fn run<'a, C, S, O, N, M, R>(
         self,
         platform: Platform<'a, C, S, O, N, M>,
         config: &PeekConfig,
+        runner: R,
     ) where
         C: Crypto,
-        S: KvBlobStore,
-        O: OtaImageStore,
-        N: NetworkSend + NetworkReceive + Copy,
-        M: Mdns,
+        S: KvBlobStore + MaybeSend,
+        O: OtaImageStore + MaybeSendSync,
+        N: NetworkSend + NetworkReceive + Copy + MaybeSend,
+        M: Mdns + MaybeSend,
+        R: Runner,
     {
-        run(self, platform, config).await
+        run(self, platform, config, runner)
     }
 }
 
 /// See [`Service::run`].
-async fn run<'a, C, S, O, N, M>(
+fn run<'a, C, S, O, N, M, R>(
     service: Service,
     platform: Platform<'a, C, S, O, N, M>,
     config: &PeekConfig,
+    runner: R,
 ) where
     C: Crypto,
-    S: KvBlobStore,
-    O: OtaImageStore,
-    N: NetworkSend + NetworkReceive + Copy,
-    M: Mdns,
+    S: KvBlobStore + MaybeSend,
+    O: OtaImageStore + MaybeSendSync,
+    N: NetworkSend + NetworkReceive + Copy + MaybeSend,
+    M: Mdns + MaybeSend,
+    R: Runner,
 {
     let Platform {
         matter,
@@ -761,11 +785,13 @@ async fn run<'a, C, S, O, N, M>(
         Ok(fabrics) => fabrics,
         Err(e) => {
             error!("service: our fabrics cannot be loaded: {e:?}");
-            refuse_all(
-                service,
-                PeekError::failed("the controller's fabrics cannot be set up"),
-            )
-            .await;
+            runner.run(
+                Vec::new(),
+                refuse_all(
+                    service,
+                    PeekError::failed("the controller's fabrics cannot be set up"),
+                ),
+            );
             return;
         }
     };
@@ -786,13 +812,13 @@ async fn run<'a, C, S, O, N, M>(
         }
     }
 
-    let ota_followers = Rc::new(RefCell::new(Vec::new()));
-    let ota_updates = Rc::new(RefCell::new(BTreeMap::new()));
+    let ota_followers = ota::shared(Vec::new());
+    let ota_updates = ota::shared(BTreeMap::new());
     let (apply_jobs, apply_jobs_rx) = async_channel::unbounded();
     let ota_events = ota::events(ota_followers.clone(), ota_updates.clone(), apply_jobs);
     let ota = OtaProvider::new(ota, {
         let ota_events = ota_events.clone();
-        Box::new(move |event| ota_events(event)) as Box<dyn Fn(OtaEvent)>
+        Box::new(move |event| ota_events(event)) as Box<dyn OtaEventFn>
     });
 
     let (sub_jobs, sub_jobs_rx) = async_channel::unbounded();
@@ -850,49 +876,63 @@ async fn run<'a, C, S, O, N, M>(
     #[cfg(not(feature = "ble"))]
     let (send, recv) = (network, network);
 
-    let mut pump = pin!(matter.run(&crypto, send, recv, NoNetwork));
-    let mut ops = pin!(ctx.run_ops(service));
-    let mut subs = pin!(ctx.run_subscriptions(sub_jobs_rx));
-    let mut applies = pin!(ctx.run_apply_jobs(apply_jobs_rx));
-    let mut taken = pin!(ctx.run_check_ins(check_ins_rx));
-    let mut keep_awake = pin!(ctx.run_stay_awake());
-    let mut health_checks = pin!(ctx.run_health_checks());
+    let crypto = &crypto;
+    let pump: Task<'_> = Box::pin(async move {
+        let r = matter.run(crypto, send, recv, NoNetwork).await;
+        error!("service: transport pump exited: {r:?}");
+    });
     // Operational resolves (re-addressing a listed device over CASE) need it;
     // without it the rest still works.
-    let mut mdns = pin!(async {
-        if let Err(e) = mdns.run(matter, &crypto).await {
+    let mdns = &mut mdns;
+    let mdns: Task<'_> = Box::pin(async move {
+        if let Err(e) = mdns.run(matter, crypto).await {
             error!("service: mDNS backend exited: {e:?}");
         }
         core::future::pending::<()>().await
     });
+
+    let ctx = &ctx;
+    let main = async move {
+        let mut ops = pin!(ctx.run_ops(service));
+        let mut subs = pin!(ctx.run_subscriptions(sub_jobs_rx));
+        let mut applies = pin!(ctx.run_apply_jobs(apply_jobs_rx));
+        let mut taken = pin!(ctx.run_check_ins(check_ins_rx));
+        let mut keep_awake = pin!(ctx.run_stay_awake());
+        let mut health_checks = pin!(ctx.run_health_checks());
+
+        match select(
+            &mut ops,
+            select3(
+                &mut subs,
+                &mut applies,
+                select3(&mut taken, &mut keep_awake, &mut health_checks),
+            ),
+        )
+        .await
+        {
+            Either::First(()) => info!("service: every handle dropped, exiting"),
+            Either::Second(Either3::First(())) => info!("service: subscription driver exited"),
+            Either::Second(Either3::Second(())) => info!("service: OTA apply driver exited"),
+            Either::Second(Either3::Third(Either3::First(()))) => {
+                info!("service: Check-In driver exited")
+            }
+            Either::Second(Either3::Third(Either3::Second(never) | Either3::Third(never))) => {
+                match never {}
+            }
+        }
+    };
+
     // What devices reach on us: our OTA Provider, the subscription reports and
     // the Check-Ins.
-    let mut node = pin!(ctx.controller.run_node(&ctx.reports, &ctx.ota, &check_ins));
-
-    match select4(
-        &mut pump,
-        &mut ops,
-        select3(
-            &mut subs,
-            &mut applies,
-            select3(&mut taken, &mut keep_awake, &mut health_checks),
-        ),
-        select(&mut mdns, &mut node),
-    )
-    .await
-    {
-        Either4::First(r) => error!("service: transport pump exited: {r:?}"),
-        Either4::Second(()) => info!("service: every handle dropped, exiting"),
-        Either4::Third(Either3::First(())) => info!("service: subscription driver exited"),
-        Either4::Third(Either3::Second(())) => info!("service: OTA apply driver exited"),
-        Either4::Third(Either3::Third(Either3::First(()))) => {
-            info!("service: Check-In driver exited")
-        }
-        Either4::Third(Either3::Third(Either3::Second(never) | Either3::Third(never))) => {
-            match never {}
-        }
-        Either4::Fourth(Either::First(())) => {}
-        Either4::Fourth(Either::Second(r)) => error!("service: controller node exited: {r:?}"),
+    if let Err(e) = ctx.controller.run_node(
+        &ctx.reports,
+        &ctx.ota,
+        &check_ins,
+        runner,
+        Vec::from([pump, mdns]),
+        main,
+    ) {
+        error!("service: controller node cannot start: {e:?}");
     }
 }
 

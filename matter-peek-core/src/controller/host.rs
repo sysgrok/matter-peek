@@ -1,12 +1,15 @@
 //! Running the controller on this host (`std`): its thread, UDP socket and
 //! store directory, which is locked (one controller per store).
 
+use core::future::Future;
 use core::net::SocketAddr;
+use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use std::fs::{File, TryLockError};
 use std::net::UdpSocket;
@@ -14,6 +17,8 @@ use std::path::{Path, PathBuf};
 
 use async_io::Async;
 use directories::ProjectDirs;
+use embassy_futures::select::{select, select_slice};
+use rand::rngs::StdRng;
 
 use log::{error, info, warn};
 
@@ -26,7 +31,7 @@ use rs_matter::Matter;
 use crate::api::{MatterPeek, PeekConfig, PeekError, Service, StoreArchive};
 use crate::mdns::HostMdns;
 use crate::persist::kv_buf;
-use crate::service::{self, Platform};
+use crate::service::{self, Platform, Runner, Task};
 
 use dir_ota::DirOtaStore;
 
@@ -43,23 +48,12 @@ const LOCK_FILE: &str = "lock";
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 impl MatterPeek {
     /// Start a controller on its own thread, keeping its state in the store
-    /// directory of `config`. Fails if another controller holds that store.
-    /// The controller stops once every handle to it is dropped.
+    /// directory of `config`; all of it runs on that thread (see
+    /// [`MatterPeek::start_with`] for more). Fails if another controller holds
+    /// that store. The controller stops once every handle to it is dropped.
     #[cfg_attr(feature = "uniffi", uniffi::constructor)]
     pub fn start(config: PeekConfig) -> Result<Arc<Self>, PeekError> {
-        let store = Store::lock(config.store_dir.as_deref())?;
-        import::apply(&store.dir);
-
-        let (mut peek, service) = MatterPeek::new();
-        peek.store_dir = Some(store.dir.clone());
-
-        std::thread::Builder::new()
-            .name("matter-peek".into())
-            .stack_size(THREAD_STACK_SIZE)
-            .spawn(move || async_io::block_on(Box::pin(run(service, store, config))))
-            .map_err(|e| PeekError::failed(format!("cannot start the controller: {e}")))?;
-
-        Ok(Arc::new(peek))
+        Self::start_with(config, Joined)
     }
 
     /// Replace this controller's store with `archive` (see
@@ -76,6 +70,45 @@ impl MatterPeek {
         self.import_check().await?;
 
         import::stage(dir, &archive)
+    }
+}
+
+impl MatterPeek {
+    /// [`MatterPeek::start`], with `runner` running the controller's futures
+    /// from its thread: e.g. on an executor of the host's, on more threads.
+    pub fn start_with<R>(config: PeekConfig, runner: R) -> Result<Arc<Self>, PeekError>
+    where
+        R: Runner + Send + 'static,
+    {
+        let store = Store::lock(config.store_dir.as_deref())?;
+        import::apply(&store.dir);
+
+        let (mut peek, service) = MatterPeek::new();
+        peek.store_dir = Some(store.dir.clone());
+
+        std::thread::Builder::new()
+            .name("matter-peek".into())
+            .stack_size(THREAD_STACK_SIZE)
+            .spawn(move || run(service, store, config, runner))
+            .map_err(|e| PeekError::failed(format!("cannot start the controller: {e}")))?;
+
+        Ok(Arc::new(peek))
+    }
+}
+
+/// Runs all of the controller in one future, on the thread it is called on.
+pub struct Joined;
+
+impl Runner for Joined {
+    fn run<'a>(self, mut tasks: Vec<Task<'a>>, main: impl Future<Output = ()> + 'a) {
+        let tasks = async {
+            if tasks.is_empty() {
+                core::future::pending::<()>().await;
+            }
+            select_slice(Pin::new(&mut tasks[..])).await;
+        };
+
+        async_io::block_on(select(Box::pin(main), tasks));
     }
 }
 
@@ -119,15 +152,18 @@ impl Store {
     }
 }
 
-/// Run the service on this host until every handle is dropped.
-async fn run(service: Service, store: Store, config: PeekConfig) {
+/// Run the service on this host with `runner`, until every handle is dropped.
+fn run<R: Runner>(service: Service, store: Store, config: PeekConfig, runner: R) {
     info!("host: store at {}", store.dir.display());
 
     let socket = match bind_socket() {
         Ok(socket) => socket,
         Err(e) => {
             error!("host: cannot bind the UDP socket: {e}");
-            service::refuse_all(service, PeekError::failed("the controller has no network")).await;
+            runner.run(
+                Vec::new(),
+                service::refuse_all(service, PeekError::failed("the controller has no network")),
+            );
             return;
         }
     };
@@ -148,7 +184,7 @@ async fn run(service: Service, store: Store, config: PeekConfig) {
 
     let platform = Platform {
         matter,
-        crypto: default_crypto(rand::rng(), DAC_PRIVKEY),
+        crypto: default_crypto(rand::make_rng::<StdRng>(), DAC_PRIVKEY),
         kv: DirKvBlobStore::new(store.dir.clone()),
         kv_buf,
         ota: DirOtaStore::new(store.dir.join("ota")),
@@ -156,13 +192,19 @@ async fn run(service: Service, store: Store, config: PeekConfig) {
         mdns: HostMdns,
     };
 
-    service.run(platform, &config).await;
+    service.run(platform, &config, runner);
 }
 
 /// An ephemeral dual-stack IPv6 UDP socket: rs-matter canonicalizes
-/// IPv4-mapped peer addresses, so it serves IPv4 peers too.
+/// IPv4-mapped peer addresses, so it serves IPv4 peers too. Dual-stack set
+/// explicitly: Windows makes IPv6 sockets IPv6-only by default.
 fn bind_socket() -> std::io::Result<Async<UdpSocket>> {
-    let socket = Async::<UdpSocket>::bind(SocketAddr::from(([0u16; 8], 0)))?;
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_only_v6(false)?;
+    socket.bind(&SocketAddr::from(([0u16; 8], 0)).into())?;
+    let socket = Async::new(UdpSocket::from(socket))?;
     info!(
         "host: controller bound on {}",
         socket.get_ref().local_addr()?

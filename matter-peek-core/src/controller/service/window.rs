@@ -10,6 +10,7 @@ use log::info;
 
 use rs_matter::crypto::Crypto;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::{CommissioningWindow, PeekError, WindowStatus};
 use crate::ota::OtaImageStore;
@@ -31,7 +32,7 @@ pub(super) struct OpenedWindow {
     until: Instant,
 }
 
-impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
+impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// Open a commissioning window on the device, unless one is open: ours is
     /// answered again, another controller's refused, as is a device with no
     /// free fabric.

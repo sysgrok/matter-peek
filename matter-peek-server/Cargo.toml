@@ -13,8 +13,9 @@ build = "build.rs"
 include = ["/src", "/build.rs", "/web-dist", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
 [dependencies]
-# The API and its controller; the executable picks the mDNS backend.
-matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", default-features = false, features = ["std"] }
+# The API and its controller, whose tasks run on several threads (`send-sync`);
+# the executable picks the mDNS backend.
+matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", default-features = false, features = ["std", "send-sync"] }
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true }
 log = { workspace = true }

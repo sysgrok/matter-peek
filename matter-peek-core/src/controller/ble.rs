@@ -2,9 +2,10 @@
 //!
 //! This is the counterpart to the IP commissioning path in [`crate::matter`]
 //! for devices that are only reachable over Bluetooth Low Energy until they have
-//! joined their operational (Thread / Wi-Fi) network. It drives rs-matter's
-//! GATT-Central BTP transport (`rs_matter::transport::network::btp::gatt::bluez`)
-//! and adds the network-commissioning step the IP path doesn't need.
+//! joined their operational (Thread / Wi-Fi) network. It drives a GATT Central
+//! over the host's Bluetooth stack (`bluez` on Linux, `winrt` on Windows), which
+//! carries rs-matter's BTP transport, and adds the network-commissioning step the
+//! IP path doesn't need.
 //!
 //! The flow has two phases over the two sides of the **same** `Matter` stack's
 //! transport, which the caller runs over both UDP and BTP (see [`commission_ble`]):
@@ -55,17 +56,33 @@ use rs_matter::im::client::ImClient as _;
 use rs_matter::onboard::{CommissionOptions, CommissionResult, Commissioner};
 use rs_matter::tlv::OctetStr;
 use rs_matter::transport::exchange::Exchange;
-use rs_matter::transport::network::btp::bluez;
 use rs_matter::transport::network::btp::Btp;
 use rs_matter::transport::network::mdns::CommissionableFilter;
 use rs_matter::transport::network::{Address, BtAddr};
 use rs_matter::transport::session::SessionMode;
-use rs_matter::utils::zbus::Connection;
 use rs_matter::Matter;
 
 use crate::ca::ControllerCa;
 use crate::matter::remove_sessions;
 use crate::model::{CommissionOutcome, DeviceHandle};
+
+#[cfg(all(feature = "ble-bluez", target_os = "linux"))]
+use bluez as stack;
+#[cfg(all(feature = "ble-winrt", windows))]
+use winrt as stack;
+
+#[cfg(all(feature = "ble-bluez", target_os = "linux"))]
+mod bluez;
+#[cfg(all(feature = "ble-winrt", windows))]
+mod winrt;
+
+#[cfg(not(any(
+    all(feature = "ble-bluez", target_os = "linux"),
+    all(feature = "ble-winrt", windows)
+)))]
+compile_error!(
+    "`ble` needs the host's Bluetooth stack: `ble-bluez` on Linux, `ble-winrt` on Windows"
+);
 
 /// Fail-safe duration armed for the whole BLE→Thread flow.
 ///
@@ -111,14 +128,10 @@ pub struct BleDevice {
 /// The devices advertising as commissionable over Bluetooth LE that match
 /// `filter`, scanning for `secs` seconds.
 pub async fn scan_ble(filter: &CommissionableFilter, secs: u16) -> Result<Vec<BleDevice>, Error> {
-    let connection = Connection::system()
-        .await
-        .map_err(|_| Error::from(ErrorCode::NoNetworkInterface))?;
-
     let mut found = Vec::new();
 
     // Every match is collected, so the scan only ends with its time limit.
-    let _ = bluez::scan(&connection, None, filter, Some(secs), |addr, adv| {
+    let _ = stack::scan(filter, Some(secs), |addr, adv| {
         found.push(BleDevice {
             addr,
             discriminator: adv.discriminator(),
@@ -132,47 +145,11 @@ pub async fn scan_ble(filter: &CommissionableFilter, secs: u16) -> Result<Vec<Bl
 
     Ok(found)
 }
-/// Why commissioning over BLE cannot run now, if it cannot: BlueZ does not run,
-/// it has no Bluetooth adapter, or every adapter is off.
+
+/// Why commissioning over BLE cannot run now, if it cannot: the host's Bluetooth
+/// stack does not run, it has no adapter, or the adapter is off.
 pub(crate) async fn unavailable() -> Option<alloc::string::String> {
-    use rs_matter::utils::zbus::fdo::ObjectManagerProxy;
-    use rs_matter::utils::zbus::zvariant::OwnedValue;
-
-    use crate::dbus::{has_owner, system_bus};
-
-    let Ok(bus) = system_bus().await else {
-        return Some("the system D-Bus, where BlueZ is, cannot be reached".into());
-    };
-    if !has_owner(&bus, "org.bluez").await {
-        return Some("BlueZ is not installed, or does not run".into());
-    }
-
-    let objects = match ObjectManagerProxy::new(&bus, "org.bluez", "/").await {
-        Ok(manager) => manager.get_managed_objects().await.ok(),
-        Err(_) => None,
-    };
-    let Some(objects) = objects else {
-        return Some("BlueZ does not answer".into());
-    };
-
-    let adapters: Vec<bool> = objects
-        .values()
-        .filter_map(|interfaces| interfaces.get("org.bluez.Adapter1"))
-        .map(|adapter| {
-            adapter
-                .get("Powered")
-                .and_then(|on| bool::try_from(OwnedValue::clone(on)).ok())
-                .unwrap_or(false)
-        })
-        .collect();
-
-    if adapters.is_empty() {
-        Some("there is no Bluetooth adapter".into())
-    } else if !adapters.contains(&true) {
-        Some("the Bluetooth adapter is off".into())
-    } else {
-        None
-    }
+    stack::unavailable().await
 }
 
 /// Commission a device that is currently only reachable over BLE, provisioning it
@@ -214,24 +191,15 @@ pub async fn commission_ble<C: Crypto>(
     device_node_id: u64,
     creds: Option<&WirelessCreds<'_>>,
 ) -> Result<CommissionOutcome, Error> {
-    let connection = Connection::system()
-        .await
-        .map_err(|_| Error::from(ErrorCode::NoNetworkInterface))?;
-
     // ---- Discovery: find the device's commissionable BLE advertisement. --------
-    // Also when its address is known: the GATT connect needs BlueZ to have seen it.
+    // Also when its address is known: the GATT connect needs the Bluetooth stack
+    // to have seen it.
     info!("BLE commission: scanning for a commissionable device (filter: {filter:?})");
 
-    let addr = bluez::scan(
-        &connection,
-        None,
-        filter,
-        Some(SCAN_TIMEOUT_SECS),
-        |found, adv| {
-            info!("BLE commission: found candidate {found} (adv: {adv:?})");
-            addr.is_none_or(|addr| addr == found).then_some(found)
-        },
-    )
+    let addr = stack::scan(filter, Some(SCAN_TIMEOUT_SECS), |found, adv| {
+        info!("BLE commission: found candidate {found} (adv: {adv:?})");
+        addr.is_none_or(|addr| addr == found).then_some(found)
+    })
     .await?;
 
     info!("BLE commission: using device {addr}");
@@ -250,8 +218,8 @@ pub async fn commission_ble<C: Crypto>(
     btp.set_initiator(true);
 
     let phase1 = {
-        // The GATT Central (BlueZ side); the caller's transport pumps `btp`.
-        let mut central = pin!(bluez::run_central(&connection, None, addr, btp));
+        // The GATT Central; the caller's transport pumps `btp`.
+        let mut central = pin!(stack::run_central(addr, btp));
 
         // Set once `ConnectNetwork` is sent: the device may leave BLE from then on.
         let joining = Cell::new(false);

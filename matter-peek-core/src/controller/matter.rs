@@ -515,19 +515,33 @@ impl<'a, C: Crypto> Controller<'a, C> {
     }
 
     /// Serve what devices reach on us: the OTA Provider of `ota`, the reports of
-    /// the subscriptions using `reports`, and the Check-Ins, to `check_ins`. See
-    /// [`crate::node::run`].
-    pub async fn run_node<P>(
-        &self,
-        reports: &crate::subscribe::Reports,
-        ota: &P,
-        check_ins: &async_channel::Sender<Vec<u8>>,
+    /// the subscriptions using `reports`, and the Check-Ins, to `check_ins`;
+    /// with `runner`, beside `tasks` and `main`. See [`crate::node::run`].
+    pub fn run_node<'r, P, R>(
+        &'r self,
+        reports: &'r crate::subscribe::Reports,
+        ota: &'r P,
+        check_ins: &'r async_channel::Sender<Vec<u8>>,
+        runner: R,
+        tasks: Vec<crate::service::Task<'r>>,
+        main: impl core::future::Future<Output = ()> + 'r,
     ) -> Result<(), Error>
     where
         P: rs_matter::dm::clusters::ota_prov::OtaImagesRegistry
-            + rs_matter::dm::clusters::ota_prov::OtaImages,
+            + rs_matter::dm::clusters::ota_prov::OtaImages
+            + rs_matter::utils::sync::MaybeSendSync,
+        R: crate::service::Runner,
     {
-        crate::node::run(self.matter, self.crypto, reports, ota, check_ins).await
+        crate::node::run(
+            self.matter,
+            self.crypto,
+            reports,
+            ota,
+            check_ins,
+            runner,
+            tasks,
+            main,
+        )
     }
 
     /// Announce us to the device as its OTA Provider, with an update for it: it

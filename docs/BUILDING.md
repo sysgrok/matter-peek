@@ -89,8 +89,8 @@ RUSTFLAGS="-C target-feature=+crt-static" \
 cargo xwin build --profile dist --target x86_64-pc-windows-msvc -p matter-peek-app
 ```
 
-On Windows, both use the builtin mDNS backend, and there is no Bluetooth
-commissioning.
+On Windows, both use the builtin mDNS backend, and Windows' own Bluetooth LE
+API (WinRT) for Bluetooth commissioning.
 
 ## Running from the source tree
 

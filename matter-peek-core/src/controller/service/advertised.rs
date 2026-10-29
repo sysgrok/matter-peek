@@ -14,6 +14,7 @@ use rs_matter::crypto::{CanonPkcPublicKeyRef, Crypto};
 use rs_matter::fabric::Fabric;
 use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::Address;
+use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::{AdvertisedDevice, AdvertisedFabric, DeviceFabric, PeekError};
 use crate::ota::OtaImageStore;
@@ -23,7 +24,7 @@ use super::{failed, Ctx};
 /// How long reading the fabrics of a listed device may take.
 const FABRICS_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
+impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// The commissioned devices the network advertises, on our fabrics or
     /// others', but ourselves. A device on several fabrics advertises on each
     /// from the same addresses, so its nodes are grouped by them.

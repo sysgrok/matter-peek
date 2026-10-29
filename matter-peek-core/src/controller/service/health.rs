@@ -13,6 +13,7 @@ use log::info;
 
 use rs_matter::crypto::Crypto;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::{HealthCheck, PeekError};
 use crate::health;
@@ -75,7 +76,7 @@ impl HealthChecks {
     }
 }
 
-impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
+impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// Check the health of a listed device, and note it.
     pub(super) async fn check_health(&self, node_id: u64) -> Result<HealthCheck, PeekError> {
         let dev = self.lookup_device(node_id)?;

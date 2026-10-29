@@ -21,6 +21,7 @@ use rs_matter::dm::clusters::decl::icd_management::OperatingModeEnum;
 use rs_matter::dm::clusters::icd_mgmt::IcdAdvertisement;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::sync::MaybeSend;
 use rs_matter::Matter;
 
 use crate::ca::{CaTier, ControllerCa};
@@ -105,7 +106,7 @@ impl OurFabrics {
     /// one, as the default named [`FIRST_NAME`] otherwise.
     ///
     /// Precondition: `matter.startup` has loaded rs-matter's fabrics.
-    pub fn load<C: Crypto, S: KvBlobStore>(
+    pub fn load<C: Crypto, S: KvBlobStore + MaybeSend>(
         crypto: &C,
         matter: &Matter<'_>,
         store: &ControllerStore<'_, S>,
@@ -202,7 +203,7 @@ impl OurFabrics {
 
     /// Create a fabric named `name`, with a root CA of its own and a random
     /// fabric ID.
-    pub fn create<C: Crypto, S: KvBlobStore>(
+    pub fn create<C: Crypto, S: KvBlobStore + MaybeSend>(
         &mut self,
         crypto: &C,
         matter: &Matter<'_>,
@@ -249,7 +250,7 @@ impl OurFabrics {
     }
 
     /// Rename fabric `fab_idx`.
-    pub fn rename<S: KvBlobStore>(
+    pub fn rename<S: KvBlobStore + MaybeSend>(
         &mut self,
         store: &ControllerStore<'_, S>,
         fab_idx: NonZeroU8,
@@ -276,7 +277,7 @@ impl OurFabrics {
     }
 
     /// Make fabric `fab_idx` the default.
-    pub fn set_default<S: KvBlobStore>(
+    pub fn set_default<S: KvBlobStore + MaybeSend>(
         &mut self,
         store: &ControllerStore<'_, S>,
         fab_idx: NonZeroU8,
@@ -289,7 +290,7 @@ impl OurFabrics {
 
     /// Delete fabric `fab_idx`: our fabric, its sessions and its CA. Not the
     /// default.
-    pub fn delete<S: KvBlobStore>(
+    pub fn delete<S: KvBlobStore + MaybeSend>(
         &mut self,
         matter: &Matter<'_>,
         store: &ControllerStore<'_, S>,
@@ -349,7 +350,10 @@ impl OurFabrics {
         Ok(name.to_string())
     }
 
-    fn save<S: KvBlobStore>(&self, store: &ControllerStore<'_, S>) -> Result<(), Error> {
+    fn save<S: KvBlobStore + MaybeSend>(
+        &self,
+        store: &ControllerStore<'_, S>,
+    ) -> Result<(), Error> {
         let records: Vec<FabricRecord> =
             self.fabrics.iter().map(|fabric| fabric.record()).collect();
 

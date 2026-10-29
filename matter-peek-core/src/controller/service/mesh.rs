@@ -6,6 +6,7 @@ use embassy_time::{Duration, Instant};
 
 use rs_matter::crypto::Crypto;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::{BorderRouter, FabricRef, NetworkKind, PeekError, ThreadMesh, UnreadDevice};
 use crate::explain::describe;
@@ -17,7 +18,7 @@ use super::Ctx;
 /// How long a border router stays on the map unseen: a browse may miss one.
 const BORDER_ROUTERS_KEPT: Duration = Duration::from_secs(600);
 
-impl<C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'_, C, S, O> {
+impl<C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'_, C, S, O> {
     /// Read the networking of our Thread devices on `fabric`, one after
     /// another, the Wi-Fi channels of our Wi-Fi devices there, and what the LAN
     /// advertises, into the mesh. Devices known to be offline, or asleep, are not

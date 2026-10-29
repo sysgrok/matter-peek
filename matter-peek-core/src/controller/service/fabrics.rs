@@ -11,6 +11,7 @@ use log::{info, warn};
 
 use rs_matter::crypto::Crypto;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::{FabricDeletion, FabricInfo, FabricRef, PeekError};
 use crate::fabrics::OurFabric;
@@ -18,7 +19,7 @@ use crate::ota::OtaImageStore;
 
 use super::Ctx;
 
-impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
+impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// Our fabrics, with the devices listed on each.
     pub(super) fn fabric_infos(&self) -> Vec<FabricInfo> {
         let devices = self.listed_devices();

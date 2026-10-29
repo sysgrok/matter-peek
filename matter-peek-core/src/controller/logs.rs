@@ -37,6 +37,7 @@ use rs_matter::dm::EndptId;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::respond::Responder;
 use rs_matter::transport::exchange::Exchange;
+use rs_matter::utils::sync::blocking::Mutex;
 use rs_matter::utils::sync::Notification;
 use rs_matter::Matter;
 
@@ -69,14 +70,14 @@ impl From<LogIntent> for IntentEnum {
 /// completion. (This is the seam for the future consent-gated cloud upload:
 /// swap the in-memory `Vec` for a streaming HTTPS sink.)
 struct CollectingReceiver {
-    data: RefCell<Vec<u8>>,
+    data: Mutex<RefCell<Vec<u8>>>,
     done: Notification,
 }
 
 impl CollectingReceiver {
     fn new() -> Self {
         Self {
-            data: RefCell::new(Vec::new()),
+            data: Mutex::new(RefCell::new(Vec::new())),
             done: Notification::new(),
         }
     }
@@ -94,7 +95,8 @@ impl DiagLogsReceiver for CollectingReceiver {
             if n == 0 {
                 break;
             }
-            self.data.borrow_mut().extend_from_slice(&buf[..n]);
+            self.data
+                .lock(|data| data.borrow_mut().extend_from_slice(&buf[..n]));
         }
         self.done.notify();
         Ok(())
@@ -192,7 +194,7 @@ async fn request_and_collect<C: Crypto>(
     )
     .await
     .map_err(|_| Error::from(ErrorCode::RxTimeout))?;
-    let bytes = receiver.data.borrow().clone();
+    let bytes = receiver.data.lock(|data| data.borrow().clone());
     info!("retrieved {} bytes over BDX", bytes.len());
     Ok(bytes)
 }

@@ -5,16 +5,17 @@
 //! from), OTA images over BDX, the reports of our health subscriptions, which
 //! [`Reports`] routes to them, the Check-Ins of the devices that sleep, and
 //! CASE, for devices that open a session to us (a time sync client does). A single responder matters: several would race
-//! for the same inbound exchanges.
+//! for the same inbound exchanges. Each of its handlers is a task of its own.
 
+use core::future::Future;
 use core::num::NonZeroU8;
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Timer};
 
-use log::info;
+use log::{error, info};
 
 use rs_matter::acl::{AclEntry, AuthMode, Target};
 use rs_matter::bdx::{Bdx, PROTO_ID_BDX};
@@ -36,10 +37,12 @@ use rs_matter::persist::{DummyKvBlobStore, KvBlobStore};
 use rs_matter::respond::{ChainedExchangeHandler, Responder};
 use rs_matter::sc::{SecureChannel, PROTO_ID_SECURE_CHANNEL};
 use rs_matter::transport::exchange::MatterBuffers;
+use rs_matter::utils::sync::{MaybeSend, MaybeSendSync};
 use rs_matter::{clusters, devices, with, Matter};
 
 use crate::icd::CheckInReceiver;
 use crate::persist::ControllerStore;
+use crate::service::{Runner, Task};
 use crate::subscribe::Reports;
 use crate::time;
 
@@ -47,6 +50,9 @@ use crate::time;
 const OTA_PROVIDER_CLUSTER: Cluster<'static> = ota_prov::FULL_CLUSTER.with_attrs(with!(required));
 /// The Time Synchronization cluster, with no features: our clock.
 const TIME_SYNC_CLUSTER: Cluster<'static> = time_sync::cluster::<0>();
+
+/// How many exchanges our node handles at once.
+const HANDLERS: usize = 4;
 
 /// How often our clock is checked against the host's.
 const CLOCK_CHECK_SECS: u64 = 30;
@@ -71,18 +77,25 @@ const NODE: Node<'static> = Node {
     }],
 };
 
-/// Serve the controller's node until an error: the OTA Provider of `ota`, our
-/// clock and the subscription `reports`; the Check-Ins go to `check_ins`.
-pub async fn run<C, P>(
-    matter: &Matter<'_>,
+/// Serve the controller's node: the OTA Provider of `ota`, our clock and the
+/// subscription `reports`; the Check-Ins go to `check_ins`. `runner` runs its
+/// handlers, each as a task of its own, with `tasks` and `main`, until `main`
+/// or a task ends.
+#[allow(clippy::too_many_arguments)]
+pub fn run<'a, C, P, R>(
+    matter: &'a Matter<'a>,
     crypto: C,
-    reports: &Reports,
-    ota: &P,
-    check_ins: &async_channel::Sender<Vec<u8>>,
+    reports: &'a Reports,
+    ota: &'a P,
+    check_ins: &'a async_channel::Sender<Vec<u8>>,
+    runner: R,
+    tasks: Vec<Task<'a>>,
+    main: impl Future<Output = ()> + 'a,
 ) -> Result<(), Error>
 where
-    C: Crypto + Copy,
-    P: OtaImagesRegistry + OtaImages,
+    C: Crypto + Copy + 'a,
+    P: OtaImagesRegistry + OtaImages + MaybeSendSync,
+    R: Runner,
 {
     let mut rand = crypto.weak_rand()?;
 
@@ -116,31 +129,43 @@ where
         &state,
     );
 
-    let bdx_buffers: MatterBuffers<2> = MatterBuffers::new();
-
     let handler = ChainedExchangeHandler::new(
         PROTO_ID_SECURE_CHANNEL,
         SecureChannel::new_with_handler(crypto, &im, CheckInReceiver(check_ins)),
         ChainedExchangeHandler::new(
             PROTO_ID_BDX,
-            Bdx::new(OtaBdxHandler::new(&bdx_buffers, ota)),
+            Bdx::new(OtaBdxHandler::new(MatterBuffers::<2>::new(), ota)),
             &im,
         ),
     );
 
     let responder = Responder::new("matter-peek", handler, matter, 0);
 
-    match select(responder.run::<4>(), keep_time(matter, &im)).await {
-        Either::First(result) => result,
-        Either::Second(never) => match never {},
+    let mut tasks: Vec<Task<'_>> = tasks;
+    for id in 0..HANDLERS {
+        let responder = &responder;
+        tasks.push(Box::pin(async move {
+            if let Err(e) = responder.handle(id).await {
+                error!("node: handler {id} exited: {e:?}");
+            }
+        }));
     }
+    let im = &im;
+    tasks.push(Box::pin(async move {
+        let never = keep_time(matter, im).await;
+        match never {}
+    }));
+
+    runner.run(tasks, main);
+
+    Ok(())
 }
 
 /// Keep our clock, which devices read, on the host's: set it when it drifts
 /// or the host's accuracy changes.
-async fn keep_time(
+async fn keep_time<N: AttrChangeNotifier>(
     matter: &Matter<'_>,
-    notify: &dyn AttrChangeNotifier,
+    notify: &N,
 ) -> core::convert::Infallible {
     let mut served = None;
 
@@ -188,7 +213,7 @@ fn finer(granularity: GranularityEnum) -> GranularityEnum {
 /// Provider cluster, View on our Time Synchronization cluster. An ACL entry for
 /// any CASE peer each, added (and the fabric persisted) unless there already is
 /// one.
-pub fn allow_devices<S: KvBlobStore>(
+pub fn allow_devices<S: KvBlobStore + MaybeSend>(
     matter: &Matter<'_>,
     store: &ControllerStore<'_, S>,
     fab_idx: NonZeroU8,

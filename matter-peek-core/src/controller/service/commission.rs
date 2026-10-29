@@ -14,6 +14,7 @@ use rs_matter::error::Error;
 use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::mdns::CommissionableFilter;
 use rs_matter::transport::network::Address;
+use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::{
     CommissionListener, CommissionResult, CommissionStep, CommissionVia, Discovered,
@@ -43,7 +44,7 @@ enum Reach {
     },
 }
 
-impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
+impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// Browse for commissionable devices, on the network and over BLE.
     pub(super) async fn discover(
         &self,

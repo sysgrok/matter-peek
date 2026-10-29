@@ -34,6 +34,11 @@ controller = [
     "dep:futures-util",
 ]
 
+# The controller's tasks are `Send` (and rs-matter's, `rs-matter/send-sync`),
+# so that a host may run them on several threads, e.g. on a work-stealing
+# executor (`MatterPeek::start_with`). Without it they cost no locking.
+send-sync = ["controller", "rs-matter/send-sync"]
+
 # Run the controller on this host (`MatterPeek::start`): its thread, UDP socket,
 # store directory and OTA image files. Every hosted mDNS backend and `ble` pull
 # it in.
@@ -47,6 +52,7 @@ std = [
     "embassy-time/std",
     "dep:embassy-time-queue-utils",
     "dep:async-io",
+    "dep:socket2",
     "dep:rand",
     "dep:directories",
     "dep:image",
@@ -61,9 +67,13 @@ mdns-resolve = ["std", "rs-matter/zbus"]                       # Linux + systemd
 mdns-astro = ["std", "rs-matter/astro-dnssd"]                  # macOS / iOS (Bonjour)
 mdns-builtin = ["std", "dep:socket2", "dep:nix", "dep:if-addrs"] # fallback / Windows / same-host tests
 
-# BLE commissioning (Commissioner over BTP/GATT Central). Linux + BlueZ over
-# D-Bus, via rs-matter's `zbus` feature (the same one Avahi uses).
-ble = ["std", "rs-matter/zbus"]
+# BLE commissioning (Commissioner over BTP/GATT Central), over the host's
+# Bluetooth stack: a build with `ble` needs one of the two below.
+ble = ["std"]
+# Linux + BlueZ over D-Bus, via rs-matter's `zbus` feature (the same one Avahi uses).
+ble-bluez = ["ble", "rs-matter/zbus"]
+# Windows: its Bluetooth LE API (WinRT).
+ble-winrt = ["ble", "dep:windows"]
 
 # Mobile bindings: `MatterPeek` and the API types, exported over UniFFI.
 uniffi = ["std", "dep:uniffi"]
@@ -101,13 +111,21 @@ directories = { version = "6", optional = true }
 libc = { version = "0.2", optional = true }
 # Picture -> pixels, for reading QR codes; rs-matter does the recognition.
 image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg"] }
-# mDNS builtin backend: raw multicast socket + interface enum.
+# The controller's dual-stack UDP socket; the mDNS builtin backend's raw
+# multicast socket.
 socket2 = { workspace = true, optional = true }
 nix = { workspace = true, optional = true }
 
 # --- Mobile bindings (`uniffi`). ---
 uniffi = { version = "0.32", optional = true, default-features = false }
 
-# mDNS builtin backend on Windows: the interface enum, which `nix` has not.
 [target.'cfg(windows)'.dependencies]
+# mDNS builtin backend on Windows: the interface enum, which `nix` has not.
 if-addrs = { version = "0.15", optional = true }
+# BLE on Windows (`ble-winrt`).
+windows = { version = "0.62", optional = true, features = [
+    "Devices_Bluetooth_Advertisement",
+    "Devices_Bluetooth_GenericAttributeProfile",
+    "Devices_Radios",
+    "Storage_Streams",
+] }

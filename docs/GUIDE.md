@@ -47,10 +47,11 @@ code that the controller shows. `matter-peek advertised` lists the
 commissioned devices that are advertised on the network, both ours and those of
 other controllers.
 
-Bluetooth commissioning needs BlueZ. It works on Linux, but not in the Android
-app. When BlueZ does not run, or there is no Bluetooth adapter or it is off, the
-Commission page shows *Over Bluetooth* disabled, saying which. Builds for other
-systems do not offer it at all. On Android, the app commissions with Google Play services instead: choose
+Bluetooth commissioning uses BlueZ on Linux, and Windows' own Bluetooth LE API
+on Windows (not tried on Windows yet). It does not work in the Android app. When
+BlueZ does not run, or there is no Bluetooth adapter or it is off, the Commission
+page shows *Over Bluetooth* disabled, saying which. Builds for other systems do
+not offer it at all. On Android, the app commissions with Google Play services instead: choose
 *With Google Play services* on the Commission page. Android scans the QR code,
 puts the device on your Wi-Fi or Thread network, and then hands it over to
 matter-peek, which commissions it onto our fabric. This works both with the

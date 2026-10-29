@@ -150,8 +150,8 @@ layer is not used, the linker leaves it out.
 ### The controller
 
 `MatterPeek` is a handle. Each call sends an operation over a channel to the
-**service**, which owns the Matter stack (the stack is not `Send`). The service
-runs the following side by side:
+**service**, which owns the Matter stack. The service runs the following side
+by side:
 - the transport pump (UDP and, with `ble`, BTP, chained on one stack);
 - the mDNS backend, all the time, for operational resolves;
 - our own node: the OTA Provider, the time source, BDX, inbound subscription
@@ -162,14 +162,26 @@ runs the following side by side:
   and a second one is refused;
 - the subscriptions, which are detached, so that they never block operations.
 
+The transport pump, the mDNS backend and each handler of our node (four, and
+the one keeping our clock) are tasks (`Task`) for the host's `Runner`, which may
+run each on any of its threads. The operations, the subscriptions and the
+health checks are one future, run on the thread that runs the service, since
+their state is not `Send`. With the `send-sync` feature the tasks are `Send`
+(and rs-matter is built with its own `send-sync`); without it, they need no
+locking.
+
 The service is `no_std` and generic over what the host provides
 (`api::platform`): the stack, the crypto, the KV store (`KvBlobStore`), the OTA
 image store (`OtaImageStore`), the UDP network (`NetworkSend + NetworkReceive`)
 and the mDNS backend (`Mdns`). A host gets a handle and the service with
-`MatterPeek::new()`, and runs the service with `Service::run(Platform { … })`.
+`MatterPeek::new()`, and runs the service with `Service::run(Platform { … },
+config, runner)`, which returns once every handle has been dropped.
 `MatterPeek::start` (`std`) does this for the current host. It locks the store
 directory (one controller per store), binds the socket, and runs the service on
-its own thread. The mDNS backend is chosen when the service starts, among those
+its own thread, all of it in one future (`Joined`). `MatterPeek::start_with`
+takes another runner: the server's (`matter-peek-server`'s `threads`) runs the
+tasks on a work-stealing executor (`async-executor`), on one thread per core,
+the controller's thread included. The mDNS backend is chosen when the service starts, among those
 the cargo features build in: Avahi if it runs, systemd-resolved if it runs with
 `MulticastDNS=yes`, Bonjour, else rs-matter's own. Whether a daemon runs is
 asked of the D-Bus daemon (`NameHasOwner`) before calling it, since a call
@@ -179,7 +191,8 @@ dropped.
 Below the service, these modules wrap rs-matter's controller side:
 - `matter` (`Controller`): the operations the service builds on;
 - `discovery` and `mdns`: browsing, and the mDNS backends;
-- `ble`: commissioning over Bluetooth LE;
+- `ble`: commissioning over Bluetooth LE, with a GATT central over BlueZ
+  (`ble::bluez`, rs-matter's) or over Windows' Bluetooth LE API (`ble::winrt`);
 - `basic_info`, `diagnostics` and `network`: a device's identity, its health
   and its networks; `netconfig` changes the networks; `health` judges a
   health check;
@@ -573,7 +586,7 @@ device's own setup code, which we do not keep.
 |---|---|
 | Commissioning | `onboard::Commissioner` (`commission`, `complete_via_case`, `disarm_fail_safe`, `end_pase`) |
 | Discovery | `Transport::browse` over the mDNS backends (Avahi, systemd-resolved, Bonjour, builtin) |
-| BLE | `Btp`, BlueZ `scan` / `run_central` |
+| BLE | `Btp`, `AdvData`, BlueZ `scan` / `run_central` (the Windows central is ours, for now) |
 | IM client | `im::client` (read, subscribe, invoke) and the generated cluster clients |
 | Reports to a controller | `ReportDataHandler` |
 | Diagnostic logs | `diag_logs` client and `bdx` |
@@ -606,10 +619,11 @@ with `--no-default-features` (the API types, messages and MCP tools) and with
 
 Linux is supported today. There, the `matter-peek` executable and the app have
 the Avahi, systemd-resolved and builtin mDNS backends, and choose one when they
-start; they use BlueZ for BLE (`ble`). On Windows, both use the builtin mDNS
-backend, which finds its network interface with `if-addrs` there (`nix` is
-Unix-only), and they have no BLE. CI builds them for Windows, but they have not
-been tried on Windows yet. macOS needs the executables to use the Bonjour
+start; they use BlueZ for BLE (`ble-bluez`). On Windows, both use the builtin
+mDNS backend, which finds its network interface with `if-addrs` there (`nix` is
+Unix-only), and Windows' Bluetooth LE API for BLE (`ble-winrt`, through the
+`windows` crate). CI builds them for Windows, but they have not been tried on
+Windows yet. macOS needs the executables to use the Bonjour
 backend (`mdns-astro`) there, and it has no BLE central yet.
 
 ### Mobile

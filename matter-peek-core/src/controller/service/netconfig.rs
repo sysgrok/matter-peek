@@ -9,6 +9,7 @@ use log::{info, warn};
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::net_comm::WirelessCreds;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::{
     NetworkChange, NetworkConfig, NetworkCredentials, NetworkInfo, NetworkKind, PeekError,
@@ -36,7 +37,7 @@ const DEFAULT_SCAN_SECS: u64 = 30;
 /// How often to look for the device while it reconnects.
 const REACH_RETRY_SECS: u64 = 5;
 
-impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
+impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// Make `change` to the networks of the Network Commissioning instance on
     /// `endpoint` of a listed device, and commit it; answers with its networking
     /// after. A change to its connection (connecting elsewhere, new credentials

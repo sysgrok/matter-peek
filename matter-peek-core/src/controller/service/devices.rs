@@ -14,6 +14,7 @@ use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::decl::icd_management::FULL_CLUSTER as ICD_MANAGEMENT_CLUSTER;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::query::{Facts, Known, Query};
 use crate::api::{
@@ -47,7 +48,7 @@ const DECOMMISSION_TIMEOUT_SECS: u64 = 30;
 /// they did not have.
 const THREAD_NAMES_RETRY: Duration = Duration::from_secs(60);
 
-impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
+impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// The listed devices, with `notice` about the operation that produced the
     /// list, if any.
     pub(super) fn list_devices(&self, notice: Option<String>) -> Result<DeviceList, PeekError> {

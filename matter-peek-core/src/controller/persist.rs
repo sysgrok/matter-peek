@@ -28,6 +28,7 @@ use rs_matter::persist::{
 use rs_matter::tlv::{FromTLV, OctetsVec, TLVElement, ToTLV};
 use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::sync::blocking::Mutex;
+use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::agent::{ModelConfig, Think};
 use crate::api::{IcdInfo, IcdMode, PowerKind, ThreadRole};
@@ -86,7 +87,7 @@ pub struct ControllerStore<'a, S> {
     kv: SharedKvBlobStore<'a, S, KV_BUF_LEN>,
 }
 
-impl<'a, S: KvBlobStore> ControllerStore<'a, S> {
+impl<'a, S: KvBlobStore + MaybeSend> ControllerStore<'a, S> {
     /// Wrap a concrete `KvBlobStore` backend (e.g. `DirKvBlobStore` on desktop),
     /// borrowing a caller-owned scratch buffer (`buf`, from [`kv_buf`]).
     pub const fn new(store: S, buf: &'a KvBuf) -> Self {

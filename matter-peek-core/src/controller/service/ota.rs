@@ -4,7 +4,6 @@ use core::cell::RefCell;
 
 use alloc::collections::BTreeMap;
 use alloc::format;
-use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -19,6 +18,8 @@ use log::{info, warn};
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::ota_prov::OtaRequestorId;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::sync::blocking::Mutex;
+use rs_matter::utils::sync::{MaybeSend, MaybeSendSync};
 
 use crate::api::{display, OtaImageInfo, OtaListener, OtaProgress, OtaUpdateInfo, PeekError};
 use crate::model::{DeviceHandle, DiagSet};
@@ -57,6 +58,28 @@ pub(super) struct OtaFollower {
     listener: Arc<dyn OtaListener>,
 }
 
+/// What the OTA Provider's events update, from the node's tasks, and the
+/// service reads.
+pub(super) type Shared<T> = Arc<Mutex<RefCell<T>>>;
+
+/// What the OTA Provider tells of the updates, from the node's tasks.
+pub(super) trait OtaEventFn: Fn(OtaEvent) + MaybeSendSync {}
+
+impl<T: Fn(OtaEvent) + MaybeSendSync> OtaEventFn for T {}
+
+/// The OTA events the OTA Provider tells, from the node's tasks.
+pub(super) type OtaEvents = Arc<dyn OtaEventFn>;
+
+/// A new [`Shared`] `value`.
+pub(super) fn shared<T>(value: T) -> Shared<T> {
+    Arc::new(Mutex::new(RefCell::new(value)))
+}
+
+/// Run `f` on the value of `shared`.
+fn with<T, R>(shared: &Shared<T>, f: impl FnOnce(&mut T) -> R) -> R {
+    shared.lock(|value| f(&mut value.borrow_mut()))
+}
+
 /// The latest OTA update of a device.
 pub(super) struct TrackedUpdate {
     name: Option<String>,
@@ -74,7 +97,7 @@ pub(super) struct ApplyJob {
     since: Instant,
 }
 
-impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
+impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, O> {
     pub(super) fn ota_images(&self) -> Vec<OtaImageInfo> {
         self.ota
             .store()
@@ -205,22 +228,23 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// The latest OTA update of each device, of the last hour.
     pub(super) fn ota_updates(&self) -> Vec<OtaUpdateInfo> {
         let now = Instant::now();
-        let mut updates = self.ota_updates.borrow_mut();
 
-        updates.retain(|_, update| now - update.last < UPDATES_KEPT);
+        with(&self.ota_updates, |updates| {
+            updates.retain(|_, update| now - update.last < UPDATES_KEPT);
 
-        updates
-            .iter()
-            .map(|(node_id, update)| OtaUpdateInfo {
-                node_id: *node_id,
-                name: update.name.clone(),
-                progress: update.progress.clone(),
-                downloaded: update.downloaded,
-                size: update.size,
-                elapsed_secs: (now - update.started).as_secs(),
-                idle_secs: (now - update.last).as_secs(),
-            })
-            .collect()
+            updates
+                .iter()
+                .map(|(node_id, update)| OtaUpdateInfo {
+                    node_id: *node_id,
+                    name: update.name.clone(),
+                    progress: update.progress.clone(),
+                    downloaded: update.downloaded,
+                    size: update.size,
+                    elapsed_secs: (now - update.started).as_secs(),
+                    idle_secs: (now - update.last).as_secs(),
+                })
+                .collect()
+        })
     }
 
     /// Allow the device image `name`, have `progress` follow its update, and
@@ -252,8 +276,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
             name,
         );
 
-        {
-            let mut followers = self.ota_followers.borrow_mut();
+        with(&self.ota_followers, |followers| {
             followers.retain(|follower| follower.node_id != node_id);
             if let Some(listener) = progress {
                 followers.push(OtaFollower {
@@ -262,7 +285,7 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
                     listener,
                 });
             }
-        }
+        });
 
         self.controller
             .announce_ota_provider(dev.handle)
@@ -309,11 +332,11 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
         loop {
             Timer::after(APPLY_POLL).await;
 
-            let progress = self
-                .ota_updates
-                .borrow()
-                .get(&node.node_id)
-                .map(|update| update.progress.clone());
+            let progress = with(&self.ota_updates, |updates| {
+                updates
+                    .get(&node.node_id)
+                    .map(|update| update.progress.clone())
+            });
             match progress {
                 Some(OtaProgress::Applying { version: applying }) if applying == version => {}
                 // As the device said.
@@ -391,13 +414,15 @@ impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
 /// Hand each OTA event to the followers of that update, and track it; an
 /// update that ended loses its followers. A device told to apply an update goes
 /// to `apply_jobs`, to see whether it does.
+// The events are `Send` and `Sync` with `send-sync` only.
+#[cfg_attr(not(feature = "send-sync"), allow(clippy::arc_with_non_send_sync))]
 pub(super) fn events(
-    followers: Rc<RefCell<Vec<OtaFollower>>>,
-    updates: Rc<RefCell<BTreeMap<u64, TrackedUpdate>>>,
+    followers: Shared<Vec<OtaFollower>>,
+    updates: Shared<BTreeMap<u64, TrackedUpdate>>,
     apply_jobs: async_channel::Sender<ApplyJob>,
-) -> Rc<dyn Fn(OtaEvent)> {
-    Rc::new(move |event| {
-        let event = not_applied(&updates.borrow(), event);
+) -> OtaEvents {
+    Arc::new(move |event| {
+        let event = with(&updates, |updates| not_applied(updates, event));
 
         if let OtaEvent::Applying { node, version } = &event {
             let _ = apply_jobs.try_send(ApplyJob {
@@ -407,9 +432,7 @@ pub(super) fn events(
             });
         }
 
-        track(&mut updates.borrow_mut(), &event);
-
-        let mut followers = followers.borrow_mut();
+        with(&updates, |updates| track(updates, &event));
 
         let (node_id, image, progress) = match event {
             OtaEvent::Offered { node, image } => (
@@ -440,26 +463,28 @@ pub(super) fn events(
             }
         };
 
-        for follower in followers.iter() {
-            let follows = match (&node_id, &image) {
-                (Some(node_id), _) => follower.node_id == *node_id,
-                (None, Some(image)) => follower.name == *image,
-                (None, None) => false,
-            };
-            if follows {
-                follower
-                    .listener
-                    .on_progress(follower.node_id, progress.clone());
+        with(&followers, |followers| {
+            for follower in followers.iter() {
+                let follows = match (&node_id, &image) {
+                    (Some(node_id), _) => follower.node_id == *node_id,
+                    (None, Some(image)) => follower.name == *image,
+                    (None, None) => false,
+                };
+                if follows {
+                    follower
+                        .listener
+                        .on_progress(follower.node_id, progress.clone());
+                }
             }
-        }
 
-        if let (
-            Some(node_id),
-            OtaProgress::Applied { .. } | OtaProgress::NotOffered | OtaProgress::Failed { .. },
-        ) = (node_id, &progress)
-        {
-            followers.retain(|follower| follower.node_id != node_id);
-        }
+            if let (
+                Some(node_id),
+                OtaProgress::Applied { .. } | OtaProgress::NotOffered | OtaProgress::Failed { .. },
+            ) = (node_id, &progress)
+            {
+                followers.retain(|follower| follower.node_id != node_id);
+            }
+        })
     })
 }
 

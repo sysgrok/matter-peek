@@ -16,6 +16,7 @@ use matter_peek_core::api::{MatterPeek, PeekConfig};
 
 use crate::chats::Chats;
 use crate::store::{StoreFiles, CHATS_DIR};
+use crate::threads::Threads;
 
 /// A controller and its assistant.
 pub struct Hub {
@@ -47,7 +48,7 @@ impl Hub {
             .store_dir
             .as_ref()
             .map_or_else(data_dir, PathBuf::from);
-        let peek = MatterPeek::start(config).map_err(io::Error::other)?;
+        let peek = MatterPeek::start_with(config, Threads).map_err(io::Error::other)?;
         let chats = Chats::new(peek.clone(), env, dir.join(CHATS_DIR));
         let files = Rc::new(StoreFiles::new(peek.clone(), dir, restart));
 

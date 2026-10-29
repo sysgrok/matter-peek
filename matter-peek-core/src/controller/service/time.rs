@@ -9,6 +9,7 @@ use log::{info, warn};
 use rs_matter::crypto::Crypto;
 use rs_matter::error::Error;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::display::{hex_u64, utc_label, utc_offset_label};
 use crate::api::{DeviceTime, PeekError, TimeSetup, TimeSetupStep};
@@ -18,7 +19,7 @@ use crate::time::{self, DstPeriod, HostZone};
 
 use super::{failed, Ctx};
 
-impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
+impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// The device's clock and time setup.
     pub(super) async fn device_time(&self, node_id: u64) -> Result<DeviceTime, PeekError> {
         let dev = self.lookup_device(node_id)?;

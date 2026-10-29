@@ -11,6 +11,7 @@ use log::info;
 
 use rs_matter::crypto::Crypto;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::sync::MaybeSend;
 use rs_matter::utils::sync::Notification;
 
 use crate::api::{
@@ -207,7 +208,7 @@ pub(super) struct SubJob {
     thread: bool,
 }
 
-impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
+impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// Add `listener` to the subscription of a listed device, starting the
     /// subscription if it is the first; answers with the listener's ID.
     pub(super) async fn watch(

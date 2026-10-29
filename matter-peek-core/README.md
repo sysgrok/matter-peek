@@ -13,10 +13,12 @@ defined in this crate too.
 
 Without default features, the crate is `no_std` + `alloc` and contains only the
 API types; this is what the web UI uses. The `controller` feature adds the
-controller, and `std` runs it on the host. The mDNS backend features
+controller, and `std` runs it on the host. With `send-sync`, the controller's
+tasks are `Send`, so that a host may run them on several threads (the server
+does). The mDNS backend features
 (`mdns-avahi`, which is the default, `mdns-resolve`, `mdns-astro` and
-`mdns-builtin`) and the `ble` feature select how the controller finds and
-reaches devices.
+`mdns-builtin`) and the BLE features (`ble-bluez` on Linux, `ble-winrt` on
+Windows) select how the controller finds and reaches devices.
 
 ## License
 

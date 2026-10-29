@@ -43,10 +43,10 @@ rustyline = "18"
 # `assistant set --api-key`: the key, typed without echo.
 rpassword = "7"
 
-# The API, its controller and its messages: with Avahi's mDNS, and BLE.
+# The API, its controller and its messages: with Avahi's mDNS, and BLE over BlueZ.
 [target.'cfg(not(windows))'.dependencies]
-matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", features = ["ble"] }
+matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", features = ["ble-bluez"] }
 
-# Its own mDNS on Windows, and no BLE.
+# Its own mDNS on Windows, and BLE over Windows' own API.
 [target.'cfg(windows)'.dependencies]
-matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", default-features = false, features = ["mdns-builtin"] }
+matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", default-features = false, features = ["mdns-builtin", "ble-winrt"] }

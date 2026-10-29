@@ -10,6 +10,7 @@ use log::{info, warn};
 use rs_matter::crypto::Crypto;
 use rs_matter::error::ErrorCode;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::PeekError;
 use crate::icd;
@@ -38,7 +39,7 @@ const RENEW_BEFORE_MS: u32 = 10_000;
 /// How often the devices kept awake are looked at.
 const STAY_AWAKE_TICK: Duration = Duration::from_secs(1);
 
-impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
+impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// Keep a listed device awake for a while (see `MatterPeek::wake_device`):
     /// one that sleeps long and sleeps now is waited for first.
     pub(super) async fn wake(&self, node_id: u64) -> Result<u32, PeekError> {

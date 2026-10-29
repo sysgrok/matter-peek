@@ -24,6 +24,7 @@ use rs_matter::crypto::Crypto;
 use rs_matter::error::Error;
 use rs_matter::transport::network::mdns::builtin::{BuiltinMdns, Host};
 use rs_matter::transport::network::{Ipv4Addr, NetworkReceive, NetworkSend};
+use rs_matter::utils::sync::MaybeSend;
 use rs_matter::Matter;
 
 use crate::api::BorderRouter;
@@ -32,22 +33,23 @@ use crate::dbus::{has_owner, system_bus};
 
 /// An mDNS backend for the controller's stack. It carries what it needs (a
 /// D-Bus connection, sockets, …). Only one may run against a stack: two would
-/// compete for its requests.
+/// compete for its requests. It runs as a task of its own, on any thread with
+/// `send-sync`.
 pub trait Mdns {
     /// Serve the browse and resolve requests of `matter`, until an error.
     fn run<C: Crypto>(
         &mut self,
         matter: &Matter<'_>,
         crypto: C,
-    ) -> impl Future<Output = Result<(), Error>>;
+    ) -> impl Future<Output = Result<(), Error>> + MaybeSend;
 }
 
-impl<T: Mdns> Mdns for &mut T {
+impl<T: Mdns + MaybeSend> Mdns for &mut T {
     fn run<C: Crypto>(
         &mut self,
         matter: &Matter<'_>,
         crypto: C,
-    ) -> impl Future<Output = Result<(), Error>> {
+    ) -> impl Future<Output = Result<(), Error>> + MaybeSend {
         (**self).run(matter, crypto)
     }
 }
@@ -273,6 +275,7 @@ impl Mdns for HostBuiltin {
         socket.set_multicast_loop_v4(true)?;
         socket.set_multicast_loop_v6(true)?;
         socket.bind(&MDNS_SOCKET_DEFAULT_BIND_ADDR.into())?;
+        socket.set_nonblocking(true)?;
         let socket = async_io::Async::<UdpSocket>::new_nonblocking(socket.into())?;
 
         socket

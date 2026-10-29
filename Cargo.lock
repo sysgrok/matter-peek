@@ -3220,6 +3220,7 @@ dependencies = [
  "serde_json",
  "socket2 0.5.10",
  "uniffi",
+ "windows",
 ]
 
 [[package]]
@@ -4503,7 +4504,7 @@ dependencies = [
 [[package]]
 name = "rs-matter"
 version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#846073fc78e4bf540203e33c7638dd4751381dca"
+source = "git+https://github.com/project-chip/rs-matter#d223ca48ed51de019233b6e590881080b383a4a2"
 dependencies = [
  "aes",
  "astro-dnssd",
@@ -4566,7 +4567,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-codegen"
 version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#846073fc78e4bf540203e33c7638dd4751381dca"
+source = "git+https://github.com/project-chip/rs-matter#d223ca48ed51de019233b6e590881080b383a4a2"
 dependencies = [
  "convert_case 0.6.0",
  "miette",
@@ -4585,7 +4586,7 @@ dependencies = [
 [[package]]
 name = "rs-matter-macros"
 version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#846073fc78e4bf540203e33c7638dd4751381dca"
+source = "git+https://github.com/project-chip/rs-matter#d223ca48ed51de019233b6e590881080b383a4a2"
 dependencies = [
  "proc-macro-crate 3.5.0",
  "proc-macro2",

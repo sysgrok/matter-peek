@@ -24,6 +24,8 @@ use rs_matter::im::client::ImClient as _;
 use rs_matter::im::{AttrPath, GenericPath};
 use rs_matter::ota::{OtaImageHeader, OTA_IMAGE_DIGEST_SHA256};
 use rs_matter::transport::exchange::Exchange;
+use rs_matter::utils::sync::blocking::Mutex;
+use rs_matter::utils::sync::MaybeSendSync;
 use rs_matter::Matter;
 
 extern crate alloc;
@@ -201,9 +203,9 @@ pub struct OtaProvider<S, F> {
     store: S,
     on_event: F,
     /// The nodes allowed to update, and to which image.
-    allowed: RefCell<Vec<(OtaRequestorId, String)>>,
+    allowed: Mutex<RefCell<Vec<(OtaRequestorId, String)>>>,
     /// The image being downloaded, and its last reported percentage.
-    progress: RefCell<Option<(String, u8)>>,
+    progress: Mutex<RefCell<Option<(String, u8)>>>,
 }
 
 impl<S, F> OtaProvider<S, F>
@@ -216,8 +218,8 @@ where
         Self {
             store,
             on_event,
-            allowed: RefCell::new(Vec::new()),
-            progress: RefCell::new(None),
+            allowed: Mutex::new(RefCell::new(Vec::new())),
+            progress: Mutex::new(RefCell::new(None)),
         }
     }
 
@@ -228,19 +230,23 @@ where
 
     /// Allow `node` to update to image `name`, the next time it asks.
     pub fn allow(&self, node: OtaRequestorId, name: &str) {
-        let mut allowed = self.allowed.borrow_mut();
+        self.allowed.lock(|allowed| {
+            let mut allowed = allowed.borrow_mut();
 
-        allowed.retain(|(allowed, _)| *allowed != node);
-        allowed.push((node, name.to_string()));
+            allowed.retain(|(allowed, _)| *allowed != node);
+            allowed.push((node, name.to_string()));
+        });
     }
 
     /// The image `node` is allowed to update to, if any.
     pub fn allowed(&self, node: OtaRequestorId) -> Option<String> {
-        self.allowed
-            .borrow()
-            .iter()
-            .find(|(allowed, _)| *allowed == node)
-            .map(|(_, name)| name.clone())
+        self.allowed.lock(|allowed| {
+            allowed
+                .borrow()
+                .iter()
+                .find(|(allowed, _)| *allowed == node)
+                .map(|(_, name)| name.clone())
+        })
     }
 
     /// The image `node` may be offered now.
@@ -263,8 +269,8 @@ where
 
 impl<S, F> OtaImagesRegistry for OtaProvider<S, F>
 where
-    S: OtaStore,
-    F: Fn(OtaEvent),
+    S: OtaStore + MaybeSendSync,
+    F: Fn(OtaEvent) + MaybeSendSync,
 {
     async fn query<'b>(
         &self,
@@ -323,9 +329,11 @@ where
         _update_token: &[u8],
         software_version: u32,
     ) {
-        self.allowed
-            .borrow_mut()
-            .retain(|(allowed, _)| *allowed != requestor);
+        self.allowed.lock(|allowed| {
+            allowed
+                .borrow_mut()
+                .retain(|(allowed, _)| *allowed != requestor)
+        });
 
         (self.on_event)(OtaEvent::Applied {
             node: requestor,
@@ -336,8 +344,8 @@ where
 
 impl<S, F> OtaImages for OtaProvider<S, F>
 where
-    S: OtaStore,
-    F: Fn(OtaEvent),
+    S: OtaStore + MaybeSendSync,
+    F: Fn(OtaEvent) + MaybeSendSync,
 {
     async fn size(&self, file_designator: &[u8]) -> Option<u64> {
         self.store.size(core::str::from_utf8(file_designator).ok()?)
@@ -358,15 +366,15 @@ where
         let downloaded = offset + read as u64;
         let percent = (downloaded as u128 * 100 / size.max(1) as u128) as u8;
 
-        let report = {
-            let mut progress = self.progress.borrow_mut();
+        let report = self.progress.lock(|progress| {
+            let mut progress = progress.borrow_mut();
             let report = progress
                 .as_ref()
                 .is_none_or(|(image, last)| image != name || *last != percent);
 
             *progress = Some((name.to_string(), percent));
             report
-        };
+        });
 
         if report {
             (self.on_event)(OtaEvent::Downloaded {
@@ -681,8 +689,25 @@ mod tests {
         file
     }
 
+    /// The events a provider told, in order.
+    struct Events(Mutex<RefCell<Vec<OtaEvent>>>);
+
+    impl Events {
+        fn new() -> Self {
+            Self(Mutex::new(RefCell::new(Vec::new())))
+        }
+
+        fn push(&self, event: OtaEvent) {
+            self.0.lock(|events| events.borrow_mut().push(event));
+        }
+
+        fn all(&self) -> Vec<OtaEvent> {
+            self.0.lock(|events| events.borrow().clone())
+        }
+    }
+
     fn query(
-        provider: &OtaProvider<MemStore, impl Fn(OtaEvent)>,
+        provider: &OtaProvider<MemStore, impl Fn(OtaEvent) + MaybeSendSync>,
         node: OtaRequestorId,
         product_id: u16,
         current_version: u32,
@@ -766,9 +791,9 @@ mod tests {
 
     #[test]
     fn offers_only_the_allowed_image_to_the_allowed_node() {
-        let events = RefCell::new(Vec::new());
+        let events = Events::new();
         let provider = OtaProvider::new(MemStore(vec![image_file(2, "2.0")]), |event| {
-            events.borrow_mut().push(event)
+            events.push(event)
         });
 
         // Not before the user allows it.
@@ -786,20 +811,19 @@ mod tests {
         assert_eq!(query(&provider, NODE, 0x8002, 1), None);
         assert_eq!(query(&provider, NODE, 0x8001, 2), None);
 
-        assert!(events.borrow().contains(&OtaEvent::Offered {
+        let events = events.all();
+        assert!(events.contains(&OtaEvent::Offered {
             node: NODE,
             image: "fff1-8001-2-0c090f.ota".into(),
         }));
-        assert!(events
-            .borrow()
-            .contains(&OtaEvent::NotOffered { node: OTHER }));
+        assert!(events.contains(&OtaEvent::NotOffered { node: OTHER }));
     }
 
     #[test]
     fn applied_ends_the_permission() {
-        let events = RefCell::new(Vec::new());
+        let events = Events::new();
         let provider = OtaProvider::new(MemStore(vec![image_file(2, "2.0")]), |event| {
-            events.borrow_mut().push(event)
+            events.push(event)
         });
 
         provider.allow(NODE, "fff1-8001-2-0c090f.ota");
@@ -807,7 +831,7 @@ mod tests {
 
         assert_eq!(provider.allowed(NODE), None);
         assert_eq!(
-            events.borrow().last(),
+            events.all().last(),
             Some(&OtaEvent::Applied {
                 node: NODE,
                 version: 2,
@@ -818,10 +842,8 @@ mod tests {
     #[test]
     fn serves_the_image_and_reports_progress() {
         let file = image_file(2, "2.0");
-        let events = RefCell::new(Vec::new());
-        let provider = OtaProvider::new(MemStore(vec![file.clone()]), |event| {
-            events.borrow_mut().push(event)
-        });
+        let events = Events::new();
+        let provider = OtaProvider::new(MemStore(vec![file.clone()]), |event| events.push(event));
 
         let name = b"fff1-8001-2-0c090f.ota";
         assert_eq!(block_on(provider.size(name)), Some(file.len() as u64));
@@ -839,7 +861,7 @@ mod tests {
 
         assert_eq!(served, file);
 
-        let events = events.borrow();
+        let events = events.all();
         assert_eq!(
             events.last(),
             Some(&OtaEvent::Downloaded {

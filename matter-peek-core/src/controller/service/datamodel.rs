@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use rs_matter::crypto::Crypto;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::{
     AttributeModel, ClusterModel, CommandModel, CommandOutcome, DeviceModel, DeviceTypeInfo,
@@ -30,7 +31,7 @@ const SERVER_LIST: u32 = 0x0001;
 /// The global attribute listing the commands a cluster accepts.
 const ACCEPTED_COMMAND_LIST: u32 = 0xFFF9;
 
-impl<'a, C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'a, C, S, O> {
+impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, O> {
     /// Read the data model of a listed device under `endpoint` and `cluster`
     /// (an ID or a name), each all if `None`.
     pub(super) async fn read_model(

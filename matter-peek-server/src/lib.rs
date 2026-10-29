@@ -12,7 +12,10 @@
 //! environment sets ([`llm`]).
 //!
 //! It runs on a single-threaded [`LocalExecutor`] (smol/async-io family),
-//! driven by [`block_on`]; the controller runs on its own thread.
+//! driven by [`block_on`]; the controller runs on threads of its own, one per
+//! core ([`threads`]).
+//!
+//! [`threads`]: crate::threads
 //!
 //! [`wire`]: matter_peek_core::api::wire
 
@@ -37,6 +40,7 @@ mod http;
 mod hub;
 pub mod llm;
 mod store;
+mod threads;
 mod web;
 
 thread_local! {

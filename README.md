@@ -53,7 +53,7 @@ No official releases yet.
 |---|---|---|
 | Linux, x86_64 | `matter-peek-x86_64-linux-<time>.tar.gz` | `matter-peek`, static, for any distribution; `matter-peek-app`, for glibc 2.35 or newer (Ubuntu 22.04, Debian 12) with WebKitGTK 4.1 (`libwebkit2gtk-4.1-0`) |
 | Linux, aarch64 (Raspberry Pi) | `matter-peek-aarch64-linux-<time>.tar.gz` | `matter-peek`, static, for any distribution |
-| Windows 10 and 11, x86_64 | `matter-peek-x86_64-windows-<time>.zip` | `matter-peek.exe` and `matter-peek-app.exe`, without Bluetooth commissioning; not tried on Windows yet |
+| Windows 10 and 11, x86_64 | `matter-peek-x86_64-windows-<time>.zip` | `matter-peek.exe` and `matter-peek-app.exe`; not tried on Windows yet |
 | Android 7 and newer, 64-bit ARM | `matter-peek-aarch64-android-<time>.apk` | the app: open the file on the phone to install it |
 
 `<time>` is when the build was made, in UTC (for example `20261028143005`). The Linux and Windows archives also contain a script that installs `matter-peek` as a service: see [Run as a service](#run-as-a-service).

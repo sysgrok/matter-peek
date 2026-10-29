@@ -10,13 +10,14 @@ use base64::Engine as _;
 
 use rs_matter::crypto::Crypto;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::{PeekError, StoreArchive, StoreEntry};
 use crate::ota::OtaImageStore;
 
 use super::{failed, Ctx};
 
-impl<C: Crypto, S: KvBlobStore, O: OtaImageStore> Ctx<'_, C, S, O> {
+impl<C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'_, C, S, O> {
     /// The store's key-value entries, as an archive (with no other files: the
     /// host adds them).
     pub(super) fn export_store(&self) -> Result<StoreArchive, PeekError> {

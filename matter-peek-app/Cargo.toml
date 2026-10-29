@@ -37,10 +37,10 @@ matter-peek-server = { version = "0.1.0", path = "../matter-peek-server" }
 # The project's page, opened in the browser.
 tauri-plugin-opener = "2"
 
-# The core, with each platform's mDNS and, where rs-matter has it, BLE.
+# The core, with each platform's mDNS and, where we have it, BLE.
 # Avahi and BlueZ on Linux (both over D-Bus).
 [target.'cfg(target_os = "linux")'.dependencies]
-matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", features = ["ble"] }
+matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", features = ["ble-bluez"] }
 
 # Its own on Android: no BLE yet (Android's own commissioning is to do it).
 [target.'cfg(target_os = "android")'.dependencies]
@@ -50,6 +50,6 @@ matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", default-fe
 [target.'cfg(target_vendor = "apple")'.dependencies]
 matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", default-features = false, features = ["mdns-astro"] }
 
-# Its own on Windows.
+# Its own on Windows, and BLE over Windows' own API.
 [target.'cfg(windows)'.dependencies]
-matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", default-features = false, features = ["mdns-builtin"] }
+matter-peek-core = { version = "0.1.0", path = "../matter-peek-core", default-features = false, features = ["mdns-builtin", "ble-winrt"] }

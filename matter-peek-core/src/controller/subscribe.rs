@@ -57,6 +57,7 @@ use rs_matter::im::{AttrPath, GenericPath, IMStatusCode};
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::mrp::RetransEntry;
 use rs_matter::transport::session::SessionMode;
+use rs_matter::utils::sync::blocking::Mutex;
 use rs_matter::utils::sync::Notification;
 use rs_matter::Matter;
 
@@ -65,7 +66,7 @@ use crate::diagnostics::{fabric_paths, health_cluster_ids, parse_health, ROOT_EN
 use crate::model::{DeviceHandle, DeviceHealth, DiagSet};
 
 extern crate alloc;
-use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 /// Subscription reporting-interval bounds (seconds). `min = 0` lets the device
@@ -317,19 +318,18 @@ pub enum SubState {
 /// Routes the reports of our health subscriptions to them, by publisher and
 /// subscription ID. Shared by [`subscribe`] and the controller node's
 /// responder ([`crate::node::run`]).
-#[derive(Default)]
 pub struct Reports {
-    slots: RefCell<Vec<Rc<Slot>>>,
+    slots: Mutex<RefCell<Vec<Arc<Slot>>>>,
     /// The devices that reported for no subscription of ours, not yet taken.
-    strays: RefCell<Vec<u64>>,
+    strays: Mutex<RefCell<Vec<u64>>>,
     stray: Notification,
 }
 
 impl Reports {
     pub const fn new() -> Self {
         Self {
-            slots: RefCell::new(Vec::new()),
-            strays: RefCell::new(Vec::new()),
+            slots: Mutex::new(RefCell::new(Vec::new())),
+            strays: Mutex::new(RefCell::new(Vec::new())),
             stray: Notification::new(),
         }
     }
@@ -338,7 +338,7 @@ impl Reports {
     /// have, with no other of it: it is awake now.
     pub async fn wait_stray(&self) -> u64 {
         loop {
-            if let Some(node_id) = self.strays.borrow_mut().pop() {
+            if let Some(node_id) = self.strays.lock(|strays| strays.borrow_mut().pop()) {
                 return node_id;
             }
 
@@ -348,19 +348,24 @@ impl Reports {
 
     /// Take the reports of a subscription to `peer_node_id`, until the returned
     /// registration is dropped.
+    // A slot is `Send` and `Sync` with `send-sync` only.
+    #[cfg_attr(not(feature = "send-sync"), allow(clippy::arc_with_non_send_sync))]
     fn register(&self, peer_node_id: u64, which: DiagSet, coverage: Coverage) -> Registration<'_> {
-        let slot = Rc::new(Slot {
+        let slot = Arc::new(Slot {
             peer_node_id,
-            subscription_id: Cell::new(None),
             which,
             coverage,
-            updates: RefCell::new(Vec::new()),
-            model_updates: RefCell::new(ModelUpdate::default()),
-            last_report: Cell::new(Instant::now()),
+            state: Mutex::new(RefCell::new(SlotState {
+                subscription_id: None,
+                updates: Vec::new(),
+                model_updates: ModelUpdate::default(),
+                last_report: Instant::now(),
+            })),
             received: Notification::new(),
         });
 
-        self.slots.borrow_mut().push(slot.clone());
+        self.slots
+            .lock(|slots| slots.borrow_mut().push(slot.clone()));
 
         Registration {
             reports: self,
@@ -370,17 +375,25 @@ impl Reports {
 
     /// The slot of subscription `subscription_id` to `peer_node_id`; or one to
     /// it still being established, which this report is the first of.
-    fn slot(&self, peer_node_id: u64, subscription_id: u32) -> Option<Rc<Slot>> {
-        let slots = self.slots.borrow();
-        let mut to_peer = slots
-            .iter()
-            .filter(|slot| slot.peer_node_id == peer_node_id);
+    fn slot(&self, peer_node_id: u64, subscription_id: u32) -> Option<Arc<Slot>> {
+        self.slots.lock(|slots| {
+            let slots = slots.borrow();
+            let mut to_peer = slots
+                .iter()
+                .filter(|slot| slot.peer_node_id == peer_node_id);
 
-        to_peer
-            .clone()
-            .find(|slot| slot.subscription_id.get() == Some(subscription_id))
-            .or_else(|| to_peer.find(|slot| slot.subscription_id.get().is_none()))
-            .cloned()
+            to_peer
+                .clone()
+                .find(|slot| slot.subscription_id() == Some(subscription_id))
+                .or_else(|| to_peer.find(|slot| slot.subscription_id().is_none()))
+                .cloned()
+        })
+    }
+}
+
+impl Default for Reports {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -404,12 +417,17 @@ impl ReportDataHandler for Reports {
             let peer = sub.peer_node_id;
             let ours = self
                 .slots
-                .borrow()
-                .iter()
-                .any(|slot| slot.peer_node_id == peer);
-            let mut strays = self.strays.borrow_mut();
-            if !ours && !strays.contains(&peer) {
-                strays.push(peer);
+                .lock(|slots| slots.borrow().iter().any(|slot| slot.peer_node_id == peer));
+            let stray = !ours
+                && self.strays.lock(|strays| {
+                    let mut strays = strays.borrow_mut();
+                    let new = !strays.contains(&peer);
+                    if new {
+                        strays.push(peer);
+                    }
+                    new
+                });
+            if stray {
                 self.stray.notify();
             }
 
@@ -424,11 +442,13 @@ impl ReportDataHandler for Reports {
         );
 
         // Any report is a liveness signal, even one with nothing we track.
-        slot.last_report.set(Instant::now());
-        slot.updates.borrow_mut().push(health);
-        if slot.coverage != Coverage::Health {
-            slot.model_updates.borrow_mut().extend(report);
-        }
+        slot.with(|state| {
+            state.last_report = Instant::now();
+            state.updates.push(health);
+            if slot.coverage != Coverage::Health {
+                state.model_updates.extend(report);
+            }
+        });
         slot.received.notify();
 
         Ok(())
@@ -438,30 +458,46 @@ impl ReportDataHandler for Reports {
 /// The reports of one subscription, as they arrive.
 struct Slot {
     peer_node_id: u64,
-    /// `None` while the subscription is being established.
-    subscription_id: Cell<Option<u32>>,
     which: DiagSet,
     coverage: Coverage,
-    updates: RefCell<Vec<DeviceHealth>>,
-    /// What was reported, for a coverage beyond the health.
-    model_updates: RefCell<ModelUpdate>,
-    /// When the most recent report arrived: the watchdog's heartbeat.
-    last_report: Cell<Instant>,
+    state: Mutex<RefCell<SlotState>>,
     received: Notification,
+}
+
+impl Slot {
+    fn with<R>(&self, f: impl FnOnce(&mut SlotState) -> R) -> R {
+        self.state.lock(|state| f(&mut state.borrow_mut()))
+    }
+
+    fn subscription_id(&self) -> Option<u32> {
+        self.with(|state| state.subscription_id)
+    }
+}
+
+/// What changes in a [`Slot`] as the reports arrive.
+struct SlotState {
+    /// `None` while the subscription is being established.
+    subscription_id: Option<u32>,
+    updates: Vec<DeviceHealth>,
+    /// What was reported, for a coverage beyond the health.
+    model_updates: ModelUpdate,
+    /// When the most recent report arrived: the watchdog's heartbeat.
+    last_report: Instant,
 }
 
 /// A subscription's place in [`Reports`]; dropping it removes it.
 struct Registration<'a> {
     reports: &'a Reports,
-    slot: Rc<Slot>,
+    slot: Arc<Slot>,
 }
 
 impl Drop for Registration<'_> {
     fn drop(&mut self) {
-        self.reports
-            .slots
-            .borrow_mut()
-            .retain(|slot| !Rc::ptr_eq(slot, &self.slot));
+        self.reports.slots.lock(|slots| {
+            slots
+                .borrow_mut()
+                .retain(|slot| !Arc::ptr_eq(slot, &self.slot))
+        });
     }
 }
 
@@ -731,8 +767,10 @@ where
     .await?;
     drop(ticket);
 
-    slot.subscription_id.set(Some(subscription_id));
-    slot.last_report.set(Instant::now());
+    slot.with(|state| {
+        state.subscription_id = Some(subscription_id);
+        state.last_report = Instant::now();
+    });
 
     // Clamped to ≥1s, so that a pathological max_int=0 does not make the window 0.
     let max_int = max_int.max(1);
@@ -751,21 +789,27 @@ where
     );
 
     loop {
-        for health in slot.updates.take() {
+        let (updates, model, last_report) = slot.with(|state| {
+            (
+                core::mem::take(&mut state.updates),
+                core::mem::take(&mut state.model_updates),
+                state.last_report,
+            )
+        });
+        for health in updates {
             on_update(health);
         }
-        let model = slot.model_updates.take();
         if !model.is_empty() {
             on_model(model, false);
         }
 
         // Stale if no report came in the window after the last one.
-        let deadline = slot.last_report.get() + window;
+        let deadline = last_report + window;
         let now = Instant::now();
         if now >= deadline {
             warn!(
                 "subscription 0x{node_id:016X} stale: no report in {}s (max_int={max_int}s); re-establishing",
-                (now - slot.last_report.get()).as_secs()
+                (now - last_report).as_secs()
             );
             on_state(SubState::Offline);
             return Ok(Pass::Ended);

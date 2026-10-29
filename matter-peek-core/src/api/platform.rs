@@ -3,13 +3,12 @@
 //! ```ignore
 //! let (peek, service) = MatterPeek::new();
 //!
-//! // On the host's executor, until every handle to `peek` is dropped:
-//! service
-//!     .run(
-//!         Platform { matter, crypto, kv, kv_buf: &KV_BUF, ota, network, mdns },
-//!         &PeekConfig::default(),
-//!     )
-//!     .await;
+//! // Until every handle to `peek` is dropped:
+//! service.run(
+//!     Platform { matter, crypto, kv, kv_buf: &KV_BUF, ota, network, mdns },
+//!     &PeekConfig::default(),
+//!     runner,
+//! );
 //! ```
 //!
 //! - `matter`: the stack (`rs_matter::Matter`), with the controller's device
@@ -22,16 +21,19 @@
 //! - `network`: the UDP network, as `rs_matter`'s `NetworkSend +
 //!   NetworkReceive`;
 //! - `mdns`: an [`Mdns`] backend, e.g. [`Builtin`] over the host's multicast
-//!   socket.
+//!   socket;
+//! - `runner`: a [`Runner`], which runs the controller's [`Task`]s (e.g. on an
+//!   executor, on several threads) and its service's own future, until that
+//!   ends.
 //!
 //! With `std`, [`MatterPeek::start`](super::MatterPeek::start) does all this on
 //! its own thread.
 
 #[cfg(feature = "std")]
-pub use crate::host::{data_dir, store_in_use};
+pub use crate::host::{data_dir, store_in_use, Joined};
 pub use crate::mdns::{Builtin, Mdns};
 pub use crate::ota::{OtaImage, OtaImageStore, OtaStore};
 pub use crate::persist::{kv_buf, KvBuf};
-pub use crate::service::Platform;
+pub use crate::service::{Platform, Runner, Task};
 
 pub use super::peek::Service;
