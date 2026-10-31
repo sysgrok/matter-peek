@@ -23,7 +23,7 @@ use rs_matter::transport::network::btp::{
 };
 use rs_matter::transport::network::mdns::CommissionableFilter;
 use rs_matter::transport::network::BtAddr;
-use rs_matter::utils::select::Coalesce;
+use rs_matter::utils::futures::Coalesce;
 
 use windows::core::{Interface, GUID};
 use windows::Devices::Bluetooth::Advertisement::{

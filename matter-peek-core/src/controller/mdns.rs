@@ -127,6 +127,13 @@ impl Backend {
     /// The first of the build's backends that the host can use.
     #[allow(unreachable_code)]
     async fn choose() -> Self {
+        // For diagnosis: the builtin one, whatever else runs.
+        #[cfg(feature = "mdns-builtin")]
+        if std::env::var_os("MATTER_PEEK_MDNS").is_some_and(|v| v == "builtin") {
+            log::info!("mdns: using our own (MATTER_PEEK_MDNS=builtin)");
+            return Self::Builtin;
+        }
+
         #[cfg(feature = "mdns-avahi")]
         if avahi_running().await {
             log::info!("mdns: using Avahi");

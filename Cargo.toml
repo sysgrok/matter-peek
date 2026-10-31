@@ -18,7 +18,7 @@ authors = ["Ivan Markov <ivan.markov@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sysgrok/matter-peek"
 # The oldest Rust that builds rs-matter with its `send-sync` feature, which the
-# server uses (1.91 rejects some of its lifetimes); above rs-matter's own 1.87.
+# server uses (1.91 rejects some of its lifetimes); also rs-matter's own MSRV.
 # CI checks it (the MSRV job).
 rust-version = "1.92"
 
