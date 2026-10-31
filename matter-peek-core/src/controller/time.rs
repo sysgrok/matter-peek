@@ -17,8 +17,8 @@ use rs_matter::dm::clusters::decl::time_synchronization::{
 };
 use rs_matter::dm::EndptId;
 use rs_matter::error::Error;
-use rs_matter::im::client::ImClient as _;
-use rs_matter::im::{AttrPath, GenericPath};
+use rs_matter::im::{AttrPath, GenericPath, ImClient as _};
+use rs_matter::sc::ExchangeInitiator as _;
 use rs_matter::tlv::Nullable;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::Matter;

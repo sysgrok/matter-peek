@@ -27,7 +27,7 @@ impl SetupCode {
 
             return Ok(Self {
                 passcode: payload.passcode(),
-                filter: payload.commissionable_filter(),
+                filter: CommissionableFilter::for_qr_code(&payload),
             });
         }
 
@@ -49,7 +49,7 @@ impl SetupCode {
 
         Ok(Self {
             passcode: payload.passcode(),
-            filter: payload.commissionable_filter(),
+            filter: CommissionableFilter::for_pairing_code(&payload),
         })
     }
 }

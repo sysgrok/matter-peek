@@ -20,9 +20,9 @@ use rs_matter::dm::clusters::ota_req::{
 use rs_matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter::dm::EndptId;
 use rs_matter::error::{Error, ErrorCode};
-use rs_matter::im::client::ImClient as _;
-use rs_matter::im::{AttrPath, GenericPath};
+use rs_matter::im::{AttrPath, GenericPath, ImClient as _};
 use rs_matter::ota::{OtaImageHeader, OTA_IMAGE_DIGEST_SHA256};
+use rs_matter::sc::ExchangeInitiator as _;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::utils::sync::blocking::Mutex;
 use rs_matter::utils::sync::MaybeSendSync;

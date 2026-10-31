@@ -25,7 +25,9 @@ use rs_matter::dm::clusters::ota_prov::{
     self, OtaBdxHandler, OtaImages, OtaImagesRegistry, OtaProviderHandler,
 };
 use rs_matter::dm::clusters::ota_req;
-use rs_matter::dm::clusters::time_sync::{self, GranularityEnum, TimeSyncHandler};
+use rs_matter::dm::clusters::time_sync::{
+    self, GranularityEnum, TimeGranularity, TimeSource, TimeSourceEnum, TimeSyncHandler,
+};
 use rs_matter::dm::devices::DEV_TYPE_OTA_PROVIDER;
 use rs_matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter::dm::{
@@ -108,11 +110,11 @@ where
         )
         .chain(
             |e, c| e == ROOT_ENDPOINT_ID && c == OTA_PROVIDER_CLUSTER.id,
-            OtaProviderHandler::new(Dataver::new_rand(&mut rand), ota).adapt(),
+            OtaProviderHandler::new(Dataver::new_rand(&mut rand), matter, ota).adapt(),
         )
         .chain(
             |e, c| e == ROOT_ENDPOINT_ID && c == TIME_SYNC_CLUSTER.id,
-            Async(TimeSyncHandler::new(Dataver::new_rand(&mut rand)).adapt()),
+            Async(TimeSyncHandler::new(Dataver::new_rand(&mut rand), matter).adapt()),
         );
 
     let buffers: MatterBuffers = MatterBuffers::new();
@@ -131,7 +133,7 @@ where
 
     let handler = ChainedExchangeHandler::new(
         PROTO_ID_SECURE_CHANNEL,
-        SecureChannel::new_with_handler(crypto, &im, CheckInReceiver(check_ins)),
+        SecureChannel::new_with_handler(matter, crypto, &im, CheckInReceiver(check_ins)),
         ChainedExchangeHandler::new(
             PROTO_ID_BDX,
             Bdx::new(OtaBdxHandler::new(MatterBuffers::<2>::new(), ota)),
@@ -183,9 +185,12 @@ async fn keep_time<N: AttrChangeNotifier>(
                 if served != Some(quality) || drift.is_none_or(|drift| drift > MAX_CLOCK_DRIFT_US) {
                     // The clock reports one step below what it is given.
                     let (granularity, source) = quality;
-                    state
-                        .rtc
-                        .set_utc_time(now.utc_us, finer(granularity), source, notify);
+                    state.rtc.set_utc_time(
+                        now.utc_us,
+                        finer(granularity),
+                        clock_source(source),
+                        notify,
+                    );
                 }
             });
 
@@ -200,12 +205,20 @@ async fn keep_time<N: AttrChangeNotifier>(
 }
 
 /// One step finer than `granularity`.
-fn finer(granularity: GranularityEnum) -> GranularityEnum {
+fn finer(granularity: GranularityEnum) -> TimeGranularity {
     match granularity {
-        GranularityEnum::NoTimeGranularity => GranularityEnum::MinutesGranularity,
-        GranularityEnum::MinutesGranularity => GranularityEnum::SecondsGranularity,
-        GranularityEnum::SecondsGranularity => GranularityEnum::MillisecondsGranularity,
-        _ => GranularityEnum::MicrosecondsGranularity,
+        GranularityEnum::NoTimeGranularity => TimeGranularity::Minutes,
+        GranularityEnum::MinutesGranularity => TimeGranularity::Seconds,
+        GranularityEnum::SecondsGranularity => TimeGranularity::Milliseconds,
+        _ => TimeGranularity::Microseconds,
+    }
+}
+
+/// `source` as our clock takes it, for the sources `HostTime::quality` reports.
+fn clock_source(source: TimeSourceEnum) -> TimeSource {
+    match source {
+        TimeSourceEnum::NonMatterSNTP => TimeSource::NonMatterSNTP,
+        _ => TimeSource::Unknown,
     }
 }
 

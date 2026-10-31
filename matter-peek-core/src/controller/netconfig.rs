@@ -21,6 +21,7 @@ use rs_matter::dm::clusters::net_comm::WirelessCreds;
 use rs_matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter::dm::EndptId;
 use rs_matter::error::{Error, ErrorCode};
+use rs_matter::sc::ExchangeInitiator as _;
 use rs_matter::tlv::{Nullable, OctetStr};
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::Matter;

@@ -23,11 +23,11 @@ use rs_matter::dm::clusters::decl::operational_credentials::{
 };
 use rs_matter::dm::EndptId;
 use rs_matter::error::Error;
-use rs_matter::im::client::ImClient as _;
-use rs_matter::im::{AttrPath, GenericPath};
+use rs_matter::im::{AttrPath, GenericPath, ImClient as _};
 use rs_matter::pairing::qr::{no_optional_data, CommFlowType, Qr, QrPayload};
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::sc::pase::Spake2pVerifierPassword;
+use rs_matter::sc::ExchangeInitiator as _;
 use rs_matter::tlv::{Nullable, OctetStr};
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::{BasicCommData, Matter};

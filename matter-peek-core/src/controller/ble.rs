@@ -52,8 +52,9 @@ use rs_matter::dm::clusters::decl::network_commissioning::{
 use rs_matter::dm::clusters::net_comm::NetworkType;
 use rs_matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter::error::{Error, ErrorCode};
-use rs_matter::im::client::ImClient as _;
+use rs_matter::im::ImClient as _;
 use rs_matter::onboard::{CommissionOptions, CommissionResult, Commissioner};
+use rs_matter::sc::ExchangeInitiator as _;
 use rs_matter::tlv::OctetStr;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::network::btp::Btp;
@@ -375,7 +376,7 @@ async fn provision_network<C: Crypto>(
     })?;
 
     // Refuse to hand a Thread device Wi-Fi credentials, or vice versa.
-    creds.check_match(net_type).inspect_err(|_| {
+    net_type.check_creds(creds).inspect_err(|_| {
         error!(
             "BLE commission: {creds} credentials do not match the device's {net_type:?} network"
         );

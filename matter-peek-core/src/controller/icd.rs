@@ -19,6 +19,7 @@ use rs_matter::error::Error;
 use rs_matter::im::encoding::ReportDataResp;
 use rs_matter::sc::checkin::CheckIn;
 use rs_matter::sc::AsyncScHandler;
+use rs_matter::sc::ExchangeInitiator as _;
 use rs_matter::tlv::OctetStr;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::Matter;

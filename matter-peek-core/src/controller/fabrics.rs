@@ -17,8 +17,7 @@ use core::num::NonZeroU8;
 use log::{info, warn};
 
 use rs_matter::crypto::{CanonPkcSecretKey, Crypto, Rng as _};
-use rs_matter::dm::clusters::decl::icd_management::OperatingModeEnum;
-use rs_matter::dm::clusters::icd_mgmt::IcdAdvertisement;
+use rs_matter::dm::clusters::icd_mgmt::{IcdAdvertisement, IcdOperatingMode};
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::persist::KvBlobStore;
 use rs_matter::utils::sync::MaybeSend;
@@ -373,7 +372,7 @@ fn republish_mdns(matter: &Matter<'_>) {
         None => Some(IcdAdvertisement {
             active_threshold_ms: 0,
             slow_poll_ms: 0,
-            operating_mode: Some(OperatingModeEnum::SIT),
+            operating_mode: Some(IcdOperatingMode::Sit),
             idle_mode_duration_s: 0,
         }),
     };

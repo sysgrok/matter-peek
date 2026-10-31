@@ -10,12 +10,12 @@ use serde_json::Value;
 
 use rs_matter::crypto::Crypto;
 use rs_matter::error::{Error, ErrorCode};
-use rs_matter::im::client::ImClient as _;
 use rs_matter::im::encoding::{
     AttrResp, CmdResp, EventDataTimestamp, EventFilter, EventPath, EventPriority, EventResp,
     ReportDataResp,
 };
-use rs_matter::im::{AttrDataTag, AttrPath, CmdDataTag, GenericPath, IMStatusCode};
+use rs_matter::im::{AttrDataTag, AttrPath, CmdDataTag, GenericPath, IMStatusCode, ImClient as _};
+use rs_matter::sc::ExchangeInitiator as _;
 use rs_matter::tlv::TLVTag;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::utils::storage::WriteBuf;

@@ -29,8 +29,8 @@ use rs_matter::dm::clusters::decl::operational_credentials::{
     self, OperationalCredentialsAttrReads as _, OperationalCredentialsAttrResponses as _,
     OperationalCredentialsClient as _,
 };
-use rs_matter::im::client::ImClient as _;
-use rs_matter::im::{AttrPath, GenericPath};
+use rs_matter::im::{AttrPath, GenericPath, ImClient as _};
+use rs_matter::sc::ExchangeInitiator as _;
 use rs_matter::tlv::Nullable;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::network::mdns::CommissionableFilter;

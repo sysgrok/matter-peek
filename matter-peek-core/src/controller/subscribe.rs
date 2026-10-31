@@ -49,11 +49,13 @@ use embassy_time::{Duration, Instant, Timer};
 use log::{debug, info, warn};
 
 use rs_matter::crypto::Crypto;
-use rs_matter::dm::{ReportContext, ReportDataHandler};
 use rs_matter::error::Error;
-use rs_matter::im::client::{ImClient as _, SubscribeOutcome, TxOutcome};
 use rs_matter::im::encoding::{EventFilter, EventPath, ReportDataResp};
-use rs_matter::im::{AttrPath, GenericPath, IMStatusCode};
+use rs_matter::im::{
+    AttrPath, GenericPath, IMStatusCode, ImClient as _, ReportContext, ReportDataHandler,
+    SubscribeOutcome, TxOutcome,
+};
+use rs_matter::sc::ExchangeInitiator as _;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::mrp::RetransEntry;
 use rs_matter::transport::session::SessionMode;

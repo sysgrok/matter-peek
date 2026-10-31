@@ -36,6 +36,7 @@ use rs_matter::dm::clusters::diag_logs::{IntentEnum, StatusEnum, TransferProtoco
 use rs_matter::dm::EndptId;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::respond::Responder;
+use rs_matter::sc::ExchangeInitiator as _;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::utils::sync::blocking::Mutex;
 use rs_matter::utils::sync::Notification;

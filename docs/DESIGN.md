@@ -587,7 +587,7 @@ device's own setup code, which we do not keep.
 | Commissioning | `onboard::Commissioner` (`commission`, `complete_via_case`, `disarm_fail_safe`, `end_pase`) |
 | Discovery | `Transport::browse` over the mDNS backends (Avahi, systemd-resolved, Bonjour, builtin) |
 | BLE | `Btp`, `AdvData`, BlueZ `scan` / `run_central` (the Windows central is ours, for now) |
-| IM client | `im::client` (read, subscribe, invoke) and the generated cluster clients |
+| IM client | `im::ImClient` (read, subscribe, invoke) and the generated cluster clients |
 | Reports to a controller | `ReportDataHandler` |
 | Diagnostic logs | `diag_logs` client and `bdx` |
 | OTA Provider | `ota_prov` cluster and BDX handler, `ota` image header |
