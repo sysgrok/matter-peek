@@ -1,7 +1,8 @@
 //! The history of the user's clicks, which the back and forward buttons step
 //! through.
 //!
-//! A step is a page or a popup; a popup's own tabs or a turned card are not.
+//! A step is a page, a fabric or a popup; a popup's own tabs or a turned card
+//! are not.
 //! The browser keeps the entries. Each render compares the place shown with the
 //! current entry and records a new one if they differ, so no click needs to
 //! tell. Going back or forward opens and closes what differs, with the messages
@@ -124,6 +125,9 @@ struct Place {
     tab: Tab,
     /// On a phone, the Assistant page's list of chats rather than its chat.
     chats: bool,
+    /// The fabric shown, once the list of them was read.
+    #[serde(default)]
+    fabric: Option<u8>,
     popups: Vec<Popup>,
 }
 
@@ -132,6 +136,7 @@ impl Place {
     fn closes_to(&self, other: &Self) -> bool {
         self.tab == other.tab
             && self.chats == other.chats
+            && self.fabric == other.fabric
             && other.popups.len() < self.popups.len()
             && other.popups.iter().all(|popup| self.popups.contains(popup))
     }
@@ -194,6 +199,7 @@ impl Default for History {
                 place: Place {
                     tab: Tab::Devices,
                     chats: false,
+                    fabric: None,
                     popups: Vec::new(),
                 },
                 previous: None,
@@ -249,6 +255,7 @@ impl App {
         Place {
             tab: self.tab,
             chats: self.tab == Tab::Assistant && self.assistant.show_list,
+            fabric: self.visible_fabric().map(|fabric| fabric.index),
             popups,
         }
     }
@@ -279,8 +286,15 @@ impl App {
 
     /// Record what the last clicks changed.
     pub(crate) fn record_history(&mut self, link: &Scope<Self>) {
-        let place = self.place();
+        let mut place = self.place();
         let current = &mut self.history.current;
+
+        // The list of fabrics being read is no click.
+        place.fabric = place.fabric.or(current.place.fabric);
+        if current.place.fabric.is_none() && place.fabric.is_some() {
+            current.place.fabric = place.fabric;
+            current.replace();
+        }
 
         if place == current.place {
             return;
@@ -322,7 +336,7 @@ impl App {
             return false;
         };
 
-        let told = entry.place.popups.len();
+        let told = entry.place.clone();
         if entry.place.popups.iter().any(Popup::passes) {
             // Only the last entry can be of something that passes, and that
             // cannot be opened again: stay.
@@ -342,15 +356,33 @@ impl App {
                     .any(|device| device.handle.node_id == node_id)
             })
         });
-        if entry.place.popups.len() != told {
+        let shown = self.place();
+        // So may a fabric: stay on the one shown.
+        entry.place.fabric = entry
+            .place
+            .fabric
+            .filter(|index| self.fabrics.iter().any(|fabric| fabric.index == *index))
+            .or(shown.fabric);
+        if entry.place != told {
             entry.replace();
         }
 
-        let shown = self.place();
         for popup in &shown.popups {
             if !entry.place.popups.contains(popup) {
                 <Self as Component>::update(self, ctx, popup.close());
             }
+        }
+        // Before the page: the Thread page reads the devices of the fabric shown.
+        if let Some(index) = entry
+            .place
+            .fabric
+            .filter(|_| entry.place.fabric != shown.fabric)
+        {
+            <Self as Component>::update(
+                self,
+                ctx,
+                Msg::OurFabrics(our_fabrics::FabricsMsg::Show(index)),
+            );
         }
         if entry.place.tab != shown.tab {
             <Self as Component>::update(self, ctx, Msg::SelectTab(entry.place.tab));
