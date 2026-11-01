@@ -426,7 +426,7 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
         let dev = self.lookup_device(node_id)?;
 
         self.controller
-            .retrieve_logs(dev.handle, intent)
+            .retrieve_logs(dev.handle, intent, &self.log_uploads)
             .await
             .map_err(|e| match e.code() {
                 ErrorCode::ClusterNotFound | ErrorCode::EndpointNotFound => {

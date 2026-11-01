@@ -46,6 +46,7 @@ use crate::api::{
     PeekError, Service,
 };
 use crate::fabrics::OurFabrics;
+use crate::logs::LogUploads;
 use crate::matter::Controller;
 use crate::mdns::Mdns;
 use crate::model::StoredDevice;
@@ -152,6 +153,8 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     sub_jobs: async_channel::Sender<SubJob>,
     /// Routes the reports of the live subscriptions to them.
     reports: Reports,
+    /// Routes the logs devices push to the requests awaiting them.
+    log_uploads: LogUploads,
     /// Lets a few subscriptions over Thread at a time prime a data model.
     model_gate: Gate,
     /// Our OTA Provider.
@@ -839,6 +842,7 @@ fn run<'a, C, S, O, N, M, R>(
         next_watcher: Cell::new(1),
         sub_jobs,
         reports: Reports::new(),
+        log_uploads: LogUploads::new(),
         model_gate: Gate::new(MODEL_PRIMINGS_OVER_THREAD),
         ota,
         ota_followers,
@@ -922,11 +926,12 @@ fn run<'a, C, S, O, N, M, R>(
         }
     };
 
-    // What devices reach on us: our OTA Provider, the subscription reports and
-    // the Check-Ins.
+    // What devices reach on us: our OTA Provider, the subscription reports, the
+    // logs they push and the Check-Ins.
     if let Err(e) = ctx.controller.run_node(
         &ctx.reports,
         &ctx.ota,
+        &ctx.log_uploads,
         &check_ins,
         runner,
         Vec::from([pump, mdns]),

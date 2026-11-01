@@ -2,8 +2,10 @@
 //!
 //! One responder serves all of it: on endpoint 0 the OTA Provider cluster and
 //! the Time Synchronization cluster (our clock, which devices take their time
-//! from), OTA images over BDX, the reports of our health subscriptions, which
-//! [`Reports`] routes to them, the Check-Ins of the devices that sleep, and
+//! from), BDX (the OTA images devices download, and the diagnostic logs they
+//! push, which [`LogUploads`] routes to their requests), the reports of our
+//! health subscriptions, which [`Reports`] routes to them, the Check-Ins of the
+//! devices that sleep, and
 //! CASE, for devices that open a session to us (a time sync client does). A single responder matters: several would race
 //! for the same inbound exchanges. Each of its handlers is a task of its own.
 
@@ -18,7 +20,7 @@ use embassy_time::{Duration, Timer};
 use log::{error, info};
 
 use rs_matter::acl::{AclEntry, AuthMode, Target};
-use rs_matter::bdx::{Bdx, PROTO_ID_BDX};
+use rs_matter::bdx::{Bdx, ChainedBdxHandler, PROTO_ID_BDX};
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _, DescHandler};
 use rs_matter::dm::clusters::ota_prov::{
@@ -43,6 +45,7 @@ use rs_matter::utils::sync::{MaybeSend, MaybeSendSync};
 use rs_matter::{clusters, devices, with, Matter};
 
 use crate::icd::CheckInReceiver;
+use crate::logs::LogUploads;
 use crate::persist::ControllerStore;
 use crate::service::{Runner, Task};
 use crate::subscribe::Reports;
@@ -80,15 +83,16 @@ const NODE: Node<'static> = Node {
 };
 
 /// Serve the controller's node: the OTA Provider of `ota`, our clock and the
-/// subscription `reports`; the Check-Ins go to `check_ins`. `runner` runs its
-/// handlers, each as a task of its own, with `tasks` and `main`, until `main`
-/// or a task ends.
+/// subscription `reports`; pushed logs go to `logs`, the Check-Ins to
+/// `check_ins`. `runner` runs its handlers, each as a task of its own, with
+/// `tasks` and `main`, until `main` or a task ends.
 #[allow(clippy::too_many_arguments)]
 pub fn run<'a, C, P, R>(
     matter: &'a Matter<'a>,
     crypto: C,
     reports: &'a Reports,
     ota: &'a P,
+    logs: &'a LogUploads,
     check_ins: &'a async_channel::Sender<Vec<u8>>,
     runner: R,
     tasks: Vec<Task<'a>>,
@@ -136,7 +140,10 @@ where
         SecureChannel::new_with_handler(matter, crypto, &im, CheckInReceiver(check_ins)),
         ChainedExchangeHandler::new(
             PROTO_ID_BDX,
-            Bdx::new(OtaBdxHandler::new(MatterBuffers::<2>::new(), ota)),
+            Bdx::new(ChainedBdxHandler::new(
+                OtaBdxHandler::new(MatterBuffers::<2>::new(), ota),
+                logs,
+            )),
             &im,
         ),
     );

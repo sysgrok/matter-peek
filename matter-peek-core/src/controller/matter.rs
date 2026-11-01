@@ -515,12 +515,15 @@ impl<'a, C: Crypto> Controller<'a, C> {
     }
 
     /// Serve what devices reach on us: the OTA Provider of `ota`, the reports of
-    /// the subscriptions using `reports`, and the Check-Ins, to `check_ins`;
-    /// with `runner`, beside `tasks` and `main`. See [`crate::node::run`].
+    /// the subscriptions using `reports`, the logs they push, to `logs`, and the
+    /// Check-Ins, to `check_ins`; with `runner`, beside `tasks` and `main`. See
+    /// [`crate::node::run`].
+    #[allow(clippy::too_many_arguments)]
     pub fn run_node<'r, P, R>(
         &'r self,
         reports: &'r crate::subscribe::Reports,
         ota: &'r P,
+        logs: &'r crate::logs::LogUploads,
         check_ins: &'r async_channel::Sender<Vec<u8>>,
         runner: R,
         tasks: Vec<crate::service::Task<'r>>,
@@ -537,6 +540,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
             self.crypto,
             reports,
             ota,
+            logs,
             check_ins,
             runner,
             tasks,
@@ -666,11 +670,13 @@ impl<'a, C: Crypto> Controller<'a, C> {
 
     /// Retrieve a diagnostic log (`intent`) from a commissioned device, returning
     /// the raw bytes. Handles inline (small) and BDX-pushed (large) delivery; the
-    /// transport pump must be running in a sibling task.
+    /// transport pump and [`Self::run_node`], with the same `uploads`, must be
+    /// running in sibling tasks.
     pub async fn retrieve_logs(
         &self,
         dev: DeviceHandle,
         intent: LogIntent,
+        uploads: &crate::logs::LogUploads,
     ) -> Result<Vec<u8>, Error> {
         crate::logs::retrieve_logs(
             self.matter,
@@ -678,6 +684,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
             dev.fabric_index,
             dev.node_id,
             intent,
+            uploads,
         )
         .await
     }
