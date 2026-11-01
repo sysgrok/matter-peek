@@ -73,6 +73,7 @@ pub enum Icon {
     Sparkles,
     Stop,
     ArrowLeft,
+    ArrowRight,
     Sliders,
     Model,
     Bulb,
@@ -408,6 +409,7 @@ pub fn icon(glyph: Icon, size: u32) -> Html {
             html! { <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" /> }
         }
         Icon::ArrowLeft => html! { <path d="M19 12H5M12 19l-7-7 7-7" /> },
+        Icon::ArrowRight => html! { <path d="M5 12h14M12 5l7 7-7 7" /> },
         Icon::Bulb => html! {
             <path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5M9 18h6M10 22h4" />
         },

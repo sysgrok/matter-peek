@@ -58,6 +58,7 @@ html, body { background: var(--bulma-scheme-main-bis); min-height: 100vh; }
 .is-active .nav-count { background: hsla(var(--link-hsl), .18); color: var(--bulma-link); }
 .appbar-burger { display: none; border: none; background: transparent; color: var(--bulma-text-strong); padding: .45rem; border-radius: 10px; cursor: pointer; }
 .appbar-burger:hover { background: var(--bulma-background); }
+.appbar-history { display: inline-flex; flex-shrink: 0; margin-right: -.75rem; }
 .drawer { position: fixed; top: 0; bottom: 0; left: 0; z-index: 50; width: min(82vw, 300px); display: flex; flex-direction: column; background: var(--bulma-scheme-main); box-shadow: 0 0 40px rgba(0, 0, 0, .25); transform: translateX(-105%); transition: transform .22s ease; }
 .drawer.is-open { transform: none; }
 .drawer-backdrop { position: fixed; inset: 0; z-index: 45; background: rgba(10, 10, 10, .45); opacity: 0; pointer-events: none; transition: opacity .22s; }

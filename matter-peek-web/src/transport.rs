@@ -78,6 +78,15 @@ pub fn in_app() -> bool {
     })
 }
 
+/// Whether the page runs in the app on a desktop, whose window has no back
+/// button.
+pub fn in_desktop_app() -> bool {
+    in_app()
+        && web_sys::window()
+            .and_then(|window| window.navigator().user_agent().ok())
+            .is_some_and(|agent| !agent.contains("Android"))
+}
+
 /// Where the API is: in a browser, the server that served the page; in the
 /// app, the one chosen.
 pub fn endpoint() -> Endpoint {

@@ -32,6 +32,7 @@ mod devices;
 mod fabrics;
 mod filter;
 mod health;
+mod history;
 mod icons;
 mod install;
 mod memory;
@@ -119,7 +120,7 @@ enum Pending {
 }
 
 /// Which top-level tab is showing.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Tab {
     Devices,
     Thread,
@@ -184,6 +185,10 @@ enum Ask {
 
 enum Msg {
     SelectTab(Tab),
+    /// The back or forward button took the page to another history entry.
+    HistoryMoved,
+    /// A click added a history entry: the app's buttons may change.
+    HistoryRecorded,
     Assistant(AssistantMsg),
     /// In a device's memory popup.
     Memory(memory::MemoryMsg),
@@ -396,6 +401,8 @@ enum Msg {
 
 struct App {
     tab: Tab,
+    /// Where the page is in the history of the user's clicks.
+    history: history::History,
     peer_addr: String,
     /// Passcode, manual pairing code or `MT:` QR code payload.
     setup_code: String,
@@ -622,6 +629,7 @@ impl Component for App {
 
         Self {
             tab: Tab::Devices,
+            history: Default::default(),
             peer_addr: String::new(),
             setup_code: String::new(),
             discover_filter: String::new(),
@@ -721,6 +729,8 @@ impl Component for App {
 
     fn update(&mut self, ctx: &Context<Self>, msg: Msg) -> bool {
         match msg {
+            Msg::HistoryMoved => self.history_moved(ctx),
+            Msg::HistoryRecorded => true,
             Msg::SelectTab(tab) => {
                 self.tab = tab;
                 self.drawer_open = false;
@@ -2088,6 +2098,12 @@ impl Component for App {
     }
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
+        if first_render {
+            self.start_history(ctx.link());
+        } else {
+            self.record_history(ctx.link());
+        }
+
         // In the app, where matter-peek runs is chosen first.
         if first_render && transport::endpoint() == transport::Endpoint::Unset {
             ctx.link()
@@ -2712,6 +2728,7 @@ impl App {
                             onclick={link.callback(|_| Msg::ToggleDrawer)}>
                             { icon(Icon::Menu, 22) }
                         </button>
+                        { self.view_history_buttons() }
                         <a class="brand" href={PROJECT_URL} target="_blank" rel="noopener"
                             title="Matter health and diagnostics: matter-peek on GitHub"
                             onclick={Callback::from(open_project)}>

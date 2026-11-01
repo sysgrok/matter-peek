@@ -29,7 +29,7 @@ const RESTART_TRIES: u32 = 20;
 /// The popup: backing up and restoring, or moving to a server.
 #[derive(Default)]
 pub struct BackupView {
-    moving: bool,
+    pub(crate) moving: bool,
     passphrase: String,
     again: String,
     exported: Option<Exported>,
