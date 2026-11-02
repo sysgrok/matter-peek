@@ -191,8 +191,8 @@ dropped.
 Below the service, these modules wrap rs-matter's controller side:
 - `matter` (`Controller`): the operations the service builds on;
 - `discovery` and `mdns`: browsing, and the mDNS backends;
-- `ble`: commissioning over Bluetooth LE, with a GATT central over BlueZ
-  (`ble::bluez`, rs-matter's) or over Windows' Bluetooth LE API (`ble::winrt`);
+- `ble`: commissioning over Bluetooth LE, with rs-matter's GATT central over
+  BlueZ (`ble::bluez`) or over Windows' Bluetooth LE API (`ble::winrt`);
 - `basic_info`, `diagnostics` and `network`: a device's identity, its health
   and its networks; `netconfig` changes the networks; `health` judges a
   health check;
@@ -621,8 +621,8 @@ Linux is supported today. There, the `matter-peek` executable and the app have
 the Avahi, systemd-resolved and builtin mDNS backends, and choose one when they
 start; they use BlueZ for BLE (`ble-bluez`). On Windows, both use the builtin
 mDNS backend, which finds its network interface with `if-addrs` there (`nix` is
-Unix-only), and Windows' Bluetooth LE API for BLE (`ble-winrt`, through the
-`windows` crate). CI builds them for Windows, but they have not been tried on
+Unix-only), and Windows' Bluetooth LE API for BLE (`ble-winrt`, rs-matter's
+central). CI builds them for Windows, but they have not been tried on
 Windows yet. macOS needs the executables to use the Bonjour
 backend (`mdns-astro`) there, and it has no BLE central yet.
 

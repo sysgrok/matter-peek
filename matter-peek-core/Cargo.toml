@@ -72,8 +72,8 @@ mdns-builtin = ["std", "dep:socket2", "dep:nix", "dep:if-addrs"] # fallback / Wi
 ble = ["std"]
 # Linux + BlueZ over D-Bus, via rs-matter's `zbus` feature (the same one Avahi uses).
 ble-bluez = ["ble", "rs-matter/zbus"]
-# Windows: its Bluetooth LE API (WinRT).
-ble-winrt = ["ble", "dep:windows"]
+# Windows: its Bluetooth LE API (WinRT), via rs-matter.
+ble-winrt = ["ble"]
 
 # Mobile bindings: `MatterPeek` and the API types, exported over UniFFI.
 uniffi = ["std", "dep:uniffi"]
@@ -122,10 +122,3 @@ uniffi = { version = "0.32", optional = true, default-features = false }
 [target.'cfg(windows)'.dependencies]
 # mDNS builtin backend on Windows: the interface enum, which `nix` has not.
 if-addrs = { version = "0.15", optional = true }
-# BLE on Windows (`ble-winrt`).
-windows = { version = "0.62", optional = true, features = [
-    "Devices_Bluetooth_Advertisement",
-    "Devices_Bluetooth_GenericAttributeProfile",
-    "Devices_Radios",
-    "Storage_Streams",
-] }
