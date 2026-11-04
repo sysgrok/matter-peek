@@ -2,9 +2,9 @@
 
 use alloc::string::String;
 
-pub(super) use rs_matter::transport::network::btp::winrt::{run_central, scan};
+pub(super) use rs_matter::transport::network::btp::win32::{run_central, scan};
 
-use rs_matter::transport::network::btp::winrt::central_unavailable;
+use rs_matter::transport::network::btp::win32::central_unavailable;
 
 /// Why the central cannot run now, if it cannot: there is no Bluetooth LE
 /// adapter that can connect to devices, or it is off.
