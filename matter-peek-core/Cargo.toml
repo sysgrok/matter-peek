@@ -28,8 +28,6 @@ default = ["mdns-avahi", "mdns-resolve", "mdns-builtin"]
 controller = [
     "dep:rs-matter",
     "dep:rs-matter-codegen",
-    "dep:embassy-futures",
-    "dep:embassy-time",
     "dep:async-channel",
     "dep:futures-util",
 ]
@@ -49,6 +47,7 @@ std = [
     "rs-matter/os",
     "rs-matter/qr-scan",
     "async-channel/std",
+    "dep:embassy-time",
     "embassy-time/std",
     "dep:embassy-time-queue-utils",
     "dep:async-io",
@@ -96,12 +95,12 @@ log = { workspace = true }
 # rs-matter without default features (its `os` implies `std`); `std` turns `os`
 # on. A plain registry dep, so the workspace `[patch.crates-io]` applies.
 rs-matter = { version = "0.4", optional = true, default-features = false, features = ["alloc", "rustcrypto", "log"] }
-embassy-futures = { workspace = true, optional = true }
-embassy-time = { version = "0.5", optional = true, default-features = false }
 async-channel = { version = "2", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["alloc"] }
 
 # --- This host (`std`). ---
+# Only for its `std` time driver; the code uses `rs_matter::utils::timers`.
+embassy-time = { version = "0.5", optional = true, default-features = false }
 embassy-time-queue-utils = { workspace = true, optional = true }
 async-io = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }

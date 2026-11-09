@@ -22,8 +22,6 @@
 use core::cell::RefCell;
 use core::num::NonZeroU8;
 
-use embassy_time::{with_timeout, Duration};
-
 use log::{debug, info};
 
 use rs_matter::bdx::{BdxHandler, BdxReader, BdxResponder};
@@ -37,6 +35,7 @@ use rs_matter::sc::ExchangeInitiator as _;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::utils::sync::blocking::Mutex;
 use rs_matter::utils::sync::Notification;
+use rs_matter::utils::timers::{with_timeout, Duration};
 use rs_matter::Matter;
 
 use crate::model::LogIntent;

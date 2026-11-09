@@ -4,13 +4,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use embassy_time::{Duration, Instant};
-
 use log::info;
 
 use rs_matter::crypto::Crypto;
 use rs_matter::persist::KvBlobStore;
 use rs_matter::utils::sync::MaybeSend;
+use rs_matter::utils::timers::{Duration, Instant};
 
 use crate::api::{CommissioningWindow, PeekError, WindowStatus};
 use crate::ota::OtaImageStore;

@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 
 use async_io::Async;
 use directories::ProjectDirs;
-use embassy_futures::select::{select, select_slice};
 use rand::rngs::StdRng;
 
 use log::{error, info, warn};
@@ -25,6 +24,7 @@ use log::{error, info, warn};
 use rs_matter::crypto::default_crypto;
 use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::persist::DirKvBlobStore;
+use rs_matter::utils::futures::{select, select_slice};
 use rs_matter::utils::init::InitMaybeUninit;
 use rs_matter::Matter;
 

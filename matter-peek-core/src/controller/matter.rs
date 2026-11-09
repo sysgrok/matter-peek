@@ -6,9 +6,6 @@ use core::net::SocketAddr;
 use core::num::NonZeroU8;
 use core::pin::pin;
 
-use embassy_futures::select::{select, Either};
-use embassy_time::{Duration, Timer};
-
 use log::{error, info};
 
 use rs_matter::cert::gen::VALID_FOREVER;
@@ -18,7 +15,9 @@ use rs_matter::error::{Error, ErrorCode};
 use rs_matter::onboard::{CommissionOptions, Commissioner};
 use rs_matter::transport::network::Address;
 use rs_matter::transport::session::{Session, SessionMode};
+use rs_matter::utils::futures::{select, Either};
 use rs_matter::utils::sync::Notification;
+use rs_matter::utils::timers::{Duration, Timer};
 use rs_matter::Matter;
 
 use rs_matter::dm::clusters::decl::administrator_commissioning::{

@@ -602,7 +602,7 @@ fn copy_str<'b>(buf: &'b mut [u8], s: &str) -> Option<(&'b str, &'b mut [u8])> {
 mod tests {
     use alloc::vec;
 
-    use embassy_futures::block_on;
+    use rs_matter::utils::futures::block_on;
 
     use rs_matter::crypto::test_only_crypto;
     use rs_matter::tlv::Octets;

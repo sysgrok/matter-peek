@@ -6,14 +6,13 @@
 use alloc::collections::BTreeMap;
 use alloc::format;
 
-use embassy_futures::select::select;
-use embassy_time::{Duration, Instant, Timer};
-
 use log::info;
 
 use rs_matter::crypto::Crypto;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::futures::select;
 use rs_matter::utils::sync::MaybeSend;
+use rs_matter::utils::timers::{Duration, Instant, Timer};
 
 use crate::api::{HealthCheck, PeekError};
 use crate::health;

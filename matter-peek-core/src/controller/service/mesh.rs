@@ -2,11 +2,10 @@
 
 use alloc::vec::Vec;
 
-use embassy_time::{Duration, Instant};
-
 use rs_matter::crypto::Crypto;
 use rs_matter::persist::KvBlobStore;
 use rs_matter::utils::sync::MaybeSend;
+use rs_matter::utils::timers::{Duration, Instant};
 
 use crate::api::{BorderRouter, FabricRef, NetworkKind, PeekError, ThreadMesh, UnreadDevice};
 use crate::explain::describe;

@@ -4,8 +4,6 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use embassy_time::{with_timeout, Duration};
-
 use futures_util::future::join_all;
 
 use log::info;
@@ -15,6 +13,7 @@ use rs_matter::fabric::Fabric;
 use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::Address;
 use rs_matter::utils::sync::MaybeSend;
+use rs_matter::utils::timers::{with_timeout, Duration};
 
 use crate::api::{AdvertisedDevice, AdvertisedFabric, DeviceFabric, PeekError};
 use crate::ota::OtaImageStore;

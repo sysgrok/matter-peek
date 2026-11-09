@@ -34,9 +34,6 @@ use core::pin::pin;
 
 use alloc::vec::Vec;
 
-use embassy_futures::select::{select, Either};
-use embassy_time::{with_timeout, Duration, Timer};
-
 use log::{error, info, warn};
 
 use rs_matter::cert::gen::VALID_FOREVER;
@@ -61,6 +58,8 @@ use rs_matter::transport::network::btp::Btp;
 use rs_matter::transport::network::mdns::CommissionableFilter;
 use rs_matter::transport::network::{Address, BtAddr};
 use rs_matter::transport::session::SessionMode;
+use rs_matter::utils::futures::{select, Either};
+use rs_matter::utils::timers::{with_timeout, Duration, Instant, Timer};
 use rs_matter::Matter;
 
 use crate::ca::ControllerCa;
@@ -583,8 +582,9 @@ async fn read_concurrent_connection<C: Crypto>(
 /// operational address over mDNS) until it succeeds or we give up.
 ///
 /// The device may not have finished joining its network / started announcing itself
-/// when we first try, so `complete_via_case` is retried on failure (a failed
-/// resolve returns promptly) within a bounded window.
+/// when we first try, so `complete_via_case` is retried on failure within a
+/// bounded window of wall-clock time: a failed resolve takes a few seconds of its
+/// own, so counting only the pauses between attempts would outlast the fail-safe.
 async fn phase_b_complete<C: Crypto>(
     matter: &Matter<'_>,
     crypto: &C,
@@ -611,19 +611,20 @@ async fn phase_b_complete<C: Crypto>(
     .with_case_attempts(1);
 
     let deadline = OPERATIONAL_JOIN_TIMEOUT_SECS;
-    let mut waited = 0u64;
+    let started = Instant::now();
 
     loop {
         match commissioner.complete_via_case(phase1).await {
             Ok(()) => return Ok(()),
-            Err(e) if waited >= deadline => return Err(e),
+            Err(e) if started.elapsed().as_secs() >= deadline => return Err(e),
             Err(e) => {
+                let waited = started.elapsed().as_secs();
+
                 info!(
                     "BLE commission: device not operational yet ({e:?}); retrying (waited {waited}s / {deadline}s)"
                 );
 
                 Timer::after(Duration::from_secs(3)).await;
-                waited += 3;
             }
         }
     }

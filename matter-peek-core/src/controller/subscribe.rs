@@ -42,9 +42,7 @@
 use core::cell::{Cell, RefCell};
 use core::num::NonZeroU8;
 
-use embassy_futures::poll_once;
-use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
-use embassy_time::{Duration, Instant, Timer};
+use futures_util::FutureExt as _;
 
 use log::{debug, info, warn};
 
@@ -59,8 +57,10 @@ use rs_matter::sc::ExchangeInitiator as _;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::mrp::RetransEntry;
 use rs_matter::transport::session::SessionMode;
+use rs_matter::utils::futures::{select, select3, select4, Either, Either3, Either4};
 use rs_matter::utils::sync::blocking::Mutex;
 use rs_matter::utils::sync::Notification;
+use rs_matter::utils::timers::{Duration, Instant, Timer};
 use rs_matter::Matter;
 
 use crate::datamodel::{self, Decoded, EventReport};
@@ -781,7 +781,7 @@ where
     });
 
     // A renewal asked for before this subscription was made is moot.
-    let _ = poll_once(retry.wait());
+    let _ = retry.wait().now_or_never();
 
     let window = Duration::from_secs(max_int as u64)
         + report_round_trip(matter, fab_idx, node_id) * ROUND_TRIPS;

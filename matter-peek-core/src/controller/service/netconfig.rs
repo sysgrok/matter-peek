@@ -2,14 +2,13 @@
 
 use alloc::format;
 
-use embassy_time::{with_timeout, Duration, Instant, Timer};
-
 use log::{info, warn};
 
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::net_comm::WirelessCreds;
 use rs_matter::persist::KvBlobStore;
 use rs_matter::utils::sync::MaybeSend;
+use rs_matter::utils::timers::{with_timeout, Duration, Instant, Timer};
 
 use crate::api::{
     NetworkChange, NetworkConfig, NetworkCredentials, NetworkInfo, NetworkKind, PeekError,

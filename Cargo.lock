@@ -3204,7 +3204,6 @@ dependencies = [
  "async-io",
  "base64 0.22.1",
  "directories",
- "embassy-futures",
  "embassy-time",
  "embassy-time-queue-utils",
  "futures-util",

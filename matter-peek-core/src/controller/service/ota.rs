@@ -8,9 +8,6 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use embassy_futures::select::{select, Either};
-use embassy_time::{with_timeout, Duration, Instant, Timer};
-
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use log::{info, warn};
@@ -18,8 +15,10 @@ use log::{info, warn};
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::ota_prov::OtaRequestorId;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::futures::{select, Either};
 use rs_matter::utils::sync::blocking::Mutex;
 use rs_matter::utils::sync::{MaybeSend, MaybeSendSync};
+use rs_matter::utils::timers::{with_timeout, Duration, Instant, Timer};
 
 use crate::api::{display, OtaImageInfo, OtaListener, OtaProgress, OtaUpdateInfo, PeekError};
 use crate::model::{DeviceHandle, DiagSet};

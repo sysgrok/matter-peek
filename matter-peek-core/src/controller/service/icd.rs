@@ -2,15 +2,14 @@
 
 use alloc::vec::Vec;
 
-use embassy_futures::select::{select, Either};
-use embassy_time::{Duration, Instant, Timer};
-
 use log::{info, warn};
 
 use rs_matter::crypto::Crypto;
 use rs_matter::error::ErrorCode;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::futures::{select, Either};
 use rs_matter::utils::sync::MaybeSend;
+use rs_matter::utils::timers::{Duration, Instant, Timer};
 
 use crate::api::PeekError;
 use crate::icd;

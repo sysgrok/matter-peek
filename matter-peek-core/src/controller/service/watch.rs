@@ -4,13 +4,13 @@ use alloc::rc::Rc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use embassy_futures::select::{select, Either};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use log::info;
 
 use rs_matter::crypto::Crypto;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::utils::futures::{select, Either};
 use rs_matter::utils::sync::MaybeSend;
 use rs_matter::utils::sync::Notification;
 

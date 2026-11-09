@@ -73,9 +73,11 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
 
         #[cfg(feature = "ble")]
         let (devices, ble_devices) = {
-            let (devices, ble_devices) =
-                embassy_futures::join::join(network, crate::ble::scan_ble(&filter, BLE_SCAN_SECS))
-                    .await;
+            let (devices, ble_devices) = rs_matter::utils::futures::join(
+                network,
+                crate::ble::scan_ble(&filter, BLE_SCAN_SECS),
+            )
+            .await;
 
             let ble_devices = ble_devices
                 .unwrap_or_else(|e| {

@@ -26,9 +26,6 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use embassy_futures::select::{select, select3, Either, Either3};
-use embassy_time::{Duration, Instant, Timer};
-
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use log::{error, info, warn};
@@ -37,8 +34,10 @@ use rs_matter::crypto::Crypto;
 use rs_matter::error::Error;
 use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::{NetworkReceive, NetworkSend, NoNetwork};
+use rs_matter::utils::futures::{select, select3, Either, Either3};
 use rs_matter::utils::sync::Notification;
 use rs_matter::utils::sync::{MaybeSend, MaybeSendSync};
+use rs_matter::utils::timers::{Duration, Instant, Timer};
 use rs_matter::Matter;
 
 use crate::api::{

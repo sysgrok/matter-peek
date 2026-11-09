@@ -6,8 +6,6 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use embassy_time::{with_timeout, Duration, Instant, Timer};
-
 use log::{info, warn};
 
 use rs_matter::crypto::Crypto;
@@ -15,6 +13,7 @@ use rs_matter::dm::clusters::decl::icd_management::FULL_CLUSTER as ICD_MANAGEMEN
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::persist::KvBlobStore;
 use rs_matter::utils::sync::MaybeSend;
+use rs_matter::utils::timers::{with_timeout, Duration, Instant, Timer};
 
 use crate::api::query::{Facts, Known, Query};
 use crate::api::{

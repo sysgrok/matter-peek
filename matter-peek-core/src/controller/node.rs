@@ -15,8 +15,6 @@ use core::num::NonZeroU8;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use embassy_time::{Duration, Timer};
-
 use log::{error, info};
 
 use rs_matter::acl::{AclEntry, AuthMode, Target};
@@ -42,6 +40,7 @@ use rs_matter::respond::{ChainedExchangeHandler, Responder};
 use rs_matter::sc::{SecureChannel, PROTO_ID_SECURE_CHANNEL};
 use rs_matter::transport::exchange::MatterBuffers;
 use rs_matter::utils::sync::{MaybeSend, MaybeSendSync};
+use rs_matter::utils::timers::{Duration, Timer};
 use rs_matter::{clusters, devices, with, Matter};
 
 use crate::icd::CheckInReceiver;

@@ -398,12 +398,14 @@ pub(crate) async fn matter_hosts() -> Vec<MatterHost> {
 
 /// How long a browse looks at most.
 #[cfg(feature = "mdns-avahi")]
-const BROWSE_WINDOW: embassy_time::Duration = embassy_time::Duration::from_secs(2);
+const BROWSE_WINDOW: rs_matter::utils::timers::Duration =
+    rs_matter::utils::timers::Duration::from_secs(2);
 
 /// How long a browse looks at least, though the daemon has nothing more: on a
 /// cold cache, it says so before slower responders have answered.
 #[cfg(feature = "mdns-avahi")]
-const BROWSE_MIN: embassy_time::Duration = embassy_time::Duration::from_millis(1500);
+const BROWSE_MIN: rs_matter::utils::timers::Duration =
+    rs_matter::utils::timers::Duration::from_millis(1500);
 
 /// A service instance, resolved.
 #[cfg(any(feature = "mdns-avahi", test))]
@@ -421,9 +423,9 @@ async fn avahi_browse(
     service_type: &str,
     done: impl Fn(&[Resolved]) -> bool,
 ) -> rs_matter::utils::zbus::Result<Vec<Resolved>> {
-    use embassy_futures::select::{select, select3, Either, Either3};
-    use embassy_time::{Instant, Timer};
     use futures_util::StreamExt;
+    use rs_matter::utils::futures::{select, select3, Either, Either3};
+    use rs_matter::utils::timers::{Instant, Timer};
     use rs_matter::utils::zbus_proxies::avahi::server2::Server2Proxy;
     use rs_matter::utils::zbus_proxies::avahi::service_browser::ServiceBrowserProxy;
 
