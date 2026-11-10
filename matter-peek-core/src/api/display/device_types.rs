@@ -83,6 +83,7 @@ pub(super) static DEVICE_TYPES: &[(u32, &str, bool)] = &[
     (0x0306, "Flow Sensor", false),
     (0x0307, "Humidity Sensor", false),
     (0x0309, "Heat Pump", false),
+    (0x030A, "Thermostat Controller", false),
     (0x050C, "Energy EVSE", false),
     (0x050D, "Device Energy Management", true),
     (0x050F, "Water Heater", false),

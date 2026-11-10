@@ -205,10 +205,6 @@ pub async fn commission_ble<C: Crypto>(
     info!("BLE commission: using device {addr}");
 
     // ---- Phase A — over BLE/BTP. -----------------------------------------------
-    // BlueZ reports an under-stated GATT MTU; the relaxed negotiation lets us use
-    // the larger MTU the peer actually supports (mirrors the peripheral).
-    btp.set_relaxed_mtu_nego(true);
-
     // Establish the initiator role and a clean session *before* the futures below
     // run. The commissioner (`flow`) starts sending Matter traffic (the PASE
     // PBKDFParamRequest) as soon as the link is up, so the session must already
