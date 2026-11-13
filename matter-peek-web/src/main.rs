@@ -910,6 +910,31 @@ impl Component for App {
                 true
             }
             Msg::OtaProgress(node_id, progress) => {
+                let shown = self.ota_progress.get(&node_id);
+
+                // Every update is told now, not just this page's: of one this
+                // page does not show, only a running one counts. Two
+                // connections tell this page's own, so a download does not go
+                // back.
+                let unshown = shown.is_none() && !self.ota_announcing.contains(&node_id);
+                let stale = matches!(progress, api::OtaProgress::Downloading { .. })
+                    && shown.is_some_and(|shown| {
+                        matches!(
+                            shown,
+                            api::OtaProgress::Downloading { .. }
+                                | api::OtaProgress::Applying { .. }
+                        ) && ota_stage(&progress) < ota_stage(shown)
+                    });
+                if (unshown && !progress.in_progress()) || stale {
+                    return false;
+                }
+
+                // The poll gives the time left.
+                if progress.in_progress() && !self.ota_polling {
+                    self.ota_polling = true;
+                    read_ota_updates(ctx.link().clone(), 0);
+                }
+
                 self.ota_announcing.remove(&node_id);
                 self.ota_status
                     .insert(node_id, ota_progress_text(&progress));

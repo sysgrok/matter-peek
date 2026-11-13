@@ -94,7 +94,7 @@ same native controller also serves the CLI, the MCP server and the apps.
 | Fabrics | `fabrics`, `create_fabric`, `rename_fabric`, `set_default_fabric`, `delete_fabric` (our fabrics); `remove_device_fabric` (removes another controller's fabric from a device) |
 | Sharing | `open_commissioning_window`, `close_commissioning_window`, `commissioning_window` |
 | Time | `device_time`, `set_device_time` |
-| OTA | `ota_images`, `ota_upload` (returns an `OtaUpload` to write chunks to), `ota_delete`, `ota_update` (with a progress listener), `ota_updates` |
+| OTA | `ota_images`, `ota_upload` (returns an `OtaUpload` to write chunks to), `ota_delete`, `ota_update` (with a progress listener), `ota_updates`, `subscribe_ota` (live: the progress of every update, wherever it was started; returns an `OtaSubscription`) |
 | Assistant | `assistant`, `set_assistant` (an API key is kept only while the API address stays the same), `clear_assistant`. They manage the assistant's model, which is kept in the store. They never return its key; only `assistant_model` (Rust only, for an agent in the same process) does. |
 | Controller | `capabilities` (what this controller can do, fixed by how it was built) |
 
@@ -511,7 +511,9 @@ in chunks and checked as they arrive. `ota_update` announces us to the device,
 and the device then queries for the image and downloads it over BDX. The
 progress is reported to an `OtaListener`. The service also keeps the latest
 update of each device for an hour after its last progress (`ota_updates`), so
-that any client can follow it.
+that any client can follow it, and tells each move of any update to the
+listeners of `subscribe_ota`: a download once per percent. A wire connection
+that follows the device list follows the updates too.
 
 ### Fabrics of ours
 - Each of our fabrics has its own root CA (the RCAC signs directly), a random

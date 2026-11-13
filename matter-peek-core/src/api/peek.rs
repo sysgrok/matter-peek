@@ -568,6 +568,23 @@ impl MatterPeek {
         }))
     }
 
+    /// Follow the OTA updates of all devices, wherever they were started:
+    /// `listener` gets the progress of those running now, then each move of
+    /// any update (a download in whole percents), until the returned
+    /// subscription is stopped or dropped.
+    pub async fn subscribe_ota(
+        &self,
+        listener: Arc<dyn OtaListener>,
+    ) -> Result<Arc<OtaSubscription>, PeekError> {
+        let watcher = self.call(|reply| Op::WatchOta { listener, reply }).await?;
+
+        Ok(Arc::new(OtaSubscription {
+            watcher,
+            ops: self.ops.clone(),
+            stopped: AtomicBool::new(false),
+        }))
+    }
+
     /// The stored OTA images.
     pub async fn ota_images(&self) -> Result<Vec<OtaImageInfo>, PeekError> {
         self.call(Op::OtaImages).await
@@ -770,6 +787,32 @@ impl DevicesSubscription {
 }
 
 impl Drop for DevicesSubscription {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// A live subscription to the OTA updates of all devices; stops when dropped.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
+pub struct OtaSubscription {
+    watcher: u64,
+    ops: async_channel::Sender<Op>,
+    stopped: AtomicBool,
+}
+
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl OtaSubscription {
+    /// Stop following the OTA updates.
+    pub fn stop(&self) {
+        if !self.stopped.swap(true, Ordering::SeqCst) {
+            let _ = self.ops.try_send(Op::UnwatchOta {
+                watcher: self.watcher,
+            });
+        }
+    }
+}
+
+impl Drop for OtaSubscription {
     fn drop(&mut self) {
         self.stop();
     }
@@ -1059,6 +1102,13 @@ pub(crate) enum Op {
         reply: Reply<u64>,
     },
     UnwatchDevices {
+        watcher: u64,
+    },
+    WatchOta {
+        listener: Arc<dyn OtaListener>,
+        reply: Reply<u64>,
+    },
+    UnwatchOta {
         watcher: u64,
     },
     OtaImages(Reply<Vec<OtaImageInfo>>),

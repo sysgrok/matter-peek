@@ -13,7 +13,7 @@ use base64::Engine as _;
 
 use crate::api::peek::{
     CommissionListener, DevicesListener, DevicesSubscription, HealthListener, MatterPeek,
-    ModelListener, OtaListener, OtaUpload, StayAwake, Subscription,
+    ModelListener, OtaListener, OtaSubscription, OtaUpload, StayAwake, Subscription,
 };
 use crate::api::types::*;
 
@@ -31,6 +31,7 @@ pub struct WireSession {
     subscriptions: RefCell<BTreeMap<u64, Arc<Subscription>>>,
     model_subscriptions: RefCell<BTreeMap<u64, (ModelScope, Arc<Subscription>)>>,
     devices_subscription: RefCell<Option<Arc<DevicesSubscription>>>,
+    ota_subscription: RefCell<Option<Arc<OtaSubscription>>>,
     uploads: RefCell<BTreeMap<u32, Arc<OtaUpload>>>,
     stay_awake: RefCell<BTreeMap<u64, Arc<StayAwake>>>,
 }
@@ -44,6 +45,7 @@ impl WireSession {
             subscriptions: RefCell::new(BTreeMap::new()),
             model_subscriptions: RefCell::new(BTreeMap::new()),
             devices_subscription: RefCell::new(None),
+            ota_subscription: RefCell::new(None),
             uploads: RefCell::new(BTreeMap::new()),
             stay_awake: RefCell::new(BTreeMap::new()),
         }
@@ -268,14 +270,21 @@ impl WireSession {
                 Ok(Response::Ok)
             }
             Request::SubscribeDevices => {
+                // The list, and the progress of its devices' updates.
                 let reports = Arc::new(Reports { out: out.clone() });
-                peek.subscribe_devices(reports).await.map(|subscription| {
-                    *self.devices_subscription.borrow_mut() = Some(subscription);
-                    Response::Ok
-                })
+                let progress = Arc::new(Progress { out: out.clone() });
+                match peek.subscribe_devices(reports).await {
+                    Ok(devices) => peek.subscribe_ota(progress).await.map(|ota| {
+                        *self.devices_subscription.borrow_mut() = Some(devices);
+                        *self.ota_subscription.borrow_mut() = Some(ota);
+                        Response::Ok
+                    }),
+                    Err(e) => Err(e),
+                }
             }
             Request::UnsubscribeDevices => {
                 self.devices_subscription.borrow_mut().take();
+                self.ota_subscription.borrow_mut().take();
                 Ok(Response::Ok)
             }
             Request::Decommission { node_id, force } => {

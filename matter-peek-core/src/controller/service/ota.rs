@@ -69,6 +69,9 @@ impl<T: Fn(OtaEvent) + MaybeSendSync> OtaEventFn for T {}
 /// The OTA events the OTA Provider tells, from the node's tasks.
 pub(super) type OtaEvents = Arc<dyn OtaEventFn>;
 
+/// Who follows every OTA update, by watcher ID: see [`Ctx::watch_ota`].
+pub(super) type OtaWatchers = Shared<Vec<(u64, Arc<dyn OtaListener>)>>;
+
 /// A new [`Shared`] `value`.
 pub(super) fn shared<T>(value: T) -> Shared<T> {
     Arc::new(Mutex::new(RefCell::new(value)))
@@ -246,6 +249,31 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
         })
     }
 
+    /// Tell `listener` the progress of every OTA update, of those running now
+    /// first, until [`Self::unwatch_ota`].
+    pub(super) fn watch_ota(&self, listener: Arc<dyn OtaListener>) -> u64 {
+        with(&self.ota_updates, |updates| {
+            for (node_id, update) in updates.iter() {
+                if update.progress.in_progress() {
+                    listener.on_progress(*node_id, update.progress.clone());
+                }
+            }
+        });
+
+        let id = self.next_watcher.get();
+        self.next_watcher.set(id + 1);
+        with(&self.ota_watchers, |watchers| watchers.push((id, listener)));
+
+        id
+    }
+
+    /// Stop telling `watcher` the OTA updates.
+    pub(super) fn unwatch_ota(&self, watcher: u64) {
+        with(&self.ota_watchers, |watchers| {
+            watchers.retain(|(id, _)| *id != watcher)
+        });
+    }
+
     /// Allow the device image `name`, have `progress` follow its update, and
     /// announce us to it as its OTA Provider.
     pub(super) async fn ota_update(
@@ -417,6 +445,7 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
 #[cfg_attr(not(feature = "send-sync"), allow(clippy::arc_with_non_send_sync))]
 pub(super) fn events(
     followers: Shared<Vec<OtaFollower>>,
+    watchers: OtaWatchers,
     updates: Shared<BTreeMap<u64, TrackedUpdate>>,
     apply_jobs: async_channel::Sender<ApplyJob>,
 ) -> OtaEvents {
@@ -431,7 +460,15 @@ pub(super) fn events(
             });
         }
 
-        with(&updates, |updates| track(updates, &event));
+        let moved = with(&updates, |updates| track(updates, &event));
+
+        with(&watchers, |watchers| {
+            for (node_id, progress) in &moved {
+                for (_, listener) in watchers.iter() {
+                    listener.on_progress(*node_id, progress.clone());
+                }
+            }
+        });
 
         let (node_id, image, progress) = match event {
             OtaEvent::Offered { node, image } => (
@@ -514,25 +551,29 @@ fn no_upload(id: u32) -> PeekError {
 }
 
 /// Record `event` in the latest update of its device: a download, of the
-/// devices offered its image.
-fn track(updates: &mut BTreeMap<u64, TrackedUpdate>, event: &OtaEvent) {
+/// devices offered its image. Returns the devices whose progress it moved,
+/// with that progress: a download moves once per percent, not per block.
+fn track(updates: &mut BTreeMap<u64, TrackedUpdate>, event: &OtaEvent) -> Vec<(u64, OtaProgress)> {
     let now = Instant::now();
+    let mut moved = Vec::new();
 
     match event {
         OtaEvent::Offered { node, image } => {
+            let progress = OtaProgress::Offered {
+                name: image.clone(),
+            };
             updates.insert(
                 node.node_id,
                 TrackedUpdate {
                     name: Some(image.clone()),
-                    progress: OtaProgress::Offered {
-                        name: image.clone(),
-                    },
+                    progress: progress.clone(),
                     downloaded: None,
                     size: None,
                     started: now,
                     last: now,
                 },
             );
+            moved.push((node.node_id, progress));
         }
         OtaEvent::NotOffered { node } => {
             updates.insert(
@@ -546,23 +587,28 @@ fn track(updates: &mut BTreeMap<u64, TrackedUpdate>, event: &OtaEvent) {
                     last: now,
                 },
             );
+            moved.push((node.node_id, OtaProgress::NotOffered));
         }
         OtaEvent::Downloaded {
             image,
             offset,
             size,
         } => {
-            let downloading = updates.values_mut().filter(|update| {
+            let progress = OtaProgress::Downloading {
+                percent: (*offset as u128 * 100 / (*size).max(1) as u128) as u8,
+            };
+            let downloading = updates.iter_mut().filter(|(_, update)| {
                 update.name.as_ref() == Some(image)
                     && matches!(
                         update.progress,
                         OtaProgress::Offered { .. } | OtaProgress::Downloading { .. }
                     )
             });
-            for update in downloading {
-                update.progress = OtaProgress::Downloading {
-                    percent: (*offset as u128 * 100 / (*size).max(1) as u128) as u8,
-                };
+            for (node_id, update) in downloading {
+                if update.progress != progress {
+                    update.progress = progress.clone();
+                    moved.push((*node_id, progress.clone()));
+                }
                 update.downloaded = Some(*offset);
                 update.size = Some(*size);
                 update.last = now;
@@ -575,13 +621,16 @@ fn track(updates: &mut BTreeMap<u64, TrackedUpdate>, event: &OtaEvent) {
             };
             let update = updates.entry(node.node_id).or_insert(TrackedUpdate {
                 name: None,
-                progress: progress.clone(),
+                progress: OtaProgress::NotOffered,
                 downloaded: None,
                 size: None,
                 started: now,
                 last: now,
             });
-            update.progress = progress;
+            if update.progress != progress {
+                update.progress = progress.clone();
+                moved.push((node.node_id, progress));
+            }
             update.last = now;
         }
         OtaEvent::Failed { node, reason } => {
@@ -590,9 +639,12 @@ fn track(updates: &mut BTreeMap<u64, TrackedUpdate>, event: &OtaEvent) {
                     reason: reason.clone(),
                 };
                 update.last = now;
+                moved.push((node.node_id, update.progress.clone()));
             }
         }
     }
+
+    moved
 }
 
 #[cfg(test)]
@@ -650,6 +702,51 @@ mod tests {
         );
         assert_eq!(updates[&7].progress, OtaProgress::Applied { version: 257 });
         assert_eq!(updates[&7].name.as_deref(), Some(IMAGE));
+    }
+
+    #[test]
+    fn an_update_moves_once_per_percent_of_its_download() {
+        let mut updates = BTreeMap::new();
+        let downloaded = |offset| OtaEvent::Downloaded {
+            image: IMAGE.to_string(),
+            offset,
+            size: 1000,
+        };
+
+        assert_eq!(
+            track(
+                &mut updates,
+                &OtaEvent::Offered {
+                    node: node(7),
+                    image: IMAGE.to_string(),
+                },
+            ),
+            [(
+                7,
+                OtaProgress::Offered {
+                    name: IMAGE.to_string()
+                }
+            )]
+        );
+        assert_eq!(
+            track(&mut updates, &downloaded(10)),
+            [(7, OtaProgress::Downloading { percent: 1 })]
+        );
+        assert!(track(&mut updates, &downloaded(15)).is_empty(), "still 1 %");
+        assert_eq!(
+            track(&mut updates, &downloaded(20)),
+            [(7, OtaProgress::Downloading { percent: 2 })]
+        );
+        assert_eq!(
+            track(
+                &mut updates,
+                &OtaEvent::Applying {
+                    node: node(7),
+                    version: 257,
+                },
+            ),
+            [(7, OtaProgress::Applying { version: 257 })]
+        );
     }
 
     #[test]

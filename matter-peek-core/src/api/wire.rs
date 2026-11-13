@@ -198,10 +198,12 @@ pub enum Request {
     UnsubscribeModel { node_id: u64 },
     /// Follow the device list on this connection (see
     /// `MatterPeek::subscribe_devices`), as [`Event::Devices`]: the list now,
-    /// then each time it changes. Answered with [`Response::Ok`].
+    /// then each time it changes. Also the OTA updates of all devices, wherever
+    /// they were started (see `MatterPeek::subscribe_ota`), as
+    /// [`Event::OtaProgress`]. Answered with [`Response::Ok`].
     SubscribeDevices,
-    /// Stop following the device list on this connection. Answered with
-    /// [`Response::Ok`].
+    /// Stop following the device list and the OTA updates on this connection.
+    /// Answered with [`Response::Ok`].
     UnsubscribeDevices,
     /// See `MatterPeek::decommission`. Answered with [`Response::Devices`].
     Decommission { node_id: u64, force: bool },
@@ -508,7 +510,8 @@ pub enum Event {
         #[serde(default)]
         syncing: bool,
     },
-    /// How an update started on this connection goes.
+    /// How an update started on this connection goes, or any update on a
+    /// connection that follows the device list.
     OtaProgress { node_id: u64, progress: OtaProgress },
     /// What the assistant does in chat `chat_id`, asked on this connection.
     Chat { chat_id: String, update: ChatEvent },

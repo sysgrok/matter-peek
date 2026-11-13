@@ -162,6 +162,8 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     ota_events: OtaEvents,
     /// Who follows which OTA update.
     ota_followers: Shared<Vec<OtaFollower>>,
+    /// Who follows every OTA update.
+    ota_watchers: ota::OtaWatchers,
     /// The latest OTA update of each device, by node ID.
     ota_updates: Shared<BTreeMap<u64, TrackedUpdate>>,
     /// The commissioning windows we opened, by node ID.
@@ -327,6 +329,8 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
             | Op::LetSleep { .. }
             | Op::WatchDevices { .. }
             | Op::UnwatchDevices { .. }
+            | Op::WatchOta { .. }
+            | Op::UnwatchOta { .. }
             | Op::OtaImages(_)
             | Op::OtaUpdates(_)
             | Op::OtaUploadBegin { .. }
@@ -638,6 +642,10 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
                 let _ = reply.send(self.watch_devices(listener)).await;
             }
             Op::UnwatchDevices { watcher } => self.unwatch_devices(watcher),
+            Op::WatchOta { listener, reply } => {
+                let _ = reply.send(Ok(self.watch_ota(listener))).await;
+            }
+            Op::UnwatchOta { watcher } => self.unwatch_ota(watcher),
             Op::OtaImages(reply) => {
                 let _ = reply.send(Ok(self.ota_images())).await;
             }
@@ -815,9 +823,15 @@ fn run<'a, C, S, O, N, M, R>(
     }
 
     let ota_followers = ota::shared(Vec::new());
+    let ota_watchers = ota::shared(Vec::new());
     let ota_updates = ota::shared(BTreeMap::new());
     let (apply_jobs, apply_jobs_rx) = async_channel::unbounded();
-    let ota_events = ota::events(ota_followers.clone(), ota_updates.clone(), apply_jobs);
+    let ota_events = ota::events(
+        ota_followers.clone(),
+        ota_watchers.clone(),
+        ota_updates.clone(),
+        apply_jobs,
+    );
     let ota = OtaProvider::new(ota, {
         let ota_events = ota_events.clone();
         Box::new(move |event| ota_events(event)) as Box<dyn OtaEventFn>
@@ -845,6 +859,7 @@ fn run<'a, C, S, O, N, M, R>(
         model_gate: Gate::new(MODEL_PRIMINGS_OVER_THREAD),
         ota,
         ota_followers,
+        ota_watchers,
         ota_updates,
         ota_events,
         windows: RefCell::new(BTreeMap::new()),
@@ -1026,9 +1041,12 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             Op::Assistant(reply) => refuse(reply, error).await,
             Op::ReadThreadMesh { reply, .. } => refuse(reply, error).await,
             Op::SetAssistant { reply, .. } => refuse(reply, error).await,
-            Op::WatchDevices { reply, .. } => refuse(reply, error).await,
+            Op::WatchDevices { reply, .. } | Op::WatchOta { reply, .. } => {
+                refuse(reply, error).await
+            }
             Op::Unwatch { .. }
             | Op::UnwatchDevices { .. }
+            | Op::UnwatchOta { .. }
             | Op::StayAwakeEnd { .. }
             | Op::OtaUploadDiscard { .. } => {}
         }
