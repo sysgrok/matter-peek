@@ -159,10 +159,9 @@ where
         }));
     }
     let im = &im;
-    tasks.push(Box::pin(async move {
-        let never = keep_time(matter, im).await;
-        match never {}
-    }));
+    tasks.push(Box::pin(
+        async move { match keep_time(matter, im).await {} },
+    ));
 
     runner.run(tasks, main);
 
