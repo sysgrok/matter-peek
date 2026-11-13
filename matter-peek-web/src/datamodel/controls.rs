@@ -1177,9 +1177,12 @@ fn view_control(
                 .unwrap_or_default();
             let writable = a.is_some_and(|a| a.writable);
             let attr = *attr;
+            // Keyed by the value, so that a new value makes a new select: a
+            // browser ignores the `selected` attribute of an option the user
+            // has picked, and the select would show a stale or the first one.
             html! {
                 <div class="select is-small">
-                    <select disabled={busy || !writable}
+                    <select key={current.clone()} disabled={busy || !writable}
                         onchange={on_act.reform(move |e: Event| Action::Write {
                             endpoint, cluster: cluster_id, attribute: attr,
                             value: serde_json::Value::String(select_value(e)).to_string(),
@@ -1211,7 +1214,8 @@ fn view_control(
             let (cmd, keys, fields) = (*cmd, *keys, *fields);
             html! {
                 <div class="select is-small">
-                    <select disabled={busy || entries.is_empty()}
+                    // Keyed by the selection, as the choice above.
+                    <select key={format!("{selected:?}")} disabled={busy || entries.is_empty()}
                         onchange={on_act.reform(move |e: Event| {
                             let entry = select_value(e).parse::<usize>().ok().and_then(|i| entries.get(i).cloned());
                             let mut picked = serde_json::Map::new();
