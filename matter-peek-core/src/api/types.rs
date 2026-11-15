@@ -94,12 +94,34 @@ pub enum NetworkCredentials {
     },
 }
 
-/// The steps of a commission, reported as it goes.
+/// The steps of a commission, reported as it goes. `Commission` is the whole
+/// of it: `Started` first, then `Done` or `Failed` last. Each of the others is
+/// reported once as `Started`, when the commission gets to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(rename_all = "snake_case")]
 pub enum CommissionStep {
     Commission,
+    /// Finding the device over Bluetooth LE.
+    BleScan,
+    /// Opening the PASE session, with the passcode.
+    Pase,
+    /// Removing fabrics of ours that earlier commissions left on the device.
+    OrphanSweep,
+    ArmFailSafe,
+    DeviceAttestation,
+    /// Getting the device's certificate request, and issuing its certificate.
+    CsrRequest,
+    AddTrustedRootCertificate,
+    AddNoc,
+    /// Giving the device its network credentials, over Bluetooth LE.
+    NetworkSetup,
+    /// Finding the device on its network, and opening a CASE session.
+    /// Reported again for each attempt.
+    FindOperational,
+    CommissioningComplete,
+    /// Rolling the device back after a cancel or a failure.
+    Cleanup,
 }
 
 /// How a commission step goes.

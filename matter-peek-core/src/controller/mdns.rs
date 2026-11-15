@@ -87,8 +87,10 @@ impl<S: NetworkSend, R: NetworkReceive> Mdns for Builtin<'_, S, R> {
 /// the host can use, as it finds when the service starts. Avahi if it runs,
 /// then systemd-resolved if it runs with mDNS on (it publishes our record, so
 /// `MulticastDNS=yes`), then Bonjour, then our own.
+#[cfg(feature = "std")]
 pub(crate) struct HostMdns;
 
+#[cfg(feature = "std")]
 impl Mdns for HostMdns {
     async fn run<C: Crypto>(&mut self, matter: &Matter<'_>, crypto: C) -> Result<(), Error> {
         match Backend::choose().await {
@@ -110,6 +112,7 @@ impl Mdns for HostMdns {
 }
 
 /// The backends a build may have.
+#[cfg(feature = "std")]
 enum Backend {
     #[cfg(feature = "mdns-avahi")]
     Avahi,
@@ -123,6 +126,7 @@ enum Backend {
     None,
 }
 
+#[cfg(feature = "std")]
 impl Backend {
     /// The first of the build's backends that the host can use.
     #[allow(unreachable_code)]

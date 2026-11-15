@@ -19,7 +19,7 @@ pub use peek::{
 };
 
 #[cfg(feature = "controller")]
-pub(crate) use peek::{Op, Reply, Service};
+pub(crate) use peek::{CancelSignal, Op, Reply, Service};
 
 pub mod agent;
 pub mod display;

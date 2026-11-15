@@ -17,7 +17,6 @@
 use core::cell::{Cell, RefCell};
 use core::future::Future;
 use core::pin::{pin, Pin};
-use core::sync::atomic::AtomicBool;
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -41,8 +40,8 @@ use rs_matter::utils::timers::{Duration, Instant, Timer};
 use rs_matter::Matter;
 
 use crate::api::{
-    BorderRouter, Capabilities, DeviceInfo, DevicesListener, FabricRef, ModelScope, Op, PeekConfig,
-    PeekError, Service,
+    BorderRouter, CancelSignal, Capabilities, DeviceInfo, DevicesListener, FabricRef, ModelScope,
+    Op, PeekConfig, PeekError, Service,
 };
 use crate::fabrics::OurFabrics;
 use crate::logs::LogUploads;
@@ -143,8 +142,8 @@ struct Ctx<'a, C: Crypto, S, O: OtaImageStore> {
     /// The node ID the running commission gives its device, which only the
     /// commission lists.
     commissioned_node: Cell<Option<u64>>,
-    /// Set by `MatterPeek::cancel_commission`, checked by the commission.
-    cancel: Arc<AtomicBool>,
+    /// Set by `MatterPeek::cancel_commission`, watched by the commission.
+    cancel: Arc<CancelSignal>,
     /// The live health subscriptions, by device, each shared by its listeners.
     subs: RefCell<BTreeMap<u64, Watch>>,
     next_watcher: Cell<u64>,
@@ -311,9 +310,10 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
     /// The keys `op` runs under, or `None` if it does no device I/O.
     fn keys(&self, op: &Op) -> Option<Vec<(Key, Mode)>> {
         let keys = match op {
+            #[cfg(feature = "std")]
+            Op::ImportCheck(_) => return None,
             Op::ReadQrImage { .. }
             | Op::ExportStore(_)
-            | Op::ImportCheck(_)
             | Op::Fabrics(_)
             | Op::CreateFabric { .. }
             | Op::RenameFabric { .. }
@@ -491,6 +491,7 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
             Op::ExportStore(reply) => {
                 let _ = reply.send(self.export_store()).await;
             }
+            #[cfg(feature = "std")]
             Op::ImportCheck(reply) => {
                 let _ = reply.send(self.import_check()).await;
             }
@@ -995,6 +996,7 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             Op::AdvertisedDevices(reply) => refuse(reply, error).await,
             Op::Capabilities(reply) => refuse(reply, error).await,
             Op::ExportStore(reply) => refuse(reply, error).await,
+            #[cfg(feature = "std")]
             Op::ImportCheck(reply) => refuse(reply, error).await,
             Op::ReadModel { reply, .. } | Op::WriteAttribute { reply, .. } => {
                 refuse(reply, error).await

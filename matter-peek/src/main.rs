@@ -1351,13 +1351,14 @@ impl Out {
 
         match event {
             wire::Event::Step { step, status, .. } => {
-                let step = match step {
-                    api::CommissionStep::Commission => "Commissioning",
-                };
+                let label = display::commission_step_label(*step);
                 match status {
-                    api::StepStatus::Started => println!("{step}..."),
-                    api::StepStatus::Done => println!("{step}: done"),
-                    api::StepStatus::Failed { message } => println!("{step}: failed: {message}"),
+                    api::StepStatus::Started => match display::commission_progress(*step) {
+                        Some(percent) => println!("[{percent:>3}%] {label}..."),
+                        None => println!("{label}..."),
+                    },
+                    api::StepStatus::Done => println!("{label}: done"),
+                    api::StepStatus::Failed { message } => println!("{label}: failed: {message}"),
                 }
             }
             // A delta of attributes not shown here prints nothing.

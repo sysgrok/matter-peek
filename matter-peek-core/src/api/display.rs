@@ -16,9 +16,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use super::types::{
-    BootReason, DeviceFabric, DeviceInfo, DeviceTime, HardwareFault, HealthAreaKind, HealthVerdict,
-    IcdInfo, IcdMode, NetworkFault, NetworkKind, NetworkStatus, RadioFault, ThreadRole,
-    TimeGranularity, WifiSecurity, WifiVersion,
+    BootReason, CommissionStep, DeviceFabric, DeviceInfo, DeviceTime, HardwareFault,
+    HealthAreaKind, HealthVerdict, IcdInfo, IcdMode, NetworkFault, NetworkKind, NetworkStatus,
+    RadioFault, ThreadRole, TimeGranularity, WifiSecurity, WifiVersion,
 };
 
 mod clusters;
@@ -525,6 +525,49 @@ pub fn software_version_label(version: u32, name: Option<String>) -> String {
     versioned(version, hex_u32(version), name)
 }
 
+/// What a commission step does, e.g. `Arming the fail-safe`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn commission_step_label(step: CommissionStep) -> String {
+    match step {
+        CommissionStep::Commission => "Commissioning",
+        CommissionStep::BleScan => "Finding the device over Bluetooth",
+        CommissionStep::Pase => "Opening a PASE session",
+        CommissionStep::OrphanSweep => "Removing our old fabrics from the device",
+        CommissionStep::ArmFailSafe => "Arming the fail-safe",
+        CommissionStep::DeviceAttestation => "Checking the device attestation",
+        CommissionStep::CsrRequest => "Issuing the device certificate",
+        CommissionStep::AddTrustedRootCertificate => "Adding our root certificate",
+        CommissionStep::AddNoc => "Adding the device certificate",
+        CommissionStep::NetworkSetup => "Setting up the device's network",
+        CommissionStep::FindOperational => "Finding the device on its network",
+        CommissionStep::CommissioningComplete => "Completing the commission",
+        CommissionStep::Cleanup => "Rolling the device back",
+    }
+    .to_string()
+}
+
+/// How far a commission is, in percent, when it starts `step`; `None` for
+/// `Commission` and `Cleanup`, which say nothing about it. The figures follow
+/// roughly how long the steps take; a step only one kind of commission has
+/// (e.g. `BleScan`, `NetworkSetup`) is skipped over by the other.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn commission_progress(step: CommissionStep) -> Option<u8> {
+    match step {
+        CommissionStep::Commission | CommissionStep::Cleanup => None,
+        CommissionStep::BleScan => Some(0),
+        CommissionStep::Pase => Some(5),
+        CommissionStep::OrphanSweep => Some(20),
+        CommissionStep::ArmFailSafe => Some(25),
+        CommissionStep::DeviceAttestation => Some(30),
+        CommissionStep::CsrRequest => Some(35),
+        CommissionStep::AddTrustedRootCertificate => Some(45),
+        CommissionStep::AddNoc => Some(50),
+        CommissionStep::NetworkSetup => Some(60),
+        CommissionStep::FindOperational => Some(70),
+        CommissionStep::CommissioningComplete => Some(95),
+    }
+}
+
 /// An 11-digit manual pairing code in its groups, e.g. `3497-011-2332`; any
 /// other code as it is.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
@@ -797,6 +840,49 @@ mod tests {
     use alloc::vec::Vec;
 
     use crate::api::{DeviceDetails, DeviceHandle, Fingerprint, IcdInfo};
+
+    /// The progress only grows along the steps of a commission, over the
+    /// network and over Bluetooth LE.
+    #[test]
+    fn commission_progress_grows() {
+        use CommissionStep::*;
+
+        let ip = [
+            Pase,
+            OrphanSweep,
+            ArmFailSafe,
+            DeviceAttestation,
+            CsrRequest,
+            AddTrustedRootCertificate,
+            AddNoc,
+            FindOperational,
+            CommissioningComplete,
+        ];
+        let ble = [
+            BleScan,
+            Pase,
+            ArmFailSafe,
+            DeviceAttestation,
+            CsrRequest,
+            AddTrustedRootCertificate,
+            AddNoc,
+            NetworkSetup,
+            FindOperational,
+            CommissioningComplete,
+        ];
+
+        for flow in [&ip[..], &ble[..]] {
+            let progress: Vec<u8> = flow
+                .iter()
+                .map(|step| commission_progress(*step).unwrap())
+                .collect();
+            assert!(progress.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(progress.iter().all(|percent| *percent < 100));
+        }
+
+        assert_eq!(commission_progress(Commission), None);
+        assert_eq!(commission_progress(Cleanup), None);
+    }
 
     fn device(icd: Option<IcdInfo>, thread_role: Option<ThreadRole>) -> DeviceInfo {
         DeviceInfo {

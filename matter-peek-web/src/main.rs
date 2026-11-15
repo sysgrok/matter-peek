@@ -3419,13 +3419,6 @@ fn valid_setup_code(code: &str) -> bool {
     }
 }
 
-/// Human-readable name for a commission step.
-fn phase_name(step: api::CommissionStep) -> &'static str {
-    match step {
-        api::CommissionStep::Commission => "Commissioning",
-    }
-}
-
 /// Whether `addr` is a Bluetooth address (`AA:BB:CC:DD:EE:FF`).
 fn valid_bt_addr(addr: &str) -> bool {
     let parts: Vec<&str> = addr.split(':').collect();

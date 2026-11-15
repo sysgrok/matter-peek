@@ -45,6 +45,7 @@ const KV_BUF_LEN: usize = 64 * 1024;
 pub type KvBuf = Mutex<RefCell<[u8; KV_BUF_LEN]>>;
 
 /// Whether `keys` are those of a controller's store: it has our fabrics.
+#[cfg(feature = "std")]
 pub fn is_controller_store(keys: impl IntoIterator<Item = u16>) -> bool {
     keys.into_iter().any(|key| key == FABRICS_KEY)
 }

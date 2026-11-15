@@ -30,6 +30,7 @@ controller = [
     "dep:rs-matter-codegen",
     "dep:async-channel",
     "dep:futures-util",
+    "dep:embassy-sync",
 ]
 
 # The controller's tasks are `Send` (and rs-matter's, `rs-matter/send-sync`),
@@ -97,6 +98,9 @@ log = { workspace = true }
 rs-matter = { version = "0.4", optional = true, default-features = false, features = ["alloc", "rustcrypto", "log"] }
 async-channel = { version = "2", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["alloc"] }
+# Only for `CriticalSectionRawMutex`, the raw mutex of what the API handles share
+# with the service across threads, whether `send-sync` is on or not.
+embassy-sync = { version = "0.8", optional = true, default-features = false }
 
 # --- This host (`std`). ---
 # Only for its `std` time driver; the code uses `rs_matter::utils::timers`.

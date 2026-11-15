@@ -11,8 +11,8 @@ use matter_peek_core::api::{self, display, wire};
 use crate::icons::{icon, Icon};
 use crate::ui;
 use crate::{
-    checkbox_checked, input_value, phase_name, picked_file, textarea_value, valid_bt_addr,
-    valid_hex, valid_setup_code, App, Msg, Network, Tab, Via, BLE_COMMISSION_TIMEOUT_SECS,
+    checkbox_checked, input_value, picked_file, textarea_value, valid_bt_addr, valid_hex,
+    valid_setup_code, App, Msg, Network, Tab, Via, BLE_COMMISSION_TIMEOUT_SECS,
     COMMISSION_TIMEOUT_SECS,
 };
 
@@ -365,9 +365,10 @@ impl App {
     /// How the commission goes, or how it went.
     fn view_progress(&self, link: &Scope<Self>) -> Html {
         let failed = self.steps.last().and_then(|line| match &line.status {
-            api::StepStatus::Failed { message } => {
-                Some(format!("{} failed: {message}", phase_name(line.step)))
-            }
+            api::StepStatus::Failed { message } => Some(format!(
+                "{} failed: {message}",
+                display::commission_step_label(line.step)
+            )),
             _ => None,
         });
 
@@ -377,11 +378,22 @@ impl App {
             } else {
                 COMMISSION_TIMEOUT_SECS
             };
+            // The step the commission is at, once it reported one.
+            let step = self
+                .steps
+                .iter()
+                .rev()
+                .find(|line| line.step != api::CommissionStep::Commission)
+                .map(|line| format!("{}. ", display::commission_step_label(line.step)))
+                .unwrap_or_default();
             (
                 "is-running",
                 None,
                 "Commissioning…".to_string(),
-                format!("This takes up to {secs} s; Cancel stops it."),
+                format!(
+                    "{step}This takes up to {}; Cancel stops it.",
+                    display::short_duration(secs.into())
+                ),
                 html! {},
             )
         } else if let Some(wire::Response::Commissioned(result)) = &self.result {
@@ -433,7 +445,12 @@ impl App {
                     <p class="progress-card-title">{ title }</p>
                     <p>{ text }</p>
                     if self.running {
-                        <progress class="progress is-small is-link mt-2" max="100"></progress>
+                        // Without a value, until the first step, the bar is indeterminate.
+                        <progress class="progress is-small is-link mt-2" max="100"
+                            value={self.steps.iter().rev()
+                                .find_map(|line| display::commission_progress(line.step))
+                                .map(|percent| percent.to_string())}>
+                        </progress>
                     }
                 </div>
                 { action }

@@ -5,11 +5,16 @@
 //! Sync` and its futures are `Send`, so any thread (and UniFFI) may use it; the
 //! stack itself stays on the service's thread.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::cell::Cell;
 
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+
+use rs_matter::utils::sync::blocking::Mutex;
+use rs_matter::utils::sync::Signal;
 
 use super::agent::ModelConfig;
 use super::types::*;
@@ -19,8 +24,8 @@ use super::types::*;
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct MatterPeek {
     ops: async_channel::Sender<Op>,
-    /// Shared with the service, which checks it while commissioning.
-    cancel: Arc<AtomicBool>,
+    /// Shared with the service, which watches it while commissioning.
+    cancel: Arc<CancelSignal>,
     /// The directory of its store, when the host has one: an import is staged
     /// there.
     #[cfg(feature = "std")]
@@ -32,7 +37,7 @@ impl MatterPeek {
     /// e.g. without `std`. With `std`, [`MatterPeek::start`] does that.
     pub fn new() -> (Self, Service) {
         let (ops, ops_rx) = async_channel::unbounded();
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(CancelSignal::new(false));
 
         let peek = Self {
             ops,
@@ -270,11 +275,14 @@ impl MatterPeek {
         self.call(Op::ImportCheck).await
     }
 
-    /// Cancel the running commission at its next safe point: before the device
-    /// has our fabric it stops there; after, the device is decommissioned. The
-    /// commission then fails with [`PeekError::Cancelled`].
+    /// Cancel the running commission. Until the device has completed it, the
+    /// device is rolled back (its fail-safe is disarmed); after, the device is
+    /// decommissioned. The commission then fails with [`PeekError::Cancelled`].
     pub fn cancel_commission(&self) {
-        self.cancel.store(true, Ordering::SeqCst);
+        self.cancel.modify(|cancel| {
+            *cancel = true;
+            (true, ())
+        });
     }
 
     /// The assistant's model, if one is set; its key stays here.
@@ -489,7 +497,7 @@ impl MatterPeek {
             node_id,
             holder,
             ops: self.ops.clone(),
-            stopped: AtomicBool::new(false),
+            stopped: Flag::new(),
         }))
     }
 
@@ -519,7 +527,7 @@ impl MatterPeek {
             node_id,
             watcher,
             ops: self.ops.clone(),
-            stopped: AtomicBool::new(false),
+            stopped: Flag::new(),
         }))
     }
 
@@ -546,7 +554,7 @@ impl MatterPeek {
             node_id,
             watcher,
             ops: self.ops.clone(),
-            stopped: AtomicBool::new(false),
+            stopped: Flag::new(),
         }))
     }
 
@@ -564,7 +572,7 @@ impl MatterPeek {
         Ok(Arc::new(DevicesSubscription {
             watcher,
             ops: self.ops.clone(),
-            stopped: AtomicBool::new(false),
+            stopped: Flag::new(),
         }))
     }
 
@@ -581,7 +589,7 @@ impl MatterPeek {
         Ok(Arc::new(OtaSubscription {
             watcher,
             ops: self.ops.clone(),
-            stopped: AtomicBool::new(false),
+            stopped: Flag::new(),
         }))
     }
 
@@ -672,7 +680,7 @@ impl MatterPeek {
         Ok(Arc::new(OtaUpload {
             id,
             ops: self.ops.clone(),
-            done: AtomicBool::new(false),
+            done: Flag::new(),
         }))
     }
 
@@ -705,7 +713,7 @@ pub struct Subscription {
     node_id: u64,
     watcher: u64,
     ops: async_channel::Sender<Op>,
-    stopped: AtomicBool,
+    stopped: Flag,
 }
 
 #[cfg_attr(feature = "uniffi", uniffi::export)]
@@ -717,7 +725,7 @@ impl Subscription {
 
     /// Stop following the device.
     pub fn stop(&self) {
-        if !self.stopped.swap(true, Ordering::SeqCst) {
+        if self.stopped.set() {
             let _ = self.ops.try_send(Op::Unwatch {
                 node_id: self.node_id,
                 watcher: self.watcher,
@@ -739,7 +747,7 @@ pub struct StayAwake {
     node_id: u64,
     holder: u64,
     ops: async_channel::Sender<Op>,
-    stopped: AtomicBool,
+    stopped: Flag,
 }
 
 #[cfg_attr(feature = "uniffi", uniffi::export)]
@@ -751,7 +759,7 @@ impl StayAwake {
 
     /// Stop keeping it awake, as far as this handle goes.
     pub fn stop(&self) {
-        if !self.stopped.swap(true, Ordering::SeqCst) {
+        if self.stopped.set() {
             let _ = self.ops.try_send(Op::StayAwakeEnd {
                 node_id: self.node_id,
                 holder: self.holder,
@@ -771,14 +779,14 @@ impl Drop for StayAwake {
 pub struct DevicesSubscription {
     watcher: u64,
     ops: async_channel::Sender<Op>,
-    stopped: AtomicBool,
+    stopped: Flag,
 }
 
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 impl DevicesSubscription {
     /// Stop following the device list.
     pub fn stop(&self) {
-        if !self.stopped.swap(true, Ordering::SeqCst) {
+        if self.stopped.set() {
             let _ = self.ops.try_send(Op::UnwatchDevices {
                 watcher: self.watcher,
             });
@@ -797,14 +805,14 @@ impl Drop for DevicesSubscription {
 pub struct OtaSubscription {
     watcher: u64,
     ops: async_channel::Sender<Op>,
-    stopped: AtomicBool,
+    stopped: Flag,
 }
 
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 impl OtaSubscription {
     /// Stop following the OTA updates.
     pub fn stop(&self) {
-        if !self.stopped.swap(true, Ordering::SeqCst) {
+        if self.stopped.set() {
             let _ = self.ops.try_send(Op::UnwatchOta {
                 watcher: self.watcher,
             });
@@ -823,7 +831,7 @@ impl Drop for OtaSubscription {
 pub struct OtaUpload {
     id: u32,
     ops: async_channel::Sender<Op>,
-    done: AtomicBool,
+    done: Flag,
 }
 
 impl OtaUpload {
@@ -854,7 +862,7 @@ impl OtaUpload {
             .await;
 
         if written.is_err() {
-            self.done.store(true, Ordering::SeqCst);
+            self.done.set();
         }
 
         written
@@ -862,7 +870,7 @@ impl OtaUpload {
 
     /// Check the whole file and store it; answers with the stored images.
     pub async fn finish(&self) -> Result<Vec<OtaImageInfo>, PeekError> {
-        self.done.store(true, Ordering::SeqCst);
+        self.done.set();
         self.call(|reply| Op::OtaUploadEnd { id: self.id, reply })
             .await
     }
@@ -870,7 +878,7 @@ impl OtaUpload {
 
 impl Drop for OtaUpload {
     fn drop(&mut self) {
-        if !self.done.load(Ordering::SeqCst) {
+        if self.done.set() {
             let _ = self.ops.try_send(Op::OtaUploadDiscard { id: self.id });
         }
     }
@@ -926,7 +934,25 @@ pub trait OtaListener: Send + Sync {
 /// with [`Service::run`].
 pub struct Service {
     pub(crate) ops: async_channel::Receiver<Op>,
-    pub(crate) cancel: Arc<AtomicBool>,
+    pub(crate) cancel: Arc<CancelSignal>,
+}
+
+/// Whether the running commission is to be cancelled. The commission resets it
+/// as it starts.
+pub(crate) type CancelSignal = Signal<bool, CriticalSectionRawMutex>;
+
+/// A flag that is set once, by any thread.
+struct Flag(Mutex<Cell<bool>, CriticalSectionRawMutex>);
+
+impl Flag {
+    const fn new() -> Self {
+        Self(Mutex::new(Cell::new(false)))
+    }
+
+    /// Set the flag; `true` if it was not set yet.
+    fn set(&self) -> bool {
+        self.0.lock(|flag| !flag.replace(true))
+    }
 }
 
 /// Where an operation's result goes.
@@ -943,6 +969,7 @@ pub(crate) enum Op {
     AdvertisedDevices(Reply<Vec<AdvertisedDevice>>),
     Capabilities(Reply<Capabilities>),
     ExportStore(Reply<StoreArchive>),
+    #[cfg(feature = "std")]
     ImportCheck(Reply<()>),
     ReadModel {
         node_id: u64,

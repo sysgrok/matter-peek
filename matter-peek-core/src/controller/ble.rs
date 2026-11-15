@@ -51,7 +51,6 @@ use rs_matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::im::ImClient as _;
 use rs_matter::onboard::{CommissionOptions, CommissionResult, Commissioner};
-use rs_matter::sc::ExchangeInitiator as _;
 use rs_matter::tlv::OctetStr;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::network::btp::Btp;
@@ -59,11 +58,12 @@ use rs_matter::transport::network::mdns::CommissionableFilter;
 use rs_matter::transport::network::{Address, BtAddr};
 use rs_matter::transport::session::SessionMode;
 use rs_matter::utils::futures::{select, Either};
-use rs_matter::utils::timers::{with_timeout, Duration, Instant, Timer};
+use rs_matter::utils::timers::{with_timeout, Duration, Instant};
 use rs_matter::Matter;
 
+use crate::api::CommissionStep;
 use crate::ca::ControllerCa;
-use crate::matter::remove_sessions;
+use crate::matter::{remove_sessions, Progress};
 use crate::model::{CommissionOutcome, DeviceHandle};
 
 #[cfg(all(feature = "ble-bluez", target_os = "linux"))]
@@ -178,6 +178,8 @@ pub(crate) async fn unavailable() -> Option<alloc::string::String> {
 ///   the device itself (see [`read_network_type`]) - so this must match the
 ///   device's actual network type. Pass `None` for an Ethernet device, which is
 ///   already on its network and needs no network commissioning at all.
+/// - `progress`: follows the steps, and can cancel the commission; it then
+///   fails with [`ErrorCode::Cancelled`].
 #[allow(clippy::too_many_arguments)]
 pub async fn commission_ble<C: Crypto>(
     matter: &Matter<'_>,
@@ -190,17 +192,19 @@ pub async fn commission_ble<C: Crypto>(
     passcode: u32,
     device_node_id: u64,
     creds: Option<&WirelessCreds<'_>>,
+    progress: &Progress<'_>,
 ) -> Result<CommissionOutcome, Error> {
     // ---- Discovery: find the device's commissionable BLE advertisement. --------
     // Also when its address is known: the GATT connect needs the Bluetooth stack
     // to have seen it.
     info!("BLE commission: scanning for a commissionable device (filter: {filter:?})");
 
-    let addr = stack::scan(filter, Some(SCAN_TIMEOUT_SECS), |found, adv| {
+    progress.report(CommissionStep::BleScan);
+    let scan = stack::scan(filter, Some(SCAN_TIMEOUT_SECS), |found, adv| {
         info!("BLE commission: found candidate {found} (adv: {adv:?})");
         addr.is_none_or(|addr| addr == found).then_some(found)
-    })
-    .await?;
+    });
+    let addr = progress.cancellable(scan).await?;
 
     info!("BLE commission: using device {addr}");
 
@@ -231,6 +235,7 @@ pub async fn commission_ble<C: Crypto>(
             device_node_id,
             creds,
             &joining,
+            progress,
         ));
 
         let result = match select(&mut central, &mut flow).await {
@@ -258,7 +263,7 @@ pub async fn commission_ble<C: Crypto>(
     // ---- Phase B — over IP. ----------------------------------------------------
     // Complete CASE once the device has joined its network and announced itself
     // operationally.
-    phase_b_complete(matter, crypto, controller_fab_idx, ca, &phase1).await?;
+    phase_b_complete(matter, crypto, controller_fab_idx, ca, &phase1, progress).await?;
 
     info!("BLE commission: phase B ok (CASE established, CommissioningComplete acknowledged)");
 
@@ -296,6 +301,7 @@ async fn phase_a_flow<C: Crypto>(
     device_node_id: u64,
     creds: Option<&WirelessCreds<'_>>,
     joining: &Cell<bool>,
+    progress: &Progress<'_>,
 ) -> Result<CommissionResult, Error> {
     let peer = Address::Btp(addr);
 
@@ -321,15 +327,25 @@ async fn phase_a_flow<C: Crypto>(
 
     info!("BLE commission: phase 1 (PASE → AddNOC) over BTP");
     let phase1 = commissioner
-        .commission(peer, passcode, &opts, device_node_id, VALID_FOREVER)
+        .commission(
+            peer,
+            passcode,
+            &opts,
+            device_node_id,
+            VALID_FOREVER,
+            progress,
+        )
         .await?;
 
     // Network commissioning: hand the device its credentials and tell it to connect.
     // Runs over PASE on the still-live BTP session.
-    if let Err(e) = provision_network(matter, crypto, peer, passcode, creds, joining).await {
+    progress.report(CommissionStep::NetworkSetup);
+    let provision = provision_network(matter, crypto, phase1.pase_session_id, creds, joining);
+    if let Err(e) = progress.cancellable(provision).await {
         // Roll the device back at once, so it can be commissioned again right
         // away. Best-effort, as the device may be gone.
-        let _ = commissioner.disarm_fail_safe(peer).await;
+        progress.report(CommissionStep::Cleanup);
+        let _ = commissioner.disarm_fail_safe(phase1.pase_session_id).await;
         return Err(e);
     }
 
@@ -346,13 +362,12 @@ async fn phase_a_flow<C: Crypto>(
 async fn provision_network<C: Crypto>(
     matter: &Matter<'_>,
     crypto: &C,
-    peer: Address,
-    passcode: u32,
+    pase_session_id: u32,
     creds: Option<&WirelessCreds<'_>>,
     joining: &Cell<bool>,
 ) -> Result<(), Error> {
-    let net_type = read_network_type(matter, crypto, peer, passcode).await?;
-    let concurrent = read_concurrent_connection(matter, crypto, peer, passcode).await;
+    let net_type = read_network_type(matter, crypto, pase_session_id).await?;
+    let concurrent = read_concurrent_connection(matter, crypto, pase_session_id).await;
 
     info!(
         "BLE commission: device network type is {net_type:?} (concurrent connection: {concurrent})"
@@ -388,7 +403,8 @@ async fn provision_network<C: Crypto>(
                 dataset_tlv.len()
             );
 
-            let exchange = Exchange::initiate_pase(matter, crypto, peer, passcode).await?;
+            let exchange =
+                Exchange::initiate_for_session(matter.transport(), crypto, pase_session_id)?;
             let handle = exchange
                 .network_commissioning()
                 .add_or_update_thread_network(ROOT_ENDPOINT_ID, |req| {
@@ -406,7 +422,8 @@ async fn provision_network<C: Crypto>(
         WirelessCreds::Wifi { ssid, pass } => {
             info!("BLE commission: AddOrUpdateWiFiNetwork ({creds})");
 
-            let exchange = Exchange::initiate_pase(matter, crypto, peer, passcode).await?;
+            let exchange =
+                Exchange::initiate_for_session(matter.transport(), crypto, pase_session_id)?;
             let handle = exchange
                 .network_commissioning()
                 .add_or_update_wi_fi_network(ROOT_ENDPOINT_ID, |req| {
@@ -433,7 +450,7 @@ async fn provision_network<C: Crypto>(
 
     info!("BLE commission: ConnectNetwork (network id {network_id:02x?})");
 
-    let exchange = Exchange::initiate_pase(matter, crypto, peer, passcode).await?;
+    let exchange = Exchange::initiate_for_session(matter.transport(), crypto, pase_session_id)?;
     joining.set(true);
 
     let connect = exchange
@@ -483,10 +500,9 @@ async fn provision_network<C: Crypto>(
 async fn read_network_type<C: Crypto>(
     matter: &Matter<'_>,
     crypto: &C,
-    peer: Address,
-    passcode: u32,
+    pase_session_id: u32,
 ) -> Result<NetworkType, Error> {
-    let exchange = Exchange::initiate_pase(matter, crypto, peer, passcode).await?;
+    let exchange = Exchange::initiate_for_session(matter.transport(), crypto, pase_session_id)?;
 
     let mut chunk = exchange
         .read_with(|msg| {
@@ -534,11 +550,10 @@ async fn read_network_type<C: Crypto>(
 async fn read_concurrent_connection<C: Crypto>(
     matter: &Matter<'_>,
     crypto: &C,
-    peer: Address,
-    passcode: u32,
+    pase_session_id: u32,
 ) -> bool {
     let read = async {
-        let exchange = Exchange::initiate_pase(matter, crypto, peer, passcode).await?;
+        let exchange = Exchange::initiate_for_session(matter.transport(), crypto, pase_session_id)?;
 
         let mut chunk = exchange
             .read_with(|msg| {
@@ -587,6 +602,7 @@ async fn phase_b_complete<C: Crypto>(
     controller_fab_idx: NonZeroU8,
     ca: &ControllerCa,
     phase1: &CommissionResult,
+    progress: &Progress<'_>,
 ) -> Result<(), Error> {
     let mut noc_buf = [0u8; MAX_CERT_TLV_AND_ASN1_LEN];
     let mut noc_generator = ca.noc_generator(&mut noc_buf)?;
@@ -610,8 +626,9 @@ async fn phase_b_complete<C: Crypto>(
     let started = Instant::now();
 
     loop {
-        match commissioner.complete_via_case(phase1).await {
+        match commissioner.complete_via_case(phase1, progress).await {
             Ok(()) => return Ok(()),
+            Err(e) if e.code() == ErrorCode::Cancelled => return Err(e),
             Err(e) if started.elapsed().as_secs() >= deadline => return Err(e),
             Err(e) => {
                 let waited = started.elapsed().as_secs();
@@ -620,7 +637,7 @@ async fn phase_b_complete<C: Crypto>(
                     "BLE commission: device not operational yet ({e:?}); retrying (waited {waited}s / {deadline}s)"
                 );
 
-                Timer::after(Duration::from_secs(3)).await;
+                progress.sleep(Duration::from_secs(3)).await?;
             }
         }
     }

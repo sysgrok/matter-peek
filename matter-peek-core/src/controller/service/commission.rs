@@ -1,7 +1,6 @@
 //! Discovery and commissioning.
 
 use core::net::SocketAddr;
-use core::sync::atomic::Ordering;
 
 use alloc::format;
 use alloc::string::ToString;
@@ -10,7 +9,7 @@ use alloc::vec::Vec;
 use log::{error, info, warn};
 
 use rs_matter::crypto::Crypto;
-use rs_matter::error::Error;
+use rs_matter::error::{Error, ErrorCode};
 use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::mdns::CommissionableFilter;
 use rs_matter::transport::network::Address;
@@ -21,7 +20,7 @@ use crate::api::{
     DiscoveredDevice, FabricRef, NetworkCredentials, PeekError, StepStatus,
 };
 use crate::fabrics::OurFabric;
-use crate::matter::CommissionFlow;
+use crate::matter::{CommissionFlow, Progress};
 use crate::model::CommissionOutcome;
 use crate::ota::OtaImageStore;
 use crate::setup_code::SetupCode;
@@ -184,7 +183,7 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
         }
     }
 
-    /// The commission proper, reporting its steps to `progress`: commission,
+    /// The commission proper, reporting its steps to `listener`: commission,
     /// then list the device and, with `remember`, keep a record of it.
     async fn commission_flow(
         &self,
@@ -192,16 +191,21 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
         reach: Reach,
         passcode: u32,
         remember: bool,
-        progress: Option<&dyn CommissionListener>,
+        listener: Option<&dyn CommissionListener>,
     ) -> Result<CommissionResult, PeekError> {
         let step = |status| {
-            if let Some(progress) = progress {
-                progress.on_step(CommissionStep::Commission, status);
+            if let Some(listener) = listener {
+                listener.on_step(CommissionStep::Commission, status);
             }
         };
 
+        let progress = Progress::new(listener, &self.cancel);
+
         // A cancel requested before this commission is not for it.
-        self.cancel.store(false, Ordering::SeqCst);
+        self.cancel.modify(|cancel| {
+            *cancel = false;
+            (false, ())
+        });
 
         // A NodeID never handed out before, and never to be handed out again (the
         // counter is saved right away): the device keeps it, remembered or not, and
@@ -213,7 +217,7 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
         self.commissioned_node.set(Some(device_node_id));
 
         // Before the commission: the device has no fabric of ours yet.
-        if self.cancel.load(Ordering::SeqCst) {
+        if progress.is_cancelled() {
             return Err(PeekError::Cancelled {
                 decommissioned: false,
             });
@@ -221,50 +225,45 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
 
         step(StepStatus::Started);
 
-        let peer_addr = match reach {
-            Reach::Ip(peer_addr) => peer_addr,
+        let flow = match reach {
+            Reach::Ip(peer_addr) => {
+                // Fabrics we still have a record for are live commissionings, not
+                // leaks: the sweep must not reclaim them (that would decommission
+                // the device we are about to re-commission). Everything else of
+                // ours on the device is fair game.
+                let live_node_ids = self.live_node_ids();
+
+                self.controller
+                    .commission(
+                        &fabric.ca,
+                        fabric.fab_idx,
+                        peer_addr,
+                        passcode,
+                        device_node_id,
+                        &live_node_ids,
+                        &progress,
+                    )
+                    .await
+            }
             Reach::Ble {
                 filter,
                 addr,
                 network,
             } => {
-                return match self
-                    .commission_ble(fabric, &filter, addr, network, passcode, device_node_id)
-                    .await
-                {
-                    Ok(outcome) => {
-                        step(StepStatus::Done);
-                        self.commissioned(outcome, remember).await
-                    }
-                    Err(e) => {
-                        step(step_failed(&e));
-                        Err(failed("commission failed", e))
-                    }
-                };
+                self.commission_ble(
+                    fabric,
+                    &filter,
+                    addr,
+                    network,
+                    passcode,
+                    device_node_id,
+                    &progress,
+                )
+                .await
             }
         };
 
-        // Cancellable up to AddNOC, which abandons the (often-hung-on-a-closed-
-        // window) orphan sweep / PASE: no device state is created before it.
-        let cancel = self.cancel.clone();
-        // Fabrics we still have a record for are live commissionings, not leaks:
-        // the sweep must not reclaim them (that would decommission the device we
-        // are about to re-commission). Everything else of ours on the device is
-        // fair game.
-        let live_node_ids = self.live_node_ids();
-        let outcome = match self
-            .controller
-            .commission(
-                &fabric.ca,
-                fabric.fab_idx,
-                peer_addr,
-                passcode,
-                device_node_id,
-                &live_node_ids,
-                move || cancel.load(Ordering::SeqCst),
-            )
-            .await
-        {
+        let outcome = match flow {
             Ok(CommissionFlow::Done(outcome)) => {
                 step(StepStatus::Done);
                 outcome
@@ -284,9 +283,9 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
         };
 
         // After the commission: the device holds our fabric. A cancel that arrived
-        // during it takes effect here, decommissioning the device so that our
-        // fabric is not left orphaned on it.
-        if self.cancel.load(Ordering::SeqCst) {
+        // after the device completed the commission takes effect here,
+        // decommissioning the device so that our fabric is not left orphaned on it.
+        if progress.is_cancelled() {
             let removed = self.controller.decommission(outcome.handle).await.is_ok();
             if !removed {
                 error!(
@@ -303,6 +302,7 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
 
     /// Commission a device over BLE, provisioning it with `network`.
     #[cfg(feature = "ble")]
+    #[allow(clippy::too_many_arguments)]
     async fn commission_ble(
         &self,
         fabric: &OurFabric,
@@ -311,7 +311,8 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
         network: Option<NetworkCredentials>,
         passcode: u32,
         device_node_id: u64,
-    ) -> Result<CommissionOutcome, Error> {
+        progress: &Progress<'_>,
+    ) -> Result<CommissionFlow, Error> {
         use crate::ble::{self, WirelessCreds};
 
         let dataset;
@@ -329,7 +330,7 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
             }
         };
 
-        ble::commission_ble(
+        let outcome = ble::commission_ble(
             self.matter,
             self.crypto,
             &fabric.ca,
@@ -340,11 +341,19 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
             passcode,
             device_node_id,
             creds.as_ref(),
+            progress,
         )
-        .await
+        .await;
+
+        match outcome {
+            Ok(outcome) => Ok(CommissionFlow::Done(outcome)),
+            Err(e) if e.code() == ErrorCode::Cancelled => Ok(CommissionFlow::Cancelled),
+            Err(e) => Err(e),
+        }
     }
 
     #[cfg(not(feature = "ble"))]
+    #[allow(clippy::too_many_arguments)]
     async fn commission_ble(
         &self,
         _fabric: &OurFabric,
@@ -353,9 +362,10 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
         _network: Option<NetworkCredentials>,
         _passcode: u32,
         _device_node_id: u64,
-    ) -> Result<CommissionOutcome, Error> {
+        _progress: &Progress<'_>,
+    ) -> Result<CommissionFlow, Error> {
         warn!("commission: this build has no Bluetooth");
-        Err(rs_matter::error::ErrorCode::NoNetworkInterface.into())
+        Err(ErrorCode::NoNetworkInterface.into())
     }
 
     /// The device holds our fabric now: keep our fabric across restarts, list

@@ -1,6 +1,7 @@
 //! The controller's store as a whole: exporting it, and whether one may be
 //! imported in its place.
 
+#[cfg(feature = "std")]
 use alloc::format;
 use alloc::string::ToString;
 use alloc::vec::Vec;
@@ -42,6 +43,7 @@ impl<C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'_, C, S, O> {
 
     /// Whether another store may replace this one: only without devices on
     /// our fabrics, which would keep a fabric nobody holds then.
+    #[cfg(feature = "std")]
     pub(super) fn import_check(&self) -> Result<(), PeekError> {
         let devices = self.list_devices(None)?.devices.len();
         if devices > 0 {

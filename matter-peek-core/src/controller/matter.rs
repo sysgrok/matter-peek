@@ -2,6 +2,7 @@
 //! discover, read and follow health, retrieve logs, identify, decommission, OTA),
 //! over a borrowed rs-matter stack.
 
+use core::future::Future;
 use core::net::SocketAddr;
 use core::num::NonZeroU8;
 use core::pin::pin;
@@ -12,11 +13,11 @@ use rs_matter::cert::gen::VALID_FOREVER;
 use rs_matter::cert::{MAX_CERT_TLV_AND_ASN1_LEN, MAX_CERT_TLV_LEN};
 use rs_matter::crypto::{Crypto, Rng as _};
 use rs_matter::error::{Error, ErrorCode};
-use rs_matter::onboard::{CommissionOptions, Commissioner};
+use rs_matter::onboard::{self, CommissionHooks, CommissionOptions, Commissioner};
 use rs_matter::transport::network::Address;
-use rs_matter::transport::session::{Session, SessionMode};
+use rs_matter::transport::session::Session;
 use rs_matter::utils::futures::{select, Either};
-use rs_matter::utils::sync::Notification;
+use rs_matter::utils::sync::{MaybeSend, Notification};
 use rs_matter::utils::timers::{Duration, Timer};
 use rs_matter::Matter;
 
@@ -34,6 +35,7 @@ use rs_matter::tlv::Nullable;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::network::mdns::CommissionableFilter;
 
+use crate::api::{CancelSignal, CommissionListener, CommissionStep, StepStatus};
 use crate::health::HealthRead;
 use crate::model::{CommissionOutcome, DeviceHandle, DeviceHealth, DiagSet, LogIntent};
 
@@ -99,16 +101,9 @@ impl<'a, C: Crypto> Controller<'a, C> {
     /// [`crate::mdns`]), even when
     /// `peer_addr` was supplied by hand and no discovery was needed.
     ///
-    /// Cancellable up to the point of
-    /// no return (AddNOC). `cancel()` is polled at the safe pre-AddNOC boundaries
-    /// (before the orphan sweep, after it, before phase 1) and the orphan sweep —
-    /// the step most prone to hang when re-commissioning a device whose window is
-    /// closed — is *raced* against it. Once phase 1 begins, commissioning is
-    /// atomic and runs to completion (or its timeout); interrupting mid-AddNOC
-    /// could orphan a fabric, so we don't.
-    ///
-    /// Returns [`CommissionFlow::Cancelled`] when cancellation took effect
-    /// before any device fabric was installed (nothing to clean up).
+    /// `progress` follows the steps, and can cancel the commission until the
+    /// device completes it: the device is then rolled back (its fail-safe
+    /// disarmed), and this returns [`CommissionFlow::Cancelled`].
     #[allow(clippy::too_many_arguments)]
     pub async fn commission(
         &self,
@@ -118,35 +113,16 @@ impl<'a, C: Crypto> Controller<'a, C> {
         passcode: u32,
         device_node_id: u64,
         live_node_ids: &[u64],
-        cancel: impl Fn() -> bool,
+        progress: &Progress<'_>,
     ) -> Result<CommissionFlow, Error> {
         let crypto = self.crypto;
         let matter = self.matter;
 
-        if cancel() {
+        if progress.is_cancelled() {
             return Ok(CommissionFlow::Cancelled);
         }
 
-        // Start this attempt from a clean PASE.
-        //
-        // `Exchange::initiate_pase` reuses an existing PASE session to a peer
-        // *address* unconditionally - it checks neither the session's age nor
-        // whether the peer still has its half, and ignores the passcode entirely
-        // on the reuse path. That is what lets the steps below share one PASE
-        // session, but it means a second attempt silently encrypts to a session
-        // the device forgot when it rebooted, and every packet simply times out.
-        // Symptom: exactly one successful commission per process, then
-        // `TxTimeout` forever.
-        let peer = Address::Udp(peer_addr).canonical();
-        let dropped = remove_sessions(matter, |sess| {
-            matches!(sess.get_session_mode(), SessionMode::Pase { .. })
-                && sess.get_peer_addr().canonical() == peer
-        });
-        if dropped > 0 {
-            info!("dropped {dropped} stale PASE session(s) for {peer_addr}");
-        }
-
-        // Likewise any CASE session to the NodeID we are about to assign. NodeIDs
+        // Start without any CASE session to the NodeID we are about to assign. NodeIDs
         // are reused - after a decommission empties the store, the next device
         // gets the same base ID - so a CASE session left over from the previous
         // occupant matches `(fabric, node)` exactly, and phase 2 resumes it
@@ -162,37 +138,6 @@ impl<'a, C: Crypto> Controller<'a, C> {
         if dropped > 0 {
             info!("dropped {dropped} stale CASE session(s) for node 0x{device_node_id:016X}");
         }
-
-        // Reclaim any fabric slot we leaked on this device in a previous run
-        // (commissioned, then crashed before RemoveFabric). Best-effort over the
-        // PASE window, before AddNOC — so a device whose fabric table is full of
-        // our orphans doesn't reject the new commission with `TableFull`.
-        //
-        // This is also the step most likely to HANG when re-commissioning a
-        // device whose commissioning window has since closed (its PASE never
-        // completes). So it is both time-bounded *and* raced against `cancel` —
-        // and it is entirely pre-AddNOC, so abandoning it is always safe.
-        let sweep =
-            self.sweep_orphaned_fabrics(ca, controller_fab_idx, peer_addr, passcode, live_node_ids);
-        let window_opener = match race_cancel(with_timeout(sweep, "orphan-sweep"), &cancel).await {
-            Raced::Cancelled => return Ok(CommissionFlow::Cancelled),
-            Raced::Done(Ok((reclaimed, opener))) => {
-                if reclaimed > 0 {
-                    info!("orphaned-fabric sweep: reclaimed {reclaimed} stale fabric slot(s)");
-                }
-                opener
-            }
-            Raced::Done(Err(e)) => {
-                info!("orphaned-fabric sweep skipped (non-fatal): {e:?}");
-                None
-            }
-        };
-
-        if cancel() {
-            return Ok(CommissionFlow::Cancelled);
-        }
-
-        info!("=== Commissioner::commission (phase 1 — PASE) ===");
 
         // NocGenerator backed by the controller CA — signs the *device* NOC
         // during commissioning. Serial is derived from the NodeID internally.
@@ -217,14 +162,65 @@ impl<'a, C: Crypto> Controller<'a, C> {
             ..CommissionOptions::default()
         };
 
-        let peer = Address::Udp(peer_addr);
+        // One PASE session for the orphan sweep and the commission: while the
+        // device holds it, it accepts no other.
+        progress.report(CommissionStep::Pase);
+        let pase = Exchange::establish_pase(matter, crypto, Address::Udp(peer_addr), passcode);
+        let pase_session_id = match with_timeout(progress.cancellable(pase), "PASE").await {
+            Err(e) if e.code() == ErrorCode::Cancelled => return Ok(CommissionFlow::Cancelled),
+            result => result?,
+        };
+
+        // Reclaim any fabric slot we leaked on this device in a previous run
+        // (commissioned, then crashed before RemoveFabric). Best-effort, before
+        // AddNOC — so a device whose fabric table is full of our orphans doesn't
+        // reject the new commission with `TableFull`.
+        progress.report(CommissionStep::OrphanSweep);
+        let sweep =
+            self.sweep_orphaned_fabrics(ca, controller_fab_idx, pase_session_id, live_node_ids);
+        let window_opener = match with_timeout(progress.cancellable(sweep), "orphan-sweep").await {
+            Ok((reclaimed, opener)) => {
+                if reclaimed > 0 {
+                    info!("orphaned-fabric sweep: reclaimed {reclaimed} stale fabric slot(s)");
+                }
+                opener
+            }
+            Err(e) if e.code() == ErrorCode::Cancelled => {
+                commissioner.end_pase(pase_session_id);
+                return Ok(CommissionFlow::Cancelled);
+            }
+            Err(e) => {
+                info!("orphaned-fabric sweep skipped (non-fatal): {e:?}");
+                None
+            }
+        };
+
+        info!("=== Commissioner::commission_over_pase (phase 1 — PASE) ===");
 
         // Phase 1 — ArmFailSafe → ... → AddNOC, over PASE.
         let phase1 = with_timeout(
-            commissioner.commission(peer, passcode, &opts, device_node_id, VALID_FOREVER),
+            commissioner.commission_over_pase(
+                pase_session_id,
+                &opts,
+                device_node_id,
+                VALID_FOREVER,
+                progress,
+            ),
             "commission()",
         )
-        .await?;
+        .await;
+        let phase1 = match phase1 {
+            Ok(phase1) => phase1,
+            Err(e) if e.code() == ErrorCode::Cancelled => return Ok(CommissionFlow::Cancelled),
+            Err(e) => {
+                // A timeout drops the commission before it rolls the device back
+                // itself. After its own failure the session is gone already, and
+                // this does nothing.
+                let _ = commissioner.disarm_fail_safe(pase_session_id).await;
+                commissioner.end_pase(pase_session_id);
+                return Err(e);
+            }
+        };
         info!(
             "phase 1 ok: device_fabric_index={}, device_node_id=0x{:016X}",
             phase1.fabric_index, phase1.device_node_id,
@@ -232,11 +228,20 @@ impl<'a, C: Crypto> Controller<'a, C> {
 
         // Phase 2 — CASE + CommissioningComplete.
         info!("=== complete_via_case (phase 2 — CASE) ===");
-        with_timeout(
-            commissioner.complete_via_case(&phase1),
+        let phase2 = with_timeout(
+            commissioner.complete_via_case(&phase1, progress),
             "complete_via_case()",
         )
-        .await?;
+        .await;
+        match phase2 {
+            Ok(()) => {}
+            Err(e) if e.code() == ErrorCode::Cancelled => return Ok(CommissionFlow::Cancelled),
+            Err(e) => {
+                // A timeout drops it before it ends the PASE session itself.
+                commissioner.end_pase(phase1.pase_session_id);
+                return Err(e);
+            }
+        }
         info!("phase 2 ok: CASE established, CommissioningComplete acknowledged");
 
         Ok(CommissionFlow::Done(CommissionOutcome {
@@ -277,8 +282,7 @@ impl<'a, C: Crypto> Controller<'a, C> {
         &self,
         ca: &crate::ca::ControllerCa,
         controller_fab_idx: NonZeroU8,
-        peer_addr: SocketAddr,
-        passcode: u32,
+        pase_session_id: u32,
         live_node_ids: &[u64],
     ) -> Result<(usize, Option<u8>), Error> {
         const ROOT_ENDPOINT: rs_matter::dm::EndptId = 0;
@@ -287,8 +291,6 @@ impl<'a, C: Crypto> Controller<'a, C> {
         let our_fabric_id = self.matter.with_state(|state| {
             Ok::<_, Error>(state.fabrics.fabric(controller_fab_idx)?.fabric_id())
         })?;
-
-        let peer = Address::Udp(peer_addr);
 
         // Read the full Fabrics list (non-fabric-filtered) over PASE and collect
         // the fabric indices whose root pubkey + fabric_id match ours. We copy
@@ -306,7 +308,8 @@ impl<'a, C: Crypto> Controller<'a, C> {
                 Some(administrator_commissioning::AttributeId::AdminFabricIndex as _),
             )),
         ];
-        let exchange = Exchange::initiate_pase(self.matter, self.crypto, peer, passcode).await?;
+        let exchange =
+            Exchange::initiate_for_session(self.matter.transport(), self.crypto, pase_session_id)?;
         let mut chunk = exchange
             .read_with(|msg| {
                 msg.attr_requests_from(&paths)?
@@ -373,8 +376,11 @@ impl<'a, C: Crypto> Controller<'a, C> {
         // Commissioner opens a fresh PASE exchange per step on the same session).
         let mut removed = 0usize;
         for idx in ours {
-            let exchange =
-                Exchange::initiate_pase(self.matter, self.crypto, peer, passcode).await?;
+            let exchange = Exchange::initiate_for_session(
+                self.matter.transport(),
+                self.crypto,
+                pase_session_id,
+            )?;
             match exchange
                 .operational_credentials()
                 .remove_fabric(ROOT_ENDPOINT, |req| req.fabric_index(idx)?.end())
@@ -914,9 +920,83 @@ where
 pub enum CommissionFlow {
     /// Commissioning completed.
     Done(CommissionOutcome),
-    /// Cancelled at a safe pre-AddNOC point — no device fabric was installed, so
-    /// there is nothing to clean up.
+    /// Cancelled before the device completed commissioning: the device was
+    /// rolled back (best-effort), so there is nothing to clean up.
     Cancelled,
+}
+
+/// Follows a commission for its caller, and cancels it at the caller's word:
+/// matter-peek's side of rs-matter's [`CommissionHooks`].
+pub struct Progress<'a> {
+    listener: Option<&'a dyn CommissionListener>,
+    /// Waited on only by the running commission, which is one task.
+    cancel: &'a CancelSignal,
+}
+
+impl<'a> Progress<'a> {
+    pub fn new(listener: Option<&'a dyn CommissionListener>, cancel: &'a CancelSignal) -> Self {
+        Self { listener, cancel }
+    }
+
+    /// Report that the commission starts `step`.
+    pub fn report(&self, step: CommissionStep) {
+        if let Some(listener) = self.listener {
+            listener.on_step(step, StepStatus::Started);
+        }
+    }
+
+    /// Whether the caller cancelled the commission.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.access(|cancel| *cancel)
+    }
+
+    /// `fut`, unless the caller cancels the commission first: then
+    /// [`ErrorCode::Cancelled`].
+    pub async fn cancellable<T, F>(&self, fut: F) -> Result<T, Error>
+    where
+        F: Future<Output = Result<T, Error>>,
+    {
+        match select(fut, self.wait_cancelled()).await {
+            Either::First(result) => result,
+            Either::Second(()) => Err(ErrorCode::Cancelled.into()),
+        }
+    }
+
+    /// Wait for `duration`, unless the caller cancels the commission first: then
+    /// [`ErrorCode::Cancelled`].
+    #[cfg(feature = "ble")]
+    pub async fn sleep(&self, duration: Duration) -> Result<(), Error> {
+        match select(Timer::after(duration), self.wait_cancelled()).await {
+            Either::First(_) => Ok(()),
+            Either::Second(()) => Err(ErrorCode::Cancelled.into()),
+        }
+    }
+
+    async fn wait_cancelled(&self) {
+        self.cancel.wait(|cancel| cancel.then_some(())).await
+    }
+}
+
+impl CommissionHooks for Progress<'_> {
+    fn step(&self, step: onboard::CommissionStep) {
+        self.report(match step {
+            onboard::CommissionStep::Pase => CommissionStep::Pase,
+            onboard::CommissionStep::ArmFailSafe => CommissionStep::ArmFailSafe,
+            onboard::CommissionStep::DeviceAttestation => CommissionStep::DeviceAttestation,
+            onboard::CommissionStep::CsrRequest => CommissionStep::CsrRequest,
+            onboard::CommissionStep::AddTrustedRootCertificate => {
+                CommissionStep::AddTrustedRootCertificate
+            }
+            onboard::CommissionStep::AddNoc => CommissionStep::AddNoc,
+            onboard::CommissionStep::FindOperational => CommissionStep::FindOperational,
+            onboard::CommissionStep::CommissioningComplete => CommissionStep::CommissioningComplete,
+            onboard::CommissionStep::Cleanup => CommissionStep::Cleanup,
+        });
+    }
+
+    fn cancelled(&self) -> impl Future<Output = ()> + MaybeSend {
+        self.wait_cancelled()
+    }
 }
 
 /// Remove every (non-reserved) session matching `predicate`, returning how many
@@ -935,34 +1015,6 @@ where
     }
 
     removed
-}
-
-/// Internal result of racing a future against a cancel predicate.
-enum Raced<T> {
-    Done(T),
-    Cancelled,
-}
-
-/// Drive `fut`, but bail with [`Raced::Cancelled`] as soon as `cancel()` returns
-/// true. Cancellation is polled (sampled on a short tick alongside the future),
-/// not edge-triggered — cheap, and enough to make a hung PASE abandonable within
-/// a tick of the user pressing Cancel.
-async fn race_cancel<F, T>(fut: F, cancel: &impl Fn() -> bool) -> Raced<T>
-where
-    F: core::future::Future<Output = T>,
-{
-    let mut fut = pin!(fut);
-    loop {
-        let mut tick = pin!(Timer::after(Duration::from_millis(100)));
-        match select(&mut fut, &mut tick).await {
-            Either::First(out) => return Raced::Done(out),
-            Either::Second(_) => {
-                if cancel() {
-                    return Raced::Cancelled;
-                }
-            }
-        }
-    }
 }
 
 /// What a fabric found on a device means to the orphaned-fabric sweep.
