@@ -1,7 +1,7 @@
 //! From the controller's own records to the API types.
 
 use crate::api;
-use crate::model::{DeviceHandle, StoredDevice};
+use crate::model::{DeviceFingerprint, DeviceHandle, StoredDevice};
 use crate::ota::OtaImage;
 use crate::subscribe::SubState;
 
@@ -43,12 +43,7 @@ pub(super) fn device(
         product_name: d.product_name,
         hardware_version_string: d.hardware_version_string,
         software_version_string: d.software_version_string,
-        fingerprint: api::Fingerprint {
-            vendor_id: d.fingerprint.vendor_id,
-            product_id: d.fingerprint.product_id,
-            hardware_version: d.fingerprint.hardware_version,
-            software_version: d.fingerprint.software_version,
-        },
+        fingerprint: fingerprint(&d.fingerprint),
         tags: d.tags,
         online,
         remembered,
@@ -59,6 +54,15 @@ pub(super) fn device(
         device_types: d.device_types,
         details: d.details,
         health_check: None,
+    }
+}
+
+pub(super) fn fingerprint(fp: &DeviceFingerprint) -> api::Fingerprint {
+    api::Fingerprint {
+        vendor_id: fp.vendor_id,
+        product_id: fp.product_id,
+        hardware_version: fp.hardware_version,
+        software_version: fp.software_version,
     }
 }
 

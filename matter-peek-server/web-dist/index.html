@@ -21,8 +21,8 @@
     <!-- The app; its release build goes through wasm-opt for size. -->
     
 <script type="module">
-import init, * as bindings from '/matter-peek-web-fcc67b5e127fc295.js';
-const wasm = await init({ module_or_path: '/matter-peek-web-fcc67b5e127fc295_bg.wasm' });
+import init, * as bindings from '/matter-peek-web-3879e16c31e1722.js';
+const wasm = await init({ module_or_path: '/matter-peek-web-3879e16c31e1722_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -31,6 +31,6 @@ window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
-  <link rel="modulepreload" href="/matter-peek-web-fcc67b5e127fc295.js" crossorigin="anonymous" integrity="sha384-mTstHBvWpEK4KTMDwnAE9nJg8yQpn8pCiZxfMZs0IrDuOKI24GsKTm+lGsnjrcmB"><link rel="preload" href="/matter-peek-web-fcc67b5e127fc295_bg.wasm" crossorigin="anonymous" integrity="sha384-gXuool6j8j0H0hXquUQjpygyGPBdOQGzyP7C9GAs1GxrNWOoeVKO2f5kBwxEj5AE" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/matter-peek-web-3879e16c31e1722.js" crossorigin="anonymous" integrity="sha384-mTstHBvWpEK4KTMDwnAE9nJg8yQpn8pCiZxfMZs0IrDuOKI24GsKTm+lGsnjrcmB"><link rel="preload" href="/matter-peek-web-3879e16c31e1722_bg.wasm" crossorigin="anonymous" integrity="sha384-Bw5Fz07luvQUyO/MyBb/xK7/LBXFVMGNEM1wpKAiUPUhQ3Jtsp7DUpq14l7vKuN9" as="fetch" type="application/wasm"></head>
   <body></body>
 </html>

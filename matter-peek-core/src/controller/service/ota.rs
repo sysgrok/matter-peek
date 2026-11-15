@@ -284,14 +284,25 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
     ) -> Result<(), PeekError> {
         let dev = self.lookup_device(node_id)?;
 
-        if !self
+        let image = self
             .ota
             .store()
             .images()
-            .iter()
-            .any(|image| image.name == name)
-        {
-            return Err(PeekError::failed(format!("no OTA image {name}")));
+            .into_iter()
+            .find(|image| image.name == name)
+            .map(convert::ota_image)
+            .ok_or_else(|| PeekError::failed(format!("no OTA image {name}")))?;
+
+        // The device would refuse it.
+        if !image.updates(
+            &convert::fingerprint(&dev.fingerprint),
+            &dev.software_version_string,
+        ) {
+            return Err(PeekError::failed(format!(
+                "{} is not an update for this device, which runs {}: it is for another product \
+                 or build, or not newer",
+                image.version_str, dev.software_version_string
+            )));
         }
 
         // Before the announcement: the device asks for the update right away.

@@ -538,17 +538,29 @@ impl Facts {
 }
 
 impl OtaImageInfo {
-    /// Whether it updates `device`: for its vendor and product, newer than
-    /// what it runs.
+    /// Whether it updates `device`; see [`Self::updates`].
     pub fn applies_to(&self, device: &DeviceInfo) -> bool {
-        let fp = &device.fingerprint;
+        self.updates(&device.fingerprint, &device.software_version_string)
+    }
 
+    /// Whether it updates a device with `fp`, running `software_version_string`:
+    /// for its vendor and product, newer than what it runs, and a build of the
+    /// same kind. An image header says nothing of the hardware, and products
+    /// may share their vendor and product IDs across builds for different
+    /// hardware (ClimaNode does, for its boards). But the image's version
+    /// string is what the device reports once it runs it, so it must start as
+    /// the one it reports now does, up to the version number (e.g.
+    /// `climanode-espidf-c6-8-zero-`).
+    pub fn updates(&self, fp: &Fingerprint, software_version_string: &str) -> bool {
         fp.vendor_id
             .is_none_or(|vid| self.vendor_id == 0 || self.vendor_id == vid)
             && fp
                 .product_id
                 .is_none_or(|pid| self.product_id == 0 || self.product_id == pid)
             && fp.software_version.is_none_or(|v| self.version > v)
+            && self
+                .version_str
+                .starts_with(version_family(software_version_string))
     }
 }
 
@@ -756,6 +768,33 @@ const fn facet(
 }
 
 /// The values of `facet`'s term `rest`, comma-separated.
+/// The start of a version string, up to its version number: e.g.
+/// `climanode-espidf-c6-8-zero-` of `climanode-espidf-c6-8-zero-0.1.20`. The
+/// number is the first word that starts with digits, a dot and a digit (after
+/// a `v`, if any). Empty if the string starts with it, or has none.
+fn version_family(version: &str) -> &str {
+    let bytes = version.as_bytes();
+
+    for at in 0..bytes.len() {
+        if at > 0 && bytes[at - 1].is_ascii_alphanumeric() {
+            continue;
+        }
+
+        let number = &bytes[at + usize::from(matches!(bytes[at], b'v' | b'V'))..];
+        let digits = number.iter().take_while(|b| b.is_ascii_digit()).count();
+
+        if digits > 0
+            && number.get(digits) == Some(&b'.')
+            && number.get(digits + 1).is_some_and(u8::is_ascii_digit)
+        {
+            // Its first byte is ASCII, so `at` is on a character boundary.
+            return &version[..at];
+        }
+    }
+
+    ""
+}
+
 fn values(facet: &'static Facet, rest: &str) -> Result<Vec<Value>, QueryError> {
     let mut values = Vec::new();
 
@@ -1249,5 +1288,47 @@ mod tests {
 
         let anywhere = suggest("goo", &devices, 10);
         assert!(anywhere.iter().any(|s| s.label == "eco:google-llc"));
+    }
+
+    #[test]
+    fn version_families() {
+        assert_eq!(
+            version_family("climanode-espidf-c6-8-zero-0.1.20"),
+            "climanode-espidf-c6-8-zero-"
+        );
+        assert_eq!(
+            version_family("climanode-espidf-c6-8-zero-0.2.0-beta.1"),
+            "climanode-espidf-c6-8-zero-"
+        );
+        assert_eq!(version_family("fw v2.1.0"), "fw ");
+        assert_eq!(version_family("v2.1.0"), "");
+        assert_eq!(version_family("1.3.0-s1"), "");
+        assert_eq!(version_family("build 42"), "");
+        assert_eq!(version_family(""), "");
+    }
+
+    #[test]
+    fn images_of_other_builds_do_not_apply() {
+        let image = |version_str: &str| OtaImageInfo {
+            name: "fff2-8002-71935-0c090f.ota".into(),
+            vendor_id: 0xFFF2,
+            product_id: 0x8002,
+            version: 0x0001_15FF,
+            version_str: version_str.into(),
+            min_applicable_version: None,
+            max_applicable_version: None,
+            release_notes_url: None,
+            size: 0,
+        };
+        let mut zero = device();
+        zero.software_version_string = "climanode-espidf-c6-8-zero-0.1.20".into();
+        zero.fingerprint.software_version = Some(0x0001_14FF);
+
+        assert!(image("climanode-espidf-c6-8-zero-0.1.21").applies_to(&zero));
+        assert!(!image("climanode-espidf-c6-8-bench-0.1.21").applies_to(&zero));
+
+        // A version string that is only the number says nothing of the build.
+        zero.software_version_string = "0.1.20".into();
+        assert!(image("climanode-espidf-c6-8-bench-0.1.21").applies_to(&zero));
     }
 }
