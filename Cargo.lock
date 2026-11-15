@@ -3160,6 +3160,7 @@ dependencies = [
  "async-executor",
  "async-io",
  "async-net",
+ "async-signal",
  "async-tungstenite",
  "base64 0.22.1",
  "blocking",

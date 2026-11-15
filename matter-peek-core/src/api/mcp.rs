@@ -40,6 +40,7 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2024-11-05"];
 /// The tools that change devices or the stored state; see [`Caps`].
 const MUTATING_TOOLS: &[&str] = &[
     "commission",
+    "cancel_commission",
     "decommission",
     "register_check_ins",
     "unregister_check_ins",
@@ -71,7 +72,7 @@ pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-o
      (discover, list_devices, peek_device, check_health, read_model, read_events, read_network, retrieve_logs, identify, wake_device, stay_awake, \
      read_qr_image, ota_images, ota_updates, commissioning_window, \
      device_time, list_fabrics) are always available. The tools that change \
-     devices or the stored state (commission, decommission, \
+     devices or the stored state (commission, cancel_commission, decommission, \
      register/unregister_check_ins, remember, set_tags, sync, ota_upload, ota_delete, ota_update, add_network, \
      remove_network, connect_network, reorder_network, \
      open/close_commissioning_window, set_device_time, remove_device_fabric, \
@@ -550,6 +551,14 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
                     "fabric": fabric_schema()
                 }
             }),
+        ));
+        tools.push(tool(
+            "cancel_commission",
+            "Cancel the commission the controller is running, e.g. one started \
+             in the web UI or the CLI. Until the device has completed it, the \
+             device is rolled back; after, it is decommissioned. The commission \
+             then ends as cancelled. MUTATING — alters the device's fabric table.",
+            json!({ "type": "object", "properties": {} }),
         ));
         tools.push(tool(
             "decommission",
@@ -1215,6 +1224,7 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
                 .unwrap_or(false),
             fabric: arg_fabric(args),
         },
+        "cancel_commission" => wire::Request::Cancel,
         "set_tags" => wire::Request::SetTags {
             node_id: arg_node(args)?,
             tags: args

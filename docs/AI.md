@@ -25,7 +25,7 @@ with the web UI, run `matter-peek serve` and pass `--server` to
 |-------|--------|
 | `discover`, `advertised_devices`, `list_devices`, `list_fabrics`, `peek_device`, `read_model`, `read_events`, `read_network`, `thread_mesh`, `thread_findings`, `retrieve_logs`, `read_qr_image`, `ota_images`, `ota_updates`, `commissioning_window`, `device_time` | read-only |
 | `identify`, `wake_device`, `stay_awake` | act on the device without changing anything stored: `identify` makes it blink, for example, and the other two keep a sleeping device awake so that it answers; they are not read-only, so agents ask before using them |
-| `commission`, `decommission`, `register_check_ins`, `unregister_check_ins`, `remember`, `forget`, `set_tags`, `sync`, `add_network`, `remove_network`, `connect_network`, `reorder_network`, `ota_upload`, `ota_delete`, `ota_update`, `open_commissioning_window`, `close_commissioning_window`, `set_device_time`, `remove_device_fabric`, `create_fabric`, `rename_fabric`, `set_default_fabric`, `delete_fabric`, `write_attribute`, `invoke_command` | **mutating** |
+| `commission`, `cancel_commission`, `decommission`, `register_check_ins`, `unregister_check_ins`, `remember`, `forget`, `set_tags`, `sync`, `add_network`, `remove_network`, `connect_network`, `reorder_network`, `ota_upload`, `ota_delete`, `ota_update`, `open_commissioning_window`, `close_commissioning_window`, `set_device_time`, `remove_device_fabric`, `create_fabric`, `rename_fabric`, `set_default_fabric`, `delete_fabric`, `write_attribute`, `invoke_command` | **mutating** |
 
 The mutating tools change real devices, so they are only offered with
 `--allow-mutate`. Without it, they are hidden from `tools/list` and rejected

@@ -33,6 +33,13 @@ network it should join.
   given with `--wifi <ssid> --wifi-password <pw>` or with
   `--thread-dataset <hex>`.
 
+While a device is being commissioned, the web UI shows each step and a
+progress bar, and the CLI prints a line for each step. A commission can be
+cancelled: with *Cancel* on the Commission page, with Ctrl-C in the CLI (a
+second Ctrl-C quits at once), with `matter-peek cancel`, or over MCP with
+`cancel_commission`. Until the device has completed the commission, it is
+rolled back; after, it is decommissioned.
+
 The code can be the passcode, the manual pairing code or the `MT:` payload of
 the QR code. The web UI can also scan the QR code with a camera; this works
 over https or on localhost. In the CLI, `matter-peek qr <picture>` reads the QR

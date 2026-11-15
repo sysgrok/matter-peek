@@ -17,12 +17,14 @@
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{self, ExitCode};
 
+use async_signal::{Signal, Signals};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use clap::builder::BoolishValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use futures_lite::{future, StreamExt as _};
 
 use crate::client::Connection;
 use matter_peek_core::api::platform::data_dir;
@@ -110,6 +112,7 @@ enum Command {
     /// Read the setup code from a picture of a device's QR code (PNG or JPEG).
     Qr { image: PathBuf },
     /// Commission a device onto our fabric, over IP (--ip) or Bluetooth (--ble).
+    /// Ctrl-C cancels it.
     Commission {
         /// Its passcode, manual pairing code or MT: QR code payload.
         setup_code: String,
@@ -847,8 +850,9 @@ async fn run(cli: Cli) -> io::Result<bool> {
                 remember,
                 fabric,
             };
+            let commission = future::or(call(&conn, &out, request), cancel_on_ctrl_c(&conn));
 
-            Ok(match call(&conn, &out, request).await? {
+            Ok(match commission.await? {
                 Some(wire::Response::Commissioned(result)) if !out.json => {
                     println!(
                         "Commissioned as node {}.",
@@ -861,6 +865,20 @@ async fn run(cli: Cli) -> io::Result<bool> {
                         );
                     }
                     true
+                }
+                Some(wire::Response::Cancelled { decommissioned }) => {
+                    if !out.json {
+                        eprintln!(
+                            "{}",
+                            if decommissioned {
+                                "Cancelled. The device had completed the commission already, \
+                                 and was decommissioned."
+                            } else {
+                                "Cancelled. The device was rolled back."
+                            }
+                        );
+                    }
+                    false
                 }
                 response => response.is_some(),
             })
@@ -1426,6 +1444,25 @@ async fn call(
     }
 
     Ok(Some(response))
+}
+
+/// On Ctrl-C, ask the running commission to stop, which rolls the device back;
+/// on a second one, quit at once. Never returns otherwise.
+async fn cancel_on_ctrl_c(conn: &Connection) -> io::Result<Option<wire::Response>> {
+    let mut signals = match Signals::new([Signal::Int]) {
+        Ok(signals) => signals,
+        Err(e) => {
+            log::warn!("cannot catch Ctrl-C, so it cannot cancel the commission: {e}");
+            return future::pending().await;
+        }
+    };
+
+    signals.next().await;
+    eprintln!("Cancelling the commission; Ctrl-C again quits at once.");
+    conn.send(wire::Request::Cancel).await?;
+
+    signals.next().await;
+    process::exit(130);
 }
 
 fn window(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {

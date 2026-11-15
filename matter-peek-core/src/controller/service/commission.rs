@@ -286,14 +286,19 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
         // after the device completed the commission takes effect here,
         // decommissioning the device so that our fabric is not left orphaned on it.
         if progress.is_cancelled() {
-            let removed = self.controller.decommission(outcome.handle).await.is_ok();
-            if !removed {
+            if let Err(e) = self.controller.decommission(outcome.handle).await {
                 error!(
                     "service: cancel cleanup decommission failed for the just-commissioned device"
                 );
+                // The device keeps our fabric: not a cancel that left it as it was.
+                return Err(failed(
+                    "cancelled after the device completed the commission, but it could not be \
+                     decommissioned",
+                    e,
+                ));
             }
             return Err(PeekError::Cancelled {
-                decommissioned: removed,
+                decommissioned: true,
             });
         }
 

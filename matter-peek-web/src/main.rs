@@ -229,8 +229,10 @@ enum Msg {
     CommissionAnyway,
     /// Dismiss the re-commission warning without commissioning.
     DismissRecommission,
-    /// User clicked Cancel (or the timeout fired) — request server-side cancel.
+    /// User clicked Cancel — request server-side cancel.
     Cancel,
+    /// The commission so numbered ran out of time: cancel it, if it still runs.
+    CommissionTimeout(u32),
     /// Open the discovery popup and scan.
     OpenDiscover,
     CloseDiscover,
@@ -446,6 +448,13 @@ struct App {
     /// The Thread operational dataset, hex.
     thread_dataset: String,
     running: bool,
+    /// The running commission was asked to stop, and is stopping.
+    cancelling: bool,
+    /// It was stopped because it ran out of time.
+    timed_out: bool,
+    /// Numbers the commissions, so that the time limit of one that ended does
+    /// not cancel a later one.
+    commission_seq: u32,
     /// The discovery popup is showing.
     discover_open: bool,
     discovering: bool,
@@ -651,6 +660,9 @@ impl Component for App {
             video_ref: NodeRef::default(),
             thread_dataset: String::new(),
             running: false,
+            cancelling: false,
+            timed_out: false,
+            commission_seq: 0,
             discover_open: false,
             discovering: false,
             busy_stored: false,
@@ -1075,7 +1087,7 @@ impl Component for App {
                     fabric: self.fabric_ref(),
                 };
                 send_request(ctx.link().clone(), Pending::Commission, req);
-                cancel_after(ctx, COMMISSION_TIMEOUT_SECS);
+                cancel_after(ctx, self.commission_seq, self.commission_timeout_secs());
                 true
             }
             Msg::PlayEnded(ended) => {
@@ -1275,11 +1287,21 @@ impl Component for App {
             }
             Msg::Cancel => {
                 // Only meaningful while a commission is in flight.
-                if !self.running {
+                if !self.running || self.cancelling {
                     return false;
                 }
+                self.cancelling = true;
                 // Fire-and-forget the cancel on its own WS connection; the
                 // running commission replies `Cancelled` on its original one.
+                send_cancel();
+                true
+            }
+            Msg::CommissionTimeout(seq) => {
+                if seq != self.commission_seq || !self.running || self.cancelling {
+                    return false;
+                }
+                self.timed_out = true;
+                self.cancelling = true;
                 send_cancel();
                 true
             }
@@ -1976,12 +1998,9 @@ impl Component for App {
                     | wire::Response::Tested { .. }
                     | wire::Response::StoreFile { .. }
                     | wire::Response::Imported { .. } => {}
-                    wire::Response::Cancelled { decommissioned } => {
-                        self.notice = Some(if decommissioned {
-                            "Commission cancelled — the device had been added to our fabric and was cleaned up (decommissioned).".into()
-                        } else {
-                            "Commission cancelled before the device was modified.".into()
-                        });
+                    // The Commission page's card says how it ended.
+                    cancelled @ wire::Response::Cancelled { .. } => {
+                        self.result = Some(cancelled);
                     }
                     wire::Response::Network { node_id, network } => {
                         // The card's icon, before the next listing has it.
@@ -2643,6 +2662,9 @@ impl App {
             return true;
         }
         self.running = true;
+        self.cancelling = false;
+        self.timed_out = false;
+        self.commission_seq = self.commission_seq.wrapping_add(1);
         self.steps.clear();
         self.result = None;
         self.notice = None;
@@ -2674,14 +2696,17 @@ impl App {
             fabric: self.fabric_ref(),
         };
         send_request(ctx.link().clone(), Pending::Commission, req);
+        cancel_after(ctx, self.commission_seq, self.commission_timeout_secs());
+        true
+    }
 
-        let timeout_secs = if self.via == Via::Bluetooth {
+    /// How long the commission may run before it is cancelled.
+    fn commission_timeout_secs(&self) -> u32 {
+        if self.via == Via::Bluetooth {
             BLE_COMMISSION_TIMEOUT_SECS
         } else {
             COMMISSION_TIMEOUT_SECS
-        };
-        cancel_after(ctx, timeout_secs);
-        true
+        }
     }
 
     /// Answer Google Play services, which waits for how the commission of the
@@ -2969,14 +2994,13 @@ fn watch_resize(link: html::Scope<App>) {
     resized.forget();
 }
 
-/// Safety net: cancel the commission if it runs longer than `secs`. When the
-/// timer fires, it only acts if one is still `running` (a completed run
-/// cleared it).
-fn cancel_after(ctx: &Context<App>, secs: u32) {
+/// Safety net: cancel the commission numbered `seq` if it runs longer than
+/// `secs`. When the timer fires, it only acts if that commission still runs.
+fn cancel_after(ctx: &Context<App>, seq: u32, secs: u32) {
     let link = ctx.link().clone();
     spawn_local(async move {
         gloo_timers::future::TimeoutFuture::new(secs * 1000).await;
-        link.send_message(Msg::Cancel);
+        link.send_message(Msg::CommissionTimeout(seq));
     });
 }
 

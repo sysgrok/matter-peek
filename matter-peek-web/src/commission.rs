@@ -12,9 +12,20 @@ use crate::icons::{icon, Icon};
 use crate::ui;
 use crate::{
     checkbox_checked, input_value, picked_file, textarea_value, valid_bt_addr, valid_hex,
-    valid_setup_code, App, Msg, Network, Tab, Via, BLE_COMMISSION_TIMEOUT_SECS,
-    COMMISSION_TIMEOUT_SECS,
+    valid_setup_code, App, Msg, Network, StepLine, Tab, Via,
 };
+
+/// How a step of the commission went, as its line shows it.
+#[derive(Clone, Copy, PartialEq)]
+enum StepState {
+    Done,
+    /// The commission is at it.
+    Running,
+    /// The commission failed at it.
+    Failed,
+    /// A cancel stopped the commission at it.
+    Stopped,
+}
 
 impl App {
     pub(crate) fn view_commission_tab(&self, link: &Scope<Self>) -> Html {
@@ -93,10 +104,6 @@ impl App {
                     }) }
 
                     <div class="form-actions">
-                        if self.running {
-                            { ui::icon_button(Icon::Close, "Cancel", classes!("is-danger", "is-light"), false,
-                                None, link.callback(|_| Msg::Cancel)) }
-                        }
                         <button class={classes!("button", "is-link", "is-medium", self.running.then_some("is-loading"))}
                             disabled={self.running || !self.can_commission()}
                             onclick={link.callback(|_| Msg::Commission)}>
@@ -362,7 +369,7 @@ impl App {
         }
     }
 
-    /// How the commission goes, or how it went.
+    /// How the commission goes, or how it went: a bar, and the steps it got to.
     fn view_progress(&self, link: &Scope<Self>) -> Html {
         let failed = self.steps.last().and_then(|line| match &line.status {
             api::StepStatus::Failed { message } => Some(format!(
@@ -371,31 +378,44 @@ impl App {
             )),
             _ => None,
         });
+        let timeout = display::short_duration(self.commission_timeout_secs().into());
 
         let (class, glyph, title, text, action) = if self.running {
-            let secs = if self.via == Via::Bluetooth {
-                BLE_COMMISSION_TIMEOUT_SECS
-            } else {
-                COMMISSION_TIMEOUT_SECS
-            };
-            // The step the commission is at, once it reported one.
-            let step = self
-                .steps
-                .iter()
-                .rev()
-                .find(|line| line.step != api::CommissionStep::Commission)
-                .map(|line| format!("{}. ", display::commission_step_label(line.step)))
-                .unwrap_or_default();
-            (
-                "is-running",
-                None,
-                "Commissioning…".to_string(),
-                format!(
-                    "{step}This takes up to {}; Cancel stops it.",
-                    display::short_duration(secs.into())
+            let (title, text) = match (self.cancelling, self.timed_out) {
+                (false, _) => (
+                    "Commissioning…".to_string(),
+                    format!("This takes up to {timeout}."),
                 ),
-                html! {},
-            )
+                (true, false) => (
+                    "Cancelling…".to_string(),
+                    "Stopping the commission, and rolling the device back.".to_string(),
+                ),
+                (true, true) => (
+                    "Timed out, cancelling…".to_string(),
+                    format!(
+                        "It ran longer than {timeout}: stopping it, and rolling the device back."
+                    ),
+                ),
+            };
+            // Google Play services' own screens cannot be cancelled from here:
+            // the commission proper starts once it hands the device over.
+            let action = if self.via != Via::PlayServices || self.handing_over {
+                ui::icon_button(
+                    Icon::Close,
+                    if self.cancelling {
+                        "Cancelling"
+                    } else {
+                        "Cancel"
+                    },
+                    classes!("is-small", "is-danger", "is-light"),
+                    self.cancelling,
+                    Some("Stop the commission, and roll the device back"),
+                    link.callback(|_| Msg::Cancel),
+                )
+            } else {
+                html! {}
+            };
+            ("is-running", None, title, text, action)
         } else if let Some(wire::Response::Commissioned(result)) = &self.result {
             (
                 "is-done",
@@ -418,6 +438,29 @@ impl App {
                     link.callback(|_| Msg::SelectTab(Tab::Devices)),
                 ),
             )
+        } else if let Some(wire::Response::Cancelled { decommissioned }) = &self.result {
+            let how = if *decommissioned {
+                "The device had completed it already, and was decommissioned."
+            } else {
+                "The device was rolled back."
+            };
+            if self.timed_out {
+                (
+                    "is-cancelled",
+                    Some(Icon::Clock),
+                    "Commissioning timed out".to_string(),
+                    format!("It ran longer than {timeout}. {how}"),
+                    html! {},
+                )
+            } else {
+                (
+                    "is-cancelled",
+                    Some(Icon::Stop),
+                    "Commissioning cancelled".to_string(),
+                    how.to_string(),
+                    html! {},
+                )
+            }
         } else if let Some(message) = failed.or_else(|| match &self.result {
             Some(wire::Response::Error { message }) => Some(message.clone()),
             _ => None,
@@ -445,16 +488,86 @@ impl App {
                     <p class="progress-card-title">{ title }</p>
                     <p>{ text }</p>
                     if self.running {
-                        // Without a value, until the first step, the bar is indeterminate.
-                        <progress class="progress is-small is-link mt-2" max="100"
-                            value={self.steps.iter().rev()
-                                .find_map(|line| display::commission_progress(line.step))
-                                .map(|percent| percent.to_string())}>
-                        </progress>
+                        { self.view_progress_bar() }
+                        { self.view_steps() }
+                    } else if !self.steps.is_empty() {
+                        // How far it got, open where it failed.
+                        <details class="commission-details" open={class == "is-failed"}>
+                            <summary>{ "Steps" }</summary>
+                            { self.view_steps() }
+                        </details>
                     }
                 </div>
                 { action }
             </div>
+        }
+    }
+
+    /// The bar of the running commission, and how far it is in percent.
+    fn view_progress_bar(&self) -> Html {
+        let percent = self
+            .steps
+            .iter()
+            .rev()
+            .find_map(|line| display::commission_progress(line.step));
+
+        html! {
+            <div class="commission-bar">
+                // Without a value, until the first step, the bar is indeterminate.
+                <progress class={classes!("progress", "is-small",
+                    if self.cancelling { "is-warning" } else { "is-link" })}
+                    max="100" value={percent.map(|percent| percent.to_string())}>
+                </progress>
+                if let Some(percent) = percent {
+                    <span class="commission-percent">{ format!("{percent}%") }</span>
+                }
+            </div>
+        }
+    }
+
+    /// The steps the commission got to, each with how it went.
+    fn view_steps(&self) -> Html {
+        let end = if self.running {
+            None
+        } else {
+            Some(match &self.result {
+                Some(wire::Response::Commissioned(_))
+                | Some(wire::Response::Cancelled {
+                    decommissioned: true,
+                }) => StepState::Done,
+                Some(wire::Response::Cancelled { .. }) => StepState::Stopped,
+                _ => StepState::Failed,
+            })
+        };
+        let lines = step_lines(&self.steps, end, self.cancelling);
+        if lines.is_empty() {
+            return html! {};
+        }
+
+        html! {
+            <ol class="commission-steps">
+                { for lines.into_iter().map(|(step, attempts, state)| {
+                    let label = display::commission_step_label(step);
+                    let label = if attempts > 1 {
+                        format!("{label} · attempt {attempts}")
+                    } else {
+                        label
+                    };
+                    let (class, mark) = match state {
+                        StepState::Done => ("is-done", icon(Icon::Check, 14)),
+                        StepState::Running => ("is-running", html! { <span class="loader"></span> }),
+                        StepState::Failed => ("is-failed", icon(Icon::Close, 14)),
+                        StepState::Stopped => ("is-stopped", icon(Icon::Stop, 14)),
+                    };
+
+                    html! {
+                        <li class={classes!("commission-step", class)}>
+                            <span class="commission-step-mark">{ mark }</span>
+                            <span>{ label }</span>
+                        </li>
+                    }
+                }) }
+            </ol>
         }
     }
 
@@ -662,6 +775,55 @@ fn distance(meters: f64) -> String {
     } else {
         format!("{meters:.1} m")
     }
+}
+
+/// The steps of a commission as `steps` reported them, in order: each once,
+/// with how many times in a row it was attempted, and how it went. `end` is
+/// how the commission ended, `None` while it runs; `cancelling`, that it was
+/// asked to stop.
+fn step_lines(
+    steps: &[StepLine],
+    end: Option<StepState>,
+    cancelling: bool,
+) -> Vec<(api::CommissionStep, usize, StepState)> {
+    let mut lines: Vec<(api::CommissionStep, usize, StepState)> = Vec::new();
+    for line in steps
+        .iter()
+        .filter(|line| line.step != api::CommissionStep::Commission)
+    {
+        match lines.last_mut() {
+            Some((step, attempts, _)) if *step == line.step => *attempts += 1,
+            _ => lines.push((line.step, 1, StepState::Done)),
+        }
+    }
+
+    // A rollback follows the step the commission stopped at; without one, the
+    // last step is where it ended.
+    let stopped = match (end, cancelling) {
+        (Some(end), _) => end,
+        (None, true) => StepState::Stopped,
+        (None, false) => StepState::Failed,
+    };
+    match lines
+        .iter()
+        .position(|(step, ..)| *step == api::CommissionStep::Cleanup)
+    {
+        Some(at) if at > 0 => lines[at - 1].2 = stopped,
+        Some(_) => {}
+        None => {
+            if let (Some(end), Some(last)) = (end, lines.last_mut()) {
+                last.2 = end;
+            }
+        }
+    }
+
+    if end.is_none() {
+        if let Some(last) = lines.last_mut() {
+            last.2 = StepState::Running;
+        }
+    }
+
+    lines
 }
 
 /// A numbered part of the form.

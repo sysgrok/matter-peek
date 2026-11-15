@@ -42,6 +42,8 @@ termimad = "0.35"
 rustyline = "18"
 # `assistant set --api-key`: the key, typed without echo.
 rpassword = "7"
+# `commission`: Ctrl-C cancels it.
+async-signal = "0.2"
 
 # The API, its controller and its messages: with Avahi's mDNS, and BLE over BlueZ.
 [target.'cfg(not(windows))'.dependencies]
