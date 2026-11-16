@@ -701,7 +701,19 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
             details: device.details,
         };
 
-        self.update_devices(|devices| adopt(devices, device.handle, &ident), None)
+        let reachable = self.reachable_besides(device.handle.node_id);
+
+        self.update_devices(
+            |devices| adopt(devices, device.handle, &ident, &reachable),
+            None,
+        )
+    }
+
+    /// Whether a device other than `node_id` is reachable, as far as we know.
+    fn reachable_besides(&self, node_id: u64) -> impl Fn(u64) -> bool {
+        let online = self.online.borrow().clone().unwrap_or_default();
+
+        move |other| other != node_id && online.contains(&other)
     }
 
     /// Drop the record of a remembered device, and its tags, keeping it on our
@@ -760,7 +772,7 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
     ) -> Result<Option<u64>, Error> {
         let ident = self.controller.read_basic_info(handle).await;
         let mut devices = self.store.load_devices().unwrap_or_default();
-        let outcome = match_device(&ident, &devices);
+        let outcome = match_device(&ident, &devices, self.reachable_besides(handle.node_id));
 
         // Drop any record carrying this exact node_id (a clean re-run of the same id).
         devices.retain(|d| d.handle.node_id != handle.node_id);
@@ -851,11 +863,16 @@ fn has_details(details: &DeviceDetails) -> bool {
 
 /// Add a record for a device on our fabric. A record of the same unit under
 /// another node ID is stale (a device holds our fabric only once), so it is
-/// replaced, keeping its tags and label.
-fn adopt(devices: &mut Vec<StoredDevice>, handle: DeviceHandle, ident: &DeviceIdentity) {
+/// replaced, keeping its tags and label; one of a `reachable` device is not.
+fn adopt(
+    devices: &mut Vec<StoredDevice>,
+    handle: DeviceHandle,
+    ident: &DeviceIdentity,
+    reachable: impl Fn(u64) -> bool,
+) {
     let mut record = new_record(handle, ident);
 
-    if let MatchResult::Exact { node_id } = match_device(ident, devices) {
+    if let MatchResult::Exact { node_id } = match_device(ident, devices, reachable) {
         if let Some(i) = devices.iter().position(|d| d.handle.node_id == node_id) {
             let stale = devices.remove(i);
 

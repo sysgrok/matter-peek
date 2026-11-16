@@ -197,11 +197,22 @@ pub enum MatchResult {
 /// 3. usable `fingerprint` equal → [`MatchResult::Candidate`]
 /// 4. otherwise → [`MatchResult::New`]
 ///
+/// A stored device for which `reachable` says yes never matches: a device
+/// holds our fabric only once, so one we reach under its own node ID is
+/// another unit, even with the same ids (some devices all serve the same
+/// placeholder serial number).
+///
 /// Pure (no I/O) so it is unit-testable in isolation.
-pub fn match_device(ident: &DeviceIdentity, stored: &[StoredDevice]) -> MatchResult {
+pub fn match_device(
+    ident: &DeviceIdentity,
+    stored: &[StoredDevice],
+    reachable: impl Fn(u64) -> bool,
+) -> MatchResult {
+    let stored = || stored.iter().filter(|d| !reachable(d.handle.node_id));
+
     // 1. unique_id (per-unit, strongest).
     if !ident.unique_id.is_empty() {
-        if let Some(d) = stored.iter().find(|d| d.unique_id == ident.unique_id) {
+        if let Some(d) = stored().find(|d| d.unique_id == ident.unique_id) {
             return MatchResult::Exact {
                 node_id: d.handle.node_id,
             };
@@ -210,10 +221,7 @@ pub fn match_device(ident: &DeviceIdentity, stored: &[StoredDevice]) -> MatchRes
 
     // 2. serial_number (per-unit).
     if !ident.serial_number.is_empty() {
-        if let Some(d) = stored
-            .iter()
-            .find(|d| d.serial_number == ident.serial_number)
-        {
+        if let Some(d) = stored().find(|d| d.serial_number == ident.serial_number) {
             return MatchResult::Exact {
                 node_id: d.handle.node_id,
             };
@@ -222,7 +230,7 @@ pub fn match_device(ident: &DeviceIdentity, stored: &[StoredDevice]) -> MatchRes
 
     // 3. fingerprint (per-model, suggestion only).
     if ident.fingerprint.is_usable() {
-        if let Some(d) = stored.iter().find(|d| d.fingerprint == ident.fingerprint) {
+        if let Some(d) = stored().find(|d| d.fingerprint == ident.fingerprint) {
             return MatchResult::Candidate {
                 node_id: d.handle.node_id,
             };
@@ -295,7 +303,7 @@ mod tests {
     #[test]
     fn empty_store_is_new() {
         let id = ident("uid-1", "sn-1", fp(1, 2));
-        assert_eq!(match_device(&id, &[]), MatchResult::New);
+        assert_eq!(match_device(&id, &[], |_| false), MatchResult::New);
     }
 
     #[test]
@@ -304,7 +312,7 @@ mod tests {
         // Same unique_id, *different* serial + fingerprint → still Exact on uid.
         let id = ident("uid-1", "sn-NEW", fp(9, 9));
         assert_eq!(
-            match_device(&id, &store),
+            match_device(&id, &store, |_| false),
             MatchResult::Exact { node_id: N1 }
         );
     }
@@ -314,7 +322,7 @@ mod tests {
         let store = vec![stored(N1, "", "sn-1", fp(1, 2))];
         let id = ident("", "sn-1", fp(9, 9));
         assert_eq!(
-            match_device(&id, &store),
+            match_device(&id, &store, |_| false),
             MatchResult::Exact { node_id: N1 }
         );
     }
@@ -328,7 +336,7 @@ mod tests {
         ];
         let id = ident("uid-1", "sn-shared", fp(5, 6));
         assert_eq!(
-            match_device(&id, &store),
+            match_device(&id, &store, |_| false),
             MatchResult::Exact { node_id: N2 }
         );
     }
@@ -339,7 +347,7 @@ mod tests {
         // No shared uid/serial, but same per-model fingerprint.
         let id = ident("uid-new", "sn-new", fp(1, 2));
         assert_eq!(
-            match_device(&id, &store),
+            match_device(&id, &store, |_| false),
             MatchResult::Candidate { node_id: N1 }
         );
     }
@@ -350,7 +358,7 @@ mod tests {
         let blank = DeviceFingerprint::default();
         let store = vec![stored(N1, "", "", blank)];
         let id = ident("", "", blank);
-        assert_eq!(match_device(&id, &store), MatchResult::New);
+        assert_eq!(match_device(&id, &store, |_| false), MatchResult::New);
     }
 
     #[test]
@@ -364,7 +372,7 @@ mod tests {
         assert!(!partial.is_usable());
         let store = vec![stored(N1, "", "", partial)];
         let id = ident("", "", partial);
-        assert_eq!(match_device(&id, &store), MatchResult::New);
+        assert_eq!(match_device(&id, &store, |_| false), MatchResult::New);
     }
 
     #[test]
@@ -373,6 +381,26 @@ mod tests {
         // that also has empty uid/serial — only the (usable) fingerprint may.
         let store = vec![stored(N1, "", "", fp(1, 2))];
         let id = ident("", "", fp(7, 8)); // different fingerprint
-        assert_eq!(match_device(&id, &store), MatchResult::New);
+        assert_eq!(match_device(&id, &store, |_| false), MatchResult::New);
+    }
+
+    #[test]
+    fn a_reachable_device_is_another_unit() {
+        // Two units serving the same placeholder serial: N1 is reachable, so
+        // it is not the one being added, whatever they share.
+        let store = vec![
+            stored(N1, "", "123456789", fp(1, 2)),
+            stored(N2, "", "123456789", fp(1, 2)),
+        ];
+        let id = ident("", "123456789", fp(1, 2));
+
+        assert_eq!(
+            match_device(&id, &store[..1], |node_id| node_id == N1),
+            MatchResult::New
+        );
+        assert_eq!(
+            match_device(&id, &store, |node_id| node_id == N1),
+            MatchResult::Exact { node_id: N2 }
+        );
     }
 }
