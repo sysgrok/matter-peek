@@ -11,9 +11,9 @@
 //! transport, which the caller runs over both UDP and BTP (see [`commission_ble`]):
 //!
 //! - **Phase A — over BLE/BTP.** Scan for the device's commissionable
-//!   advertisement, connect to it as a GATT Central, and run PASE → ArmFailSafe →
-//!   … → AddNOC, then provision the operational network (`AddOrUpdate{Thread,
-//!   WiFi}Network` + `ConnectNetwork`). At the end of phase A the device has our
+//!   advertisement, connect to it as a GATT Central, run PASE, ask the device
+//!   which network it joins, then ArmFailSafe → … → AddNOC, and provision that
+//!   network (`AddOrUpdate{Thread, WiFi}Network` + `ConnectNetwork`). At the end of phase A the device has our
 //!   fabric installed and has been told to join its network; its fail-safe is
 //!   still armed.
 //!
@@ -24,7 +24,8 @@
 //!
 //! Which network a device wants is *not* in its onboarding payload - a QR code's
 //! discovery capabilities say how to *reach* it for commissioning, not what it will
-//! join. So the device is asked directly: see [`read_network_type`].
+//! join. So the device is asked directly, before it is given anything: see
+//! [`read_network_type`].
 
 extern crate alloc;
 
@@ -51,6 +52,7 @@ use rs_matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::im::ImClient as _;
 use rs_matter::onboard::{CommissionOptions, CommissionResult, Commissioner};
+use rs_matter::sc::ExchangeInitiator as _;
 use rs_matter::tlv::OctetStr;
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::transport::network::btp::Btp;
@@ -152,14 +154,26 @@ pub(crate) async fn unavailable() -> Option<alloc::string::String> {
     stack::unavailable().await
 }
 
+/// How [`commission_ble`] ended, short of an error.
+pub enum BleCommission {
+    /// Commissioned, onto the network at this index of `networks`; none for a
+    /// device already on its network (Ethernet).
+    Done {
+        outcome: CommissionOutcome,
+        network: Option<usize>,
+    },
+    /// The device joins a network of this kind, and `networks` has none. It was
+    /// left as it was: only a PASE session was opened with it.
+    NoNetwork(NetworkType),
+}
+
 /// Commission a device that is currently only reachable over BLE, provisioning it
-/// with the given operational-network credentials so it joins its network and
+/// with the operational network it asks for, so it joins that network and
 /// finishes commissioning over IP.
 ///
 /// The caller runs `matter`'s transport over both UDP and `btp` (e.g. a
 /// `ChainedNetwork` routing BTP addresses to `btp`), plus the mDNS backend:
 /// phase A goes over `btp`, phase B over UDP. See the module docs for the flow.
-/// Returns the installed device handle on success.
 ///
 /// # Arguments
 /// - `matter` / `crypto`: the borrowed rs-matter stack and crypto backend (as held
@@ -173,11 +187,12 @@ pub(crate) async fn unavailable() -> Option<alloc::string::String> {
 ///   [`scan_ble`]); else the first device matching `filter` is used.
 /// - `passcode`: the device's PASE passcode (from the same QR / pairing code).
 /// - `device_node_id`: the operational Node ID to assign the device.
-/// - `creds`: the credentials for the network the device should join. Which kind is
-///   needed is *not* something the onboarding payload can tell us - it is read off
-///   the device itself (see [`read_network_type`]) - so this must match the
-///   device's actual network type. Pass `None` for an Ethernet device, which is
-///   already on its network and needs no network commissioning at all.
+/// - `networks`: the networks it may join. Which kind it needs is *not*
+///   something the onboarding payload can tell us, so the device is asked right
+///   after PASE (see [`read_network_type`]), and gets the first of `networks` of
+///   that kind. With none of that kind, the commission stops there, before the
+///   device is given anything ([`BleCommission::NoNetwork`]). An Ethernet device
+///   needs none.
 /// - `progress`: follows the steps, and can cancel the commission; it then
 ///   fails with [`ErrorCode::Cancelled`].
 #[allow(clippy::too_many_arguments)]
@@ -191,9 +206,9 @@ pub async fn commission_ble<C: Crypto>(
     addr: Option<BtAddr>,
     passcode: u32,
     device_node_id: u64,
-    creds: Option<&WirelessCreds<'_>>,
+    networks: &[WirelessCreds<'_>],
     progress: &Progress<'_>,
-) -> Result<CommissionOutcome, Error> {
+) -> Result<BleCommission, Error> {
     // ---- Discovery: find the device's commissionable BLE advertisement. --------
     // Also when its address is known: the GATT connect needs the Bluetooth stack
     // to have seen it.
@@ -217,7 +232,7 @@ pub async fn commission_ble<C: Crypto>(
     btp.reset();
     btp.set_initiator(true);
 
-    let phase1 = {
+    let phase_a = {
         // The GATT Central; the caller's transport pumps `btp`.
         let mut central = pin!(stack::run_central(addr, btp));
 
@@ -233,7 +248,7 @@ pub async fn commission_ble<C: Crypto>(
             addr,
             passcode,
             device_node_id,
-            creds,
+            networks,
             &joining,
             progress,
         ));
@@ -255,6 +270,11 @@ pub async fn commission_ble<C: Crypto>(
         result?
     };
 
+    let (phase1, network) = match phase_a {
+        PhaseA::Added { phase1, network } => (phase1, network),
+        PhaseA::NoNetwork(net_type) => return Ok(BleCommission::NoNetwork(net_type)),
+    };
+
     info!(
         "BLE commission: phase A ok (device fabric {}, node 0x{:016X}); device is joining its network",
         phase1.fabric_index, phase1.device_node_id
@@ -268,12 +288,15 @@ pub async fn commission_ble<C: Crypto>(
     info!("BLE commission: phase B ok (CASE established, CommissioningComplete acknowledged)");
 
     // A new device: no window was opened for it.
-    Ok(CommissionOutcome {
-        handle: DeviceHandle {
-            fabric_index: controller_fab_idx,
-            node_id: phase1.device_node_id,
+    Ok(BleCommission::Done {
+        outcome: CommissionOutcome {
+            handle: DeviceHandle {
+                fabric_index: controller_fab_idx,
+                node_id: phase1.device_node_id,
+            },
+            window_opener: None,
         },
-        window_opener: None,
+        network,
     })
 }
 
@@ -288,8 +311,21 @@ fn drop_ble_link(matter: &Matter<'_>, btp: &Btp, addr: BtAddr) {
     btp.reset();
 }
 
-/// Phase A steps that run over the live BLE/BTP transport: PASE → AddNOC, then
-/// network provisioning, which sets `joining` once the device is told to join.
+/// How phase A ended, short of an error.
+enum PhaseA {
+    /// The device has our fabric, and was told to join the network at this
+    /// index of `networks` (none for an Ethernet device).
+    Added {
+        phase1: CommissionResult,
+        network: Option<usize>,
+    },
+    /// See [`BleCommission::NoNetwork`].
+    NoNetwork(NetworkType),
+}
+
+/// Phase A steps that run over the live BLE/BTP transport: PASE, asking the
+/// device which network it joins, ArmFailSafe → AddNOC, then network
+/// provisioning, which sets `joining` once the device is told to join.
 #[allow(clippy::too_many_arguments)]
 async fn phase_a_flow<C: Crypto>(
     matter: &Matter<'_>,
@@ -299,10 +335,10 @@ async fn phase_a_flow<C: Crypto>(
     addr: rs_matter::transport::network::BtAddr,
     passcode: u32,
     device_node_id: u64,
-    creds: Option<&WirelessCreds<'_>>,
+    networks: &[WirelessCreds<'_>],
     joining: &Cell<bool>,
     progress: &Progress<'_>,
-) -> Result<CommissionResult, Error> {
+) -> Result<PhaseA, Error> {
     let peer = Address::Btp(addr);
 
     // NocGenerator + commissioner scratch, exactly as the IP path.
@@ -325,11 +361,62 @@ async fn phase_a_flow<C: Crypto>(
         fail_safe_secs: BLE_FAIL_SAFE_SECS,
     };
 
-    info!("BLE commission: phase 1 (PASE → AddNOC) over BTP");
+    // PASE on its own first, so that the device is asked which network it joins
+    // before it is given anything: one we have no network for is left as it
+    // was. While the device holds the session, it accepts no other.
+    info!("BLE commission: PASE over BTP");
+    progress.report(CommissionStep::Pase);
+    let pase_session_id = progress
+        .cancellable(Exchange::establish_pase(matter, crypto, peer, passcode))
+        .await?;
+
+    let (net_type, concurrent) = match progress
+        .cancellable(read_network(matter, crypto, pase_session_id))
+        .await
+    {
+        Ok(read) => read,
+        Err(e) => {
+            commissioner.end_pase(pase_session_id);
+            return Err(e);
+        }
+    };
+
+    info!(
+        "BLE commission: device network type is {net_type:?} (concurrent connection: {concurrent})"
+    );
+
+    // The first of `networks` of the kind it joins. An Ethernet device is on its
+    // operational network already, and the cluster has no commands to give it one.
+    let network = match net_type {
+        NetworkType::Ethernet => {
+            info!("BLE commission: Ethernet device - skipping network commissioning");
+            None
+        }
+        net_type => {
+            let index = networks.iter().position(|creds| {
+                matches!(
+                    (net_type, creds),
+                    (NetworkType::Wifi, WirelessCreds::Wifi { .. })
+                        | (NetworkType::Thread, WirelessCreds::Thread { .. })
+                )
+            });
+
+            let Some(index) = index else {
+                warn!(
+                    "BLE commission: the device joins a {net_type:?} network, and none was given"
+                );
+                commissioner.end_pase(pase_session_id);
+                return Ok(PhaseA::NoNetwork(net_type));
+            };
+
+            Some(index)
+        }
+    };
+
+    info!("BLE commission: phase 1 (ArmFailSafe → AddNOC) over BTP");
     let phase1 = commissioner
-        .commission(
-            peer,
-            passcode,
+        .commission_over_pase(
+            pase_session_id,
             &opts,
             device_node_id,
             VALID_FOREVER,
@@ -337,61 +424,53 @@ async fn phase_a_flow<C: Crypto>(
         )
         .await?;
 
-    // Network commissioning: hand the device its credentials and tell it to connect.
-    // Runs over PASE on the still-live BTP session.
-    progress.report(CommissionStep::NetworkSetup);
-    let provision = provision_network(matter, crypto, phase1.pase_session_id, creds, joining);
-    if let Err(e) = progress.cancellable(provision).await {
-        // Roll the device back at once, so it can be commissioned again right
-        // away. Best-effort, as the device may be gone.
-        progress.report(CommissionStep::Cleanup);
-        let _ = commissioner.disarm_fail_safe(phase1.pase_session_id).await;
-        return Err(e);
+    if let Some(index) = network {
+        // Network commissioning: hand the device its credentials and tell it to
+        // connect. Runs over PASE on the still-live BTP session.
+        progress.report(CommissionStep::NetworkSetup);
+        let provision = provision_network(
+            matter,
+            crypto,
+            phase1.pase_session_id,
+            &networks[index],
+            concurrent,
+            joining,
+        );
+        if let Err(e) = progress.cancellable(provision).await {
+            // Roll the device back at once, so it can be commissioned again right
+            // away. Best-effort, as the device may be gone.
+            progress.report(CommissionStep::Cleanup);
+            let _ = commissioner.disarm_fail_safe(phase1.pase_session_id).await;
+            return Err(e);
+        }
     }
 
-    Ok(phase1)
+    Ok(PhaseA::Added { phase1, network })
 }
 
-/// Provision the device's operational network, if it needs one.
-///
-/// Neither the QR code nor the manual pairing code says whether a device is Thread,
-/// Wi-Fi or Ethernet - the onboarding payload's discovery capabilities describe how
-/// to *reach* the device for commissioning, not the network it will live on. The
-/// device itself is the authority, so we ask it: the `NetworkCommissioning`
-/// cluster's `FeatureMap` names its interface type, and we provision accordingly.
+/// Which network the device joins, and whether it stays on BLE while it joins
+/// it, read over PASE.
+async fn read_network<C: Crypto>(
+    matter: &Matter<'_>,
+    crypto: &C,
+    pase_session_id: u32,
+) -> Result<(NetworkType, bool), Error> {
+    let net_type = read_network_type(matter, crypto, pase_session_id).await?;
+    let concurrent = read_concurrent_connection(matter, crypto, pase_session_id).await;
+
+    Ok((net_type, concurrent))
+}
+
+/// Give the device `creds` and tell it to connect, over PASE. `concurrent`: it
+/// stays on BLE while it joins (see [`read_concurrent_connection`]).
 async fn provision_network<C: Crypto>(
     matter: &Matter<'_>,
     crypto: &C,
     pase_session_id: u32,
-    creds: Option<&WirelessCreds<'_>>,
+    creds: &WirelessCreds<'_>,
+    concurrent: bool,
     joining: &Cell<bool>,
 ) -> Result<(), Error> {
-    let net_type = read_network_type(matter, crypto, pase_session_id).await?;
-    let concurrent = read_concurrent_connection(matter, crypto, pase_session_id).await;
-
-    info!(
-        "BLE commission: device network type is {net_type:?} (concurrent connection: {concurrent})"
-    );
-
-    if matches!(net_type, NetworkType::Ethernet) {
-        // An Ethernet device is already on its operational network; there is nothing
-        // to provision, and the cluster exposes no network commands to do it with.
-        info!("BLE commission: Ethernet device - skipping network commissioning");
-        return Ok(());
-    }
-
-    let creds = creds.ok_or_else(|| {
-        error!("BLE commission: device needs {net_type:?} credentials, but none were given");
-        Error::from(ErrorCode::InvalidAction)
-    })?;
-
-    // Refuse to hand a Thread device Wi-Fi credentials, or vice versa.
-    net_type.check_creds(creds).inspect_err(|_| {
-        error!(
-            "BLE commission: {creds} credentials do not match the device's {net_type:?} network"
-        );
-    })?;
-
     // For Thread this is the Extended PAN ID, for Wi-Fi the SSID - `WirelessCreds`
     // knows which, so `ConnectNetwork` below just uses it.
     let network_id = creds.id()?;

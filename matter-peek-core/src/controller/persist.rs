@@ -31,7 +31,7 @@ use rs_matter::utils::sync::blocking::Mutex;
 use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::agent::{ModelConfig, Think};
-use crate::api::{IcdInfo, IcdMode, PowerKind, ThreadRole};
+use crate::api::{IcdInfo, IcdMode, NetworkCredentials, PowerKind, ThreadRole};
 use crate::model::{DeviceDetails, DeviceHandle, IcdClient, NetworkKind, StoredDevice};
 
 /// Scratch buffer size for the KV store (fits a fabric blob or our device list).
@@ -69,6 +69,9 @@ const ASSISTANT_KEY: u16 = VENDOR_KEYS_START + 3;
 const FABRICS_KEY: u16 = VENDOR_KEYS_START + 4;
 /// Our registrations for devices' Check-Ins.
 const ICD_CLIENTS_KEY: u16 = VENDOR_KEYS_START + 5;
+/// The networks commissions over Bluetooth gave devices, with their passwords
+/// and datasets.
+const SAVED_NETWORKS_KEY: u16 = VENDOR_KEYS_START + 6;
 /// The end of the keys a store may hold: rs-matter's, below
 /// `VENDOR_KEYS_START`, and ours, from there.
 const KEYS_END: u16 = VENDOR_KEYS_START + 0x100;
@@ -296,6 +299,21 @@ impl<'a, S: KvBlobStore + MaybeSend> ControllerStore<'a, S> {
         Persist::new(&self.kv).store_tlv(ICD_CLIENTS_KEY, IcdClientList::from_model(clients))
     }
 
+    /// The networks commissions over Bluetooth gave devices, the newest first.
+    pub fn load_networks(&self) -> Result<Vec<NetworkCredentials>, Error> {
+        self.kv
+            .access(|kv, buf| match kv.load(SAVED_NETWORKS_KEY, buf)? {
+                Some(data) => Ok(SavedNetworksBlob::from_tlv(&TLVElement::new(data))?.into_model()),
+                None => Ok(Vec::new()),
+            })
+    }
+
+    /// Replace the networks commissions over Bluetooth gave devices.
+    pub fn save_networks(&self, networks: &[NetworkCredentials]) -> Result<(), Error> {
+        Persist::new(&self.kv)
+            .store_tlv(SAVED_NETWORKS_KEY, SavedNetworksBlob::from_model(networks))
+    }
+
     /// The assistant's model, if one is set.
     pub fn load_assistant(&self) -> Result<Option<ModelConfig>, Error> {
         self.kv
@@ -500,6 +518,57 @@ impl AssistantBlob {
             api_key: self.api_key,
             think: Think::from_bool(self.think),
         }
+    }
+}
+
+/// Persisted networks, the newest first.
+#[derive(ToTLV, FromTLV)]
+struct SavedNetworksBlob {
+    networks: Vec<SavedNetworkWire>,
+}
+
+/// A Wi-Fi network has `ssid` and `password`, a Thread network `dataset` (hex).
+#[derive(ToTLV, FromTLV)]
+struct SavedNetworkWire {
+    ssid: Option<String>,
+    password: Option<String>,
+    dataset: Option<String>,
+}
+
+impl SavedNetworksBlob {
+    fn from_model(networks: &[NetworkCredentials]) -> Self {
+        Self {
+            networks: networks
+                .iter()
+                .map(|network| match network {
+                    NetworkCredentials::Wifi { ssid, password } => SavedNetworkWire {
+                        ssid: Some(ssid.clone()),
+                        password: Some(password.clone()),
+                        dataset: None,
+                    },
+                    NetworkCredentials::Thread { dataset } => SavedNetworkWire {
+                        ssid: None,
+                        password: None,
+                        dataset: Some(dataset.clone()),
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    fn into_model(self) -> Vec<NetworkCredentials> {
+        // An entry that is neither is dropped.
+        self.networks
+            .into_iter()
+            .filter_map(|w| match (w.ssid, w.dataset) {
+                (Some(ssid), None) => Some(NetworkCredentials::Wifi {
+                    ssid,
+                    password: w.password.unwrap_or_default(),
+                }),
+                (None, Some(dataset)) => Some(NetworkCredentials::Thread { dataset }),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -817,6 +886,27 @@ mod tests {
                 thread_role: Some(ThreadRole::SleepyEndDevice),
             },
         }
+    }
+
+    #[test]
+    fn saved_networks_round_trip_in_order() {
+        let s = store();
+        assert!(s.load_networks().unwrap().is_empty());
+
+        let networks = [
+            NetworkCredentials::Thread {
+                dataset: "0e080000000000010000".into(),
+            },
+            NetworkCredentials::Wifi {
+                ssid: "home".into(),
+                password: "secret".into(),
+            },
+        ];
+        s.save_networks(&networks).unwrap();
+        assert_eq!(s.load_networks().unwrap(), networks);
+
+        s.save_networks(&[]).unwrap();
+        assert!(s.load_networks().unwrap().is_empty());
     }
 
     #[test]

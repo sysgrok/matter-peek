@@ -319,6 +319,8 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
             | Op::RenameFabric { .. }
             | Op::ListDevices { .. }
             | Op::Assistant(_)
+            | Op::SavedNetworks(_)
+            | Op::ForgetNetwork { .. }
             | Op::SetAssistant { .. }
             | Op::Remember { .. }
             | Op::Forget { .. }
@@ -524,6 +526,12 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
             } => {
                 let list = self.list_matching(&fabric, filter.as_deref().unwrap_or_default());
                 let _ = reply.send(list).await;
+            }
+            Op::SavedNetworks(reply) => {
+                let _ = reply.send(self.saved_networks()).await;
+            }
+            Op::ForgetNetwork { id, reply } => {
+                let _ = reply.send(self.forget_network(&id)).await;
             }
             Op::Assistant(reply) => {
                 let model = self
@@ -1041,6 +1049,9 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             Op::SetDeviceTime { reply, .. } => refuse(reply, error).await,
             Op::OtaUploadChunk { reply, .. } => refuse(reply, error).await,
             Op::Assistant(reply) => refuse(reply, error).await,
+            Op::SavedNetworks(reply) | Op::ForgetNetwork { reply, .. } => {
+                refuse(reply, error).await
+            }
             Op::ReadThreadMesh { reply, .. } => refuse(reply, error).await,
             Op::SetAssistant { reply, .. } => refuse(reply, error).await,
             Op::WatchDevices { reply, .. } | Op::WatchOta { reply, .. } => {

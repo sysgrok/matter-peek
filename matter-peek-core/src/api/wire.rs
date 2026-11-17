@@ -278,6 +278,12 @@ pub enum Request {
         #[serde(default)]
         fabric: FabricRef,
     },
+    /// See `MatterPeek::saved_networks`. Answered with
+    /// [`Response::SavedNetworks`].
+    SavedNetworks,
+    /// See `MatterPeek::forget_network`. Answered with
+    /// [`Response::SavedNetworks`].
+    ForgetNetwork { id: String },
     /// See `MatterPeek::assistant`. Answered with [`Response::Assistant`].
     Assistant,
     /// See `MatterPeek::set_assistant`. Answered with [`Response::Assistant`].
@@ -405,6 +411,13 @@ pub enum Response {
     /// See [`PeekError::Cancelled`].
     Cancelled {
         decommissioned: bool,
+    },
+    /// See [`PeekError::NetworkNeeded`].
+    NetworkNeeded {
+        kind: NetworkKind,
+    },
+    SavedNetworks {
+        networks: Vec<SavedNetwork>,
     },
     /// `already` is `true` if this connection followed the device already.
     Subscribed {

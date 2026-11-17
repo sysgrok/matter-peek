@@ -206,6 +206,19 @@ impl MatterPeek {
         .await
     }
 
+    /// The networks commissions over Bluetooth LE gave devices, the newest
+    /// first: a device that asks for a network of their kind gets one of them,
+    /// unless the commission gives it another (see [`CommissionVia::Ble`]).
+    pub async fn saved_networks(&self) -> Result<Vec<SavedNetwork>, PeekError> {
+        self.call(Op::SavedNetworks).await
+    }
+
+    /// Forget the saved network `id` (see [`SavedNetwork::id`]), with its
+    /// password or dataset; answers the saved networks.
+    pub async fn forget_network(&self, id: String) -> Result<Vec<SavedNetwork>, PeekError> {
+        self.call(|reply| Op::ForgetNetwork { id, reply }).await
+    }
+
     /// Our fabrics.
     pub async fn fabrics(&self) -> Result<Vec<FabricInfo>, PeekError> {
         self.call(Op::Fabrics).await
@@ -1010,6 +1023,11 @@ pub(crate) enum Op {
         fabric: FabricRef,
         progress: Option<Arc<dyn CommissionListener>>,
         reply: Reply<CommissionResult>,
+    },
+    SavedNetworks(Reply<Vec<SavedNetwork>>),
+    ForgetNetwork {
+        id: String,
+        reply: Reply<Vec<SavedNetwork>>,
     },
     Fabrics(Reply<Vec<FabricInfo>>),
     CreateFabric {

@@ -3,12 +3,13 @@
 use core::net::SocketAddr;
 
 use alloc::format;
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use log::{error, info, warn};
 
 use rs_matter::crypto::Crypto;
+use rs_matter::dm::networks::wireless::ThreadTLV;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::mdns::CommissionableFilter;
@@ -17,7 +18,8 @@ use rs_matter::utils::sync::MaybeSend;
 
 use crate::api::{
     CommissionListener, CommissionResult, CommissionStep, CommissionVia, Discovered,
-    DiscoveredDevice, FabricRef, NetworkCredentials, PeekError, StepStatus,
+    DiscoveredDevice, FabricRef, NetworkCredentials, NetworkKind, PeekError, SavedNetwork,
+    StepStatus,
 };
 use crate::fabrics::OurFabric;
 use crate::matter::{CommissionFlow, Progress};
@@ -32,6 +34,13 @@ use super::{convert, failed, Ctx, FIRST_DEVICE_NODE_ID};
 #[cfg(feature = "ble")]
 const BLE_SCAN_SECS: u16 = 5;
 
+/// How many networks are saved, the newest first.
+#[cfg(feature = "ble")]
+const MAX_SAVED_NETWORKS: usize = 8;
+
+/// The Thread operational dataset TLV with the network name.
+const THREAD_NETWORK_NAME: u8 = 3;
+
 /// How a commission reaches the device.
 enum Reach {
     Ip(SocketAddr),
@@ -39,7 +48,7 @@ enum Reach {
         /// Matches the device's advertisement (from its setup code).
         filter: CommissionableFilter,
         addr: Option<rs_matter::transport::network::BtAddr>,
-        network: Option<NetworkCredentials>,
+        networks: Vec<NetworkCredentials>,
     },
 }
 
@@ -150,11 +159,15 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
                 )
                 .await,
             ),
-            CommissionVia::Ble { addr, network } => Reach::Ble {
-                filter: code.filter,
-                addr: addr.as_deref().map(parse_bt_addr).transpose()?,
-                network: network.clone(),
-            },
+            CommissionVia::Ble { addr, networks } => {
+                networks.iter().try_for_each(check_network)?;
+
+                Reach::Ble {
+                    filter: code.filter,
+                    addr: addr.as_deref().map(parse_bt_addr).transpose()?,
+                    networks: networks.clone(),
+                }
+            }
         };
 
         self.commission_flow(&fabric, reach, code.passcode, remember, progress)
@@ -248,13 +261,13 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
             Reach::Ble {
                 filter,
                 addr,
-                network,
+                networks,
             } => {
                 self.commission_ble(
                     fabric,
                     &filter,
                     addr,
-                    network,
+                    networks,
                     passcode,
                     device_node_id,
                     &progress,
@@ -275,6 +288,13 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
                 return Err(PeekError::Cancelled {
                     decommissioned: false,
                 });
+            }
+            Ok(CommissionFlow::NoNetwork(kind)) => {
+                let e = PeekError::NetworkNeeded { kind };
+                step(StepStatus::Failed {
+                    message: e.to_string(),
+                });
+                return Err(e);
             }
             Err(e) => {
                 step(step_failed(&e));
@@ -305,7 +325,8 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
         self.commissioned(outcome, remember).await
     }
 
-    /// Commission a device over BLE, provisioning it with `network`.
+    /// Commission a device over BLE, giving it the network it asks for: from
+    /// `networks`, else a saved one. The one it joined is saved.
     #[cfg(feature = "ble")]
     #[allow(clippy::too_many_arguments)]
     async fn commission_ble(
@@ -313,27 +334,42 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
         fabric: &OurFabric,
         filter: &CommissionableFilter,
         addr: Option<rs_matter::transport::network::BtAddr>,
-        network: Option<NetworkCredentials>,
+        networks: Vec<NetworkCredentials>,
         passcode: u32,
         device_node_id: u64,
         progress: &Progress<'_>,
     ) -> Result<CommissionFlow, Error> {
-        use crate::ble::{self, WirelessCreds};
+        use rs_matter::dm::clusters::net_comm::NetworkType;
 
-        let dataset;
-        let creds = match &network {
-            None => None,
-            Some(NetworkCredentials::Wifi { ssid, password }) => Some(WirelessCreds::Wifi {
-                ssid: ssid.as_bytes(),
-                pass: password.as_bytes(),
-            }),
-            Some(NetworkCredentials::Thread { dataset: hex }) => {
-                dataset = crate::network::decode_hex(hex)?;
-                Some(WirelessCreds::Thread {
-                    dataset_tlv: &dataset,
-                })
-            }
-        };
+        use crate::ble::{self, BleCommission, WirelessCreds};
+
+        let saved = self.store.load_networks().unwrap_or_else(|e| {
+            warn!("commission: cannot read the saved networks: {e:?}");
+            Vec::new()
+        });
+        // The given networks before the saved ones: the first of each kind is used.
+        let candidates: Vec<_> = networks.into_iter().chain(saved).collect();
+
+        let datasets = candidates
+            .iter()
+            .map(|network| match network {
+                NetworkCredentials::Thread { dataset } => crate::network::decode_hex(dataset),
+                NetworkCredentials::Wifi { .. } => Ok(Vec::new()),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let creds: Vec<_> = candidates
+            .iter()
+            .zip(&datasets)
+            .map(|(network, dataset)| match network {
+                NetworkCredentials::Wifi { ssid, password } => WirelessCreds::Wifi {
+                    ssid: ssid.as_bytes(),
+                    pass: password.as_bytes(),
+                },
+                NetworkCredentials::Thread { .. } => WirelessCreds::Thread {
+                    dataset_tlv: dataset,
+                },
+            })
+            .collect();
 
         let outcome = ble::commission_ble(
             self.matter,
@@ -345,13 +381,25 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
             addr,
             passcode,
             device_node_id,
-            creds.as_ref(),
+            &creds,
             progress,
         )
         .await;
 
         match outcome {
-            Ok(outcome) => Ok(CommissionFlow::Done(outcome)),
+            Ok(BleCommission::Done { outcome, network }) => {
+                if let Some(index) = network {
+                    self.save_network(&candidates[index]);
+                }
+                Ok(CommissionFlow::Done(outcome))
+            }
+            Ok(BleCommission::NoNetwork(net_type)) => {
+                Ok(CommissionFlow::NoNetwork(match net_type {
+                    NetworkType::Wifi => NetworkKind::WiFi,
+                    NetworkType::Thread => NetworkKind::Thread,
+                    NetworkType::Ethernet => NetworkKind::Ethernet,
+                }))
+            }
             Err(e) if e.code() == ErrorCode::Cancelled => Ok(CommissionFlow::Cancelled),
             Err(e) => Err(e),
         }
@@ -364,13 +412,67 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
         _fabric: &OurFabric,
         _filter: &CommissionableFilter,
         _addr: Option<rs_matter::transport::network::BtAddr>,
-        _network: Option<NetworkCredentials>,
+        _networks: Vec<NetworkCredentials>,
         _passcode: u32,
         _device_node_id: u64,
         _progress: &Progress<'_>,
     ) -> Result<CommissionFlow, Error> {
         warn!("commission: this build has no Bluetooth");
         Err(ErrorCode::NoNetworkInterface.into())
+    }
+
+    /// The saved networks, the newest first.
+    pub(super) fn saved_networks(&self) -> Result<Vec<SavedNetwork>, PeekError> {
+        let networks = self
+            .store
+            .load_networks()
+            .map_err(|e| failed("cannot read the saved networks", e))?;
+
+        Ok(networks.iter().map(saved_network).collect())
+    }
+
+    /// Forget the saved network `id` (see [`SavedNetwork::id`]).
+    pub(super) fn forget_network(&self, id: &str) -> Result<Vec<SavedNetwork>, PeekError> {
+        let mut networks = self
+            .store
+            .load_networks()
+            .map_err(|e| failed("cannot read the saved networks", e))?;
+
+        let count = networks.len();
+        networks.retain(|network| saved_network(network).id != id);
+        if networks.len() == count {
+            return Err(PeekError::failed(format!("no saved network {id}")));
+        }
+
+        self.store
+            .save_networks(&networks)
+            .map_err(|e| failed("cannot forget the network", e))?;
+
+        Ok(networks.iter().map(saved_network).collect())
+    }
+
+    /// Save `network`, which a device just joined, as the newest. It takes the
+    /// place of a saved network with the same SSID or extended PAN ID.
+    #[cfg(feature = "ble")]
+    fn save_network(&self, network: &NetworkCredentials) {
+        let mut networks = self.store.load_networks().unwrap_or_default();
+
+        let saved = saved_network(network);
+        networks.retain(|other| {
+            let other = saved_network(other);
+            (other.kind, other.id) != (saved.kind, saved.id.clone())
+        });
+        networks.insert(0, network.clone());
+        networks.truncate(MAX_SAVED_NETWORKS);
+
+        match self.store.save_networks(&networks) {
+            Ok(()) => info!(
+                "commission: saved the {} network {}",
+                saved.kind.label(),
+                saved.name
+            ),
+            Err(e) => error!("commission: saving the network failed: {e:?}"),
+        }
     }
 
     /// The device holds our fabric now: keep our fabric across restarts, list
@@ -439,6 +541,56 @@ fn parse_bt_addr(addr: &str) -> Result<rs_matter::transport::network::BtAddr, Pe
     }
 
     Ok(rs_matter::transport::network::BtAddr(bytes))
+}
+
+/// Refuse a network a device could never join: a Wi-Fi network without an
+/// SSID, or a Thread dataset that is not hex or has no extended PAN ID.
+fn check_network(network: &NetworkCredentials) -> Result<(), PeekError> {
+    match network {
+        NetworkCredentials::Wifi { ssid, .. } if ssid.is_empty() => {
+            Err(PeekError::failed("the Wi-Fi network has no name (SSID)"))
+        }
+        NetworkCredentials::Wifi { .. } => Ok(()),
+        NetworkCredentials::Thread { dataset } => {
+            let dataset = crate::network::decode_hex(dataset)
+                .map_err(|_| PeekError::failed("the Thread dataset is not hex"))?;
+
+            ThreadTLV::new(&dataset)
+                .ext_pan_id()
+                .map(|_| ())
+                .map_err(|_| PeekError::failed("the Thread dataset has no extended PAN ID"))
+        }
+    }
+}
+
+/// `network` as the API shows it: its kind, name and what it is forgotten by.
+fn saved_network(network: &NetworkCredentials) -> SavedNetwork {
+    match network {
+        NetworkCredentials::Wifi { ssid, .. } => SavedNetwork {
+            kind: NetworkKind::WiFi,
+            name: ssid.clone(),
+            id: ssid.clone(),
+        },
+        NetworkCredentials::Thread { dataset } => {
+            let dataset = crate::network::decode_hex(dataset).unwrap_or_default();
+            let id = ThreadTLV::new(&dataset)
+                .ext_pan_id()
+                .map(crate::network::hex)
+                .unwrap_or_default();
+            let name = ThreadTLV::new(&dataset)
+                .find_map(|(tlv_type, value)| {
+                    (tlv_type == THREAD_NETWORK_NAME)
+                        .then(|| String::from_utf8_lossy(value).into_owned())
+                })
+                .unwrap_or_else(|| id.clone());
+
+            SavedNetwork {
+                kind: NetworkKind::Thread,
+                name,
+                id,
+            }
+        }
+    }
 }
 
 fn invalid_setup_code(e: Error) -> PeekError {

@@ -923,6 +923,9 @@ pub enum CommissionFlow {
     /// Cancelled before the device completed commissioning: the device was
     /// rolled back (best-effort), so there is nothing to clean up.
     Cancelled,
+    /// The device commissioned over Bluetooth LE joins a network of this kind,
+    /// and none was given or saved. It was left as it was.
+    NoNetwork(crate::api::NetworkKind),
 }
 
 /// Follows a commission for its caller, and cancels it at the caller's word:

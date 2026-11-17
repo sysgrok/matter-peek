@@ -12,7 +12,7 @@ use crate::icons::{icon, Icon};
 use crate::ui;
 use crate::{
     checkbox_checked, input_value, picked_file, textarea_value, valid_bt_addr, valid_hex,
-    valid_setup_code, App, Msg, Network, StepLine, Tab, Via,
+    valid_setup_code, App, Msg, StepLine, Tab, Via,
 };
 
 /// How a step of the commission went, as its line shows it.
@@ -241,22 +241,10 @@ impl App {
         }
     }
 
-    /// Commissioning over Bluetooth: which device, and the network it joins.
+    /// Commissioning over Bluetooth: which device, and the networks it may join.
     fn view_ble_fields(&self, link: &Scope<Self>) -> Html {
         let addr = self.ble_addr.trim();
         let addr_invalid = !addr.is_empty() && !valid_bt_addr(addr);
-        let dataset_invalid =
-            !self.thread_dataset.trim().is_empty() && !valid_hex(&self.thread_dataset);
-
-        let network = |network: Network, glyph: Icon, label: &str| {
-            html! {
-                <button class={classes!("segment", (self.network == network).then_some("is-active"))}
-                    onclick={link.callback(move |_| Msg::SetNetwork(network))}>
-                    { icon(glyph, 16) }
-                    <span>{ label.to_string() }</span>
-                </button>
-            }
-        };
 
         html! {
             <>
@@ -276,60 +264,131 @@ impl App {
 
                 <div class="field">
                     <label class="label is-small">{ "The network it joins" }</label>
-                    <div class="segmented">
-                        { network(Network::Wifi, Icon::Wifi, "Wi-Fi") }
-                        { network(Network::Thread, Icon::Thread, "Thread") }
-                        { network(Network::None, Icon::Ethernet, "None: it is on one") }
+                    <p class="help mt-0 mb-2">
+                        { "It is asked whether it joins Wi-Fi or Thread, and gets the network of that kind." }
+                    </p>
+                    { self.view_saved_networks(link) }
+                    { self.view_wifi_fields(link) }
+                    { self.view_thread_field(link) }
+                    <p class="help">
+                        { if self.saved_networks.is_empty() {
+                            "Give one of each kind if unsure. The network a device joins is saved for the next one."
+                        } else {
+                            "One given here goes before the saved one of its kind. The network a device joins is saved."
+                        } }
+                    </p>
+                </div>
+            </>
+        }
+    }
+
+    /// The saved networks, each with a button to forget it.
+    fn view_saved_networks(&self, link: &Scope<Self>) -> Html {
+        if self.saved_networks.is_empty() {
+            return html! {};
+        }
+
+        html! {
+            <div class="saved-networks">
+                { for self.saved_networks.iter().map(|network| {
+                    let glyph = match network.kind {
+                        api::NetworkKind::Thread => Icon::Thread,
+                        _ => Icon::Wifi,
+                    };
+                    let id = network.id.clone();
+
+                    html! {
+                        <span class="tag-chip" title={format!("Saved {} network", network.kind.label())}>
+                            { icon(glyph, 12) }
+                            { network.name.clone() }
+                            <button class="tag-chip-remove" disabled={self.running}
+                                title={format!("Forget {}, with its {}", network.name,
+                                    if network.kind == api::NetworkKind::Thread { "dataset" } else { "password" })}
+                                onclick={link.callback(move |_| Msg::ForgetNetwork(id.clone()))}>
+                                { icon(Icon::Close, 12) }
+                            </button>
+                        </span>
+                    }
+                }) }
+            </div>
+        }
+    }
+
+    /// The Wi-Fi network to give a device that joins Wi-Fi.
+    fn view_wifi_fields(&self, link: &Scope<Self>) -> Html {
+        html! {
+            <div class="columns is-variable is-3 mb-0">
+                <div class="column">
+                    <div class="control has-icons-left">
+                        <input class="input" placeholder="Wi-Fi network name (SSID)"
+                            value={self.wifi_ssid.clone()}
+                            oninput={link.callback(|e: InputEvent| Msg::WifiSsid(input_value(e)))} />
+                        <span class="icon is-left">{ icon(Icon::Wifi, 18) }</span>
                     </div>
                 </div>
+                <div class="column">
+                    <div class="field has-addons">
+                        <div class="control has-icons-left is-expanded">
+                            <input class="input" placeholder="Wi-Fi password"
+                                type={if self.show_wifi_password { "text" } else { "password" }}
+                                value={self.wifi_password.clone()}
+                                oninput={link.callback(|e: InputEvent| Msg::WifiPassword(input_value(e)))} />
+                            <span class="icon is-left">{ icon(Icon::Lock, 18) }</span>
+                        </div>
+                        <div class="control">
+                            <button class="button"
+                                title={if self.show_wifi_password { "Hide the password" } else { "Show the password" }}
+                                onclick={link.callback(|_| Msg::ToggleWifiPassword)}>
+                                <span class="icon">
+                                    { icon(if self.show_wifi_password { Icon::EyeOff } else { Icon::Eye }, 18) }
+                                </span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
+    }
 
-                {
-                    match self.network {
-                        Network::Wifi => html! {
-                            <div class="columns is-variable is-3 mb-0">
-                                <div class="column">
-                                    <div class="control has-icons-left">
-                                        <input class="input" placeholder="Network name (SSID)"
-                                            value={self.wifi_ssid.clone()}
-                                            oninput={link.callback(|e: InputEvent| Msg::WifiSsid(input_value(e)))} />
-                                        <span class="icon is-left">{ icon(Icon::Wifi, 18) }</span>
-                                    </div>
-                                </div>
-                                <div class="column">
-                                    <div class="field has-addons">
-                                        <div class="control has-icons-left is-expanded">
-                                            <input class="input" placeholder="Password"
-                                                type={if self.show_wifi_password { "text" } else { "password" }}
-                                                value={self.wifi_password.clone()}
-                                                oninput={link.callback(|e: InputEvent| Msg::WifiPassword(input_value(e)))} />
-                                            <span class="icon is-left">{ icon(Icon::Lock, 18) }</span>
-                                        </div>
-                                        <div class="control">
-                                            <button class="button"
-                                                title={if self.show_wifi_password { "Hide the password" } else { "Show the password" }}
-                                                onclick={link.callback(|_| Msg::ToggleWifiPassword)}>
-                                                <span class="icon">
-                                                    { icon(if self.show_wifi_password { Icon::EyeOff } else { Icon::Eye }, 18) }
-                                                </span>
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        },
-                        Network::Thread => html! {
-                            <div class="field">
-                                <textarea class={classes!("textarea", "mono", dataset_invalid.then_some("is-danger"))} rows="3"
-                                    placeholder="Operational dataset, in hex"
-                                    value={self.thread_dataset.clone()}
-                                    oninput={link.callback(|e: InputEvent| Msg::ThreadDataset(textarea_value(e)))} />
-                                <p class="help">{ "As `ot-ctl dataset active -x` prints it." }</p>
-                            </div>
-                        },
-                        Network::None => html! {},
-                    }
-                }
-            </>
+    /// The Thread network to give a device that joins Thread.
+    fn view_thread_field(&self, link: &Scope<Self>) -> Html {
+        let dataset = self.thread_dataset.trim();
+        let dataset_invalid = !dataset.is_empty() && !valid_hex(dataset);
+
+        html! {
+            <div class="field mb-1">
+                <textarea class={classes!("textarea", "mono", dataset_invalid.then_some("is-danger"))} rows="2"
+                    placeholder="Thread operational dataset, in hex (as `ot-ctl dataset active -x` prints it)"
+                    value={self.thread_dataset.clone()}
+                    oninput={link.callback(|e: InputEvent| Msg::ThreadDataset(textarea_value(e)))} />
+            </div>
+        }
+    }
+
+    /// The device stopped the commission for a network of `kind`: the fields to
+    /// give one, and the button to commission it again.
+    fn view_network_needed(&self, link: &Scope<Self>, kind: api::NetworkKind) -> Html {
+        let given = match kind {
+            api::NetworkKind::Thread => {
+                let dataset = self.thread_dataset.trim();
+                !dataset.is_empty() && valid_hex(dataset)
+            }
+            _ => !self.wifi_ssid.is_empty(),
+        };
+
+        html! {
+            <div class="network-needed">
+                { match kind {
+                    api::NetworkKind::Thread => self.view_thread_field(link),
+                    _ => self.view_wifi_fields(link),
+                } }
+                <button class="button is-link is-small"
+                    disabled={!given || !self.can_commission()}
+                    onclick={link.callback(|_| Msg::Commission)}>
+                    <span class="icon">{ icon(Icon::Commission, 16) }</span>
+                    <span>{ "Commission again" }</span>
+                </button>
+            </div>
         }
     }
 
@@ -461,6 +520,18 @@ impl App {
                     html! {},
                 )
             }
+        } else if let Some(wire::Response::NetworkNeeded { kind }) = &self.result {
+            (
+                "is-cancelled",
+                Some(Icon::Alert),
+                format!("It joins a {} network", kind.label()),
+                format!(
+                    "No {} network was given or saved, so it was given nothing. Give one here, \
+                     and commission it again.",
+                    kind.label()
+                ),
+                html! {},
+            )
         } else if let Some(message) = failed.or_else(|| match &self.result {
             Some(wire::Response::Error { message }) => Some(message.clone()),
             _ => None,
@@ -487,6 +558,9 @@ impl App {
                 <div class="progress-card-text">
                     <p class="progress-card-title">{ title }</p>
                     <p>{ text }</p>
+                    if let Some(wire::Response::NetworkNeeded { kind }) = &self.result {
+                        { self.view_network_needed(link, *kind) }
+                    }
                     if self.running {
                         { self.view_progress_bar() }
                         { self.view_steps() }
@@ -535,7 +609,8 @@ impl App {
                 | Some(wire::Response::Cancelled {
                     decommissioned: true,
                 }) => StepState::Done,
-                Some(wire::Response::Cancelled { .. }) => StepState::Stopped,
+                Some(wire::Response::Cancelled { .. })
+                | Some(wire::Response::NetworkNeeded { .. }) => StepState::Stopped,
                 _ => StepState::Failed,
             })
         };

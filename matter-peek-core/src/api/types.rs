@@ -31,6 +31,9 @@ pub enum PeekError {
     /// The commission was cancelled. `decommissioned` is `true` if the device
     /// had been given our fabric already, and was decommissioned on the way out.
     Cancelled { decommissioned: bool },
+    /// The device commissioned over Bluetooth LE joins a network of this kind,
+    /// and none was given or saved. Nothing was changed on the device.
+    NetworkNeeded { kind: NetworkKind },
     /// Anything else.
     Failed { message: String },
 }
@@ -54,6 +57,11 @@ impl fmt::Display for PeekError {
             Self::Cancelled {
                 decommissioned: false,
             } => f.write_str("cancelled"),
+            Self::NetworkNeeded { kind } => write!(
+                f,
+                "the device joins a {0} network, and no {0} network was given",
+                kind.label()
+            ),
             Self::Failed { message } => f.write_str(message),
         }
     }
@@ -69,17 +77,23 @@ pub enum CommissionVia {
     /// Over IP, at `addr` (e.g. `"[fdb5::1]:5540"`).
     Ip { addr: String },
     /// Over Bluetooth LE: the device at `addr` (e.g. `"E8:F6:0A:12:34:56"`), or
-    /// else the first one matching the setup code. It then joins `network`;
-    /// none for a device already on its network (Ethernet).
+    /// else the first one matching the setup code.
+    ///
+    /// Which kind of network the device joins is read from the device itself,
+    /// before it is given anything: it gets the network of that kind from
+    /// `networks`, else the saved one (see [`SavedNetwork`]). With neither, the
+    /// commission stops with [`PeekError::NetworkNeeded`]. A device already on
+    /// its network (Ethernet) needs none.
     Ble {
         #[serde(default)]
         addr: Option<String>,
+        /// At most one of each kind is used: the first.
         #[serde(default)]
-        network: Option<NetworkCredentials>,
+        networks: Vec<NetworkCredentials>,
     },
 }
 
-/// The operational network a device commissioned over Bluetooth joins.
+/// A network a device commissioned over Bluetooth joins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -92,6 +106,20 @@ pub enum NetworkCredentials {
     Thread {
         dataset: String,
     },
+}
+
+/// A network a commission over Bluetooth LE gave a device, saved so that the
+/// next device of its kind gets it without asking. Saved once the commission
+/// succeeds; the newest first. Its password or dataset stays in the store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SavedNetwork {
+    pub kind: NetworkKind,
+    /// The SSID of a Wi-Fi network, or the network name of a Thread network.
+    pub name: String,
+    /// What it is forgotten by: the SSID of a Wi-Fi network, or the extended
+    /// PAN ID of a Thread network, in hex.
+    pub id: String,
 }
 
 /// The steps of a commission, reported as it goes. `Commission` is the whole

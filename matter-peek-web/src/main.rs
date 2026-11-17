@@ -158,15 +158,6 @@ enum Via {
     PlayServices,
 }
 
-/// The network a device commissioned over Bluetooth joins.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Network {
-    Wifi,
-    Thread,
-    /// Already on its network (Ethernet).
-    None,
-}
-
 /// A destructive action awaiting confirmation.
 #[derive(Clone, PartialEq)]
 enum Ask {
@@ -252,7 +243,6 @@ enum Msg {
     /// commissioned, or why they could not open.
     PlayEnded(Result<bool, String>),
     BleAddr(String),
-    SetNetwork(Network),
     WifiSsid(String),
     WifiPassword(String),
     ToggleWifiPassword,
@@ -272,6 +262,8 @@ enum Msg {
     /// A frame was decoded: the setup code in it, if any.
     CameraDecoded(Option<String>),
     ThreadDataset(String),
+    /// Forget the saved network with this id.
+    ForgetNetwork(String),
     ListDevices,
     /// Re-sync the device list with the devices on our fabric.
     Sync,
@@ -436,8 +428,8 @@ struct App {
     /// The Bluetooth address of the device to commission; empty for the one
     /// matching the setup code.
     ble_addr: String,
-    /// The network a device commissioned over Bluetooth joins.
-    network: Network,
+    /// The networks a device commissioned over Bluetooth may join: the one of
+    /// the kind it asks for. Empty fields leave it to the saved ones.
     wifi_ssid: String,
     wifi_password: String,
     show_wifi_password: bool,
@@ -447,6 +439,8 @@ struct App {
     video_ref: NodeRef,
     /// The Thread operational dataset, hex.
     thread_dataset: String,
+    /// The networks earlier commissions gave devices, the newest first.
+    saved_networks: Vec<api::SavedNetwork>,
     running: bool,
     /// The running commission was asked to stop, and is stopping.
     cancelling: bool,
@@ -652,13 +646,13 @@ impl Component for App {
             android_fabric: None,
             play_note: None,
             ble_addr: String::new(),
-            network: Network::Wifi,
             wifi_ssid: String::new(),
             wifi_password: String::new(),
             show_wifi_password: false,
             camera: None,
             video_ref: NodeRef::default(),
             thread_dataset: String::new(),
+            saved_networks: Vec::new(),
             running: false,
             cancelling: false,
             timed_out: false,
@@ -752,6 +746,11 @@ impl Component for App {
                         ctx.link().clone(),
                         Pending::None,
                         wire::Request::Capabilities,
+                    );
+                    send_request(
+                        ctx.link().clone(),
+                        Pending::None,
+                        wire::Request::SavedNetworks,
                     );
                 }
                 if tab == Tab::Assistant {
@@ -1122,10 +1121,6 @@ impl Component for App {
                 self.ble_addr = v;
                 true
             }
-            Msg::SetNetwork(v) => {
-                self.network = v;
-                true
-            }
             Msg::WifiSsid(v) => {
                 self.wifi_ssid = v;
                 true
@@ -1263,6 +1258,14 @@ impl Component for App {
             Msg::ThreadDataset(v) => {
                 self.thread_dataset = v;
                 true
+            }
+            Msg::ForgetNetwork(id) => {
+                send_request(
+                    ctx.link().clone(),
+                    Pending::None,
+                    wire::Request::ForgetNetwork { id },
+                );
+                false
             }
             Msg::Commission => {
                 // Guard: re-commissioning the device we *just* commissioned is
@@ -1999,9 +2002,11 @@ impl Component for App {
                     | wire::Response::StoreFile { .. }
                     | wire::Response::Imported { .. } => {}
                     // The Commission page's card says how it ended.
-                    cancelled @ wire::Response::Cancelled { .. } => {
-                        self.result = Some(cancelled);
+                    ended @ (wire::Response::Cancelled { .. }
+                    | wire::Response::NetworkNeeded { .. }) => {
+                        self.result = Some(ended);
                     }
+                    wire::Response::SavedNetworks { networks } => self.saved_networks = networks,
                     wire::Response::Network { node_id, network } => {
                         // The card's icon, before the next listing has it.
                         let kind = network
@@ -2054,6 +2059,12 @@ impl Component for App {
                             }
                         }
                         self.result = Some(other);
+                        // It may have saved the network the device joined.
+                        send_request(
+                            ctx.link().clone(),
+                            Pending::None,
+                            wire::Request::SavedNetworks,
+                        );
                         self.busy_stored = true;
                         self.loading_list = true;
                         send_request(
@@ -2612,13 +2623,10 @@ impl App {
             Via::Network => self.peer_addr.trim().parse::<SocketAddr>().is_ok(),
             Via::Bluetooth => {
                 let addr = self.ble_addr.trim();
-                let network = match self.network {
-                    Network::Wifi => !self.wifi_ssid.is_empty(),
-                    Network::Thread => valid_hex(&self.thread_dataset),
-                    Network::None => true,
-                };
+                let dataset = self.thread_dataset.trim();
 
-                (addr.is_empty() || valid_bt_addr(addr)) && network
+                (addr.is_empty() || valid_bt_addr(addr))
+                    && (dataset.is_empty() || valid_hex(dataset))
             }
             // Google Play services asks for the rest.
             Via::PlayServices => return true,
@@ -2636,20 +2644,16 @@ impl App {
         }
 
         let addr = self.ble_addr.trim();
-        let network = match self.network {
-            Network::Wifi => Some(api::NetworkCredentials::Wifi {
-                ssid: self.wifi_ssid.clone(),
-                password: self.wifi_password.clone(),
-            }),
-            Network::Thread => Some(api::NetworkCredentials::Thread {
-                dataset: self.thread_dataset.split_whitespace().collect(),
-            }),
-            Network::None => None,
-        };
+        let wifi = (!self.wifi_ssid.is_empty()).then(|| api::NetworkCredentials::Wifi {
+            ssid: self.wifi_ssid.clone(),
+            password: self.wifi_password.clone(),
+        });
+        let dataset: String = self.thread_dataset.split_whitespace().collect();
+        let thread = (!dataset.is_empty()).then_some(api::NetworkCredentials::Thread { dataset });
 
         api::CommissionVia::Ble {
             addr: (!addr.is_empty()).then(|| addr.to_string()),
-            network,
+            networks: wifi.into_iter().chain(thread).collect(),
         }
     }
 

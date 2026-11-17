@@ -112,7 +112,10 @@ enum Command {
     /// Read the setup code from a picture of a device's QR code (PNG or JPEG).
     Qr { image: PathBuf },
     /// Commission a device onto our fabric, over IP (--ip) or Bluetooth (--ble).
-    /// Ctrl-C cancels it.
+    /// Ctrl-C cancels it. Over Bluetooth, the device is asked which kind of
+    /// network it joins, and gets the --wifi or --thread-dataset network of that
+    /// kind, else the newest saved one (see `saved-networks`); give both if
+    /// unsure. The network it joined is saved.
     Commission {
         /// Its passcode, manual pairing code or MT: QR code payload.
         setup_code: String,
@@ -131,15 +134,16 @@ enum Command {
         /// The device's Bluetooth address (see `discover`).
         #[arg(long, value_name = "BT_ADDR", requires = "ble")]
         ble_addr: Option<String>,
-        /// The Wi-Fi network the device joins (over Bluetooth).
+        /// The Wi-Fi network the device joins, if it joins Wi-Fi (over
+        /// Bluetooth).
         #[arg(long, value_name = "SSID", requires_all = ["ble", "wifi_password"])]
         wifi: Option<String>,
         /// The password of the --wifi network.
         #[arg(long, value_name = "PASSWORD", requires = "wifi")]
         wifi_password: Option<String>,
-        /// The Thread network the device joins (over Bluetooth): its operational
-        /// dataset, hex-encoded.
-        #[arg(long, value_name = "HEX", requires = "ble", conflicts_with = "wifi")]
+        /// The Thread network the device joins, if it joins Thread (over
+        /// Bluetooth): its operational dataset, hex-encoded.
+        #[arg(long, value_name = "HEX", requires = "ble")]
         thread_dataset: Option<String>,
         /// Also keep a record of the device, so it can be tagged.
         #[arg(long)]
@@ -147,6 +151,14 @@ enum Command {
     },
     /// Cancel the commission running on the server.
     Cancel,
+    /// The Wi-Fi and Thread networks commissions over Bluetooth gave devices,
+    /// the newest first. A device that asks for a network of their kind gets
+    /// the newest, unless `commission` gives it another. Without a subcommand,
+    /// lists them.
+    SavedNetworks {
+        #[command(subcommand)]
+        action: Option<SavedNetworksAction>,
+    },
     /// Keep a record of a listed device, so it can be tagged.
     Remember { node: Node },
     /// Drop the record of a remembered device, and its tags, keeping it on our
@@ -289,7 +301,8 @@ enum Command {
         view: Option<ThreadView>,
     },
     /// Write the store to FILE: our fabrics and their keys, the devices, the
-    /// assistant's model with its API key, and its chats. Encrypted with a
+    /// saved networks with their passwords, the assistant's model with its API
+    /// key, and its chats. Encrypted with a
     /// passphrase, which it asks for. The store stays: use one of the two.
     Export {
         file: PathBuf,
@@ -361,6 +374,19 @@ enum Command {
     Assistant {
         #[command(subcommand)]
         action: Option<AssistantAction>,
+    },
+}
+
+/// What to do with the saved networks.
+#[derive(Subcommand)]
+enum SavedNetworksAction {
+    /// List them: kind, name, and the id to forget one by.
+    List,
+    /// Forget one, with its password or dataset.
+    Forget {
+        /// Its id: the SSID of a Wi-Fi network, or the extended PAN ID of a
+        /// Thread network.
+        id: String,
     },
 }
 
@@ -832,17 +858,19 @@ async fn run(cli: Cli) -> io::Result<bool> {
         } => {
             let via = match ip {
                 Some(addr) => api::CommissionVia::Ip { addr },
-                None => api::CommissionVia::Ble {
-                    addr: ble_addr,
-                    network: match (wifi, thread_dataset) {
-                        (Some(ssid), _) => Some(api::NetworkCredentials::Wifi {
-                            ssid,
-                            password: wifi_password.unwrap_or_default(),
-                        }),
-                        (None, Some(dataset)) => Some(api::NetworkCredentials::Thread { dataset }),
-                        (None, None) => None,
-                    },
-                },
+                None => {
+                    let wifi = wifi.map(|ssid| api::NetworkCredentials::Wifi {
+                        ssid,
+                        password: wifi_password.unwrap_or_default(),
+                    });
+                    let thread =
+                        thread_dataset.map(|dataset| api::NetworkCredentials::Thread { dataset });
+
+                    api::CommissionVia::Ble {
+                        addr: ble_addr,
+                        networks: wifi.into_iter().chain(thread).collect(),
+                    }
+                }
             };
             let request = wire::Request::Commission {
                 via,
@@ -880,8 +908,30 @@ async fn run(cli: Cli) -> io::Result<bool> {
                     }
                     false
                 }
+                Some(wire::Response::NetworkNeeded { kind }) => {
+                    if !out.json {
+                        let give = match kind {
+                            api::NetworkKind::Thread => "--thread-dataset",
+                            _ => "--wifi and --wifi-password",
+                        };
+                        eprintln!(
+                            "The device joins a {} network, and none was given or saved: \
+                             commission it again with {give}. Nothing was changed on it.",
+                            kind.label()
+                        );
+                    }
+                    false
+                }
                 response => response.is_some(),
             })
+        }
+        Command::SavedNetworks { action } => {
+            let request = match action.unwrap_or(SavedNetworksAction::List) {
+                SavedNetworksAction::List => wire::Request::SavedNetworks,
+                SavedNetworksAction::Forget { id } => wire::Request::ForgetNetwork { id },
+            };
+
+            saved_networks(&out, call(&conn, &out, request).await?)
         }
         Command::Cancel => ok(
             &out,
@@ -1666,6 +1716,31 @@ fn ok(out: &Out, response: Option<wire::Response>, text: &str) -> io::Result<boo
     }
 
     Ok(response.is_some())
+}
+
+fn saved_networks(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {
+    let Some(wire::Response::SavedNetworks { networks }) = response else {
+        return Ok(response.is_some());
+    };
+
+    if out.json {
+        return Ok(true);
+    }
+
+    if networks.is_empty() {
+        println!("No saved networks.");
+    }
+
+    for network in networks {
+        println!(
+            "{:<7} {:<32} {}",
+            network.kind.label(),
+            network.name,
+            network.id
+        );
+    }
+
+    Ok(true)
 }
 
 fn fabrics(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {

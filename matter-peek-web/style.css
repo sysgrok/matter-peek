@@ -212,6 +212,11 @@ html, body { background: var(--bulma-scheme-main-bis); min-height: 100vh; }
 .device-health-empty { padding: .75rem; border-radius: 12px; background: var(--bulma-scheme-main-bis); font-size: .85rem; text-align: center; color: var(--bulma-text-weak); }
 .device-tags { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; }
 .tag-chip { display: inline-flex; align-items: center; gap: .3rem; padding: .15rem .6rem; border-radius: 999px; font-size: .78rem; font-weight: 500; background: hsla(var(--info-hsl), .14); color: var(--bulma-info-on-scheme); }
+.tag-chip-remove { display: inline-flex; padding: 0; margin-left: .1rem; border: 0; background: transparent; color: inherit; cursor: pointer; opacity: .6; }
+.tag-chip-remove:hover:not(:disabled) { opacity: 1; }
+.saved-networks { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .75rem; }
+.network-needed { margin-top: .75rem; }
+.network-needed > .button { margin-top: .5rem; }
 .tag-edit { display: inline-flex; align-items: center; gap: .3rem; padding: .15rem .6rem; border: 1px dashed var(--bulma-border); border-radius: 999px; background: transparent; color: var(--bulma-text-weak); font: inherit; font-size: .78rem; cursor: pointer; }
 .tag-edit:hover { color: var(--bulma-link); border-color: var(--bulma-link); }
 .field.tag-editor { margin-bottom: 0; }

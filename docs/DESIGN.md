@@ -329,8 +329,16 @@ filter.
 
 ### Commissioning
 - Over IP, commissioning does PASE, AddNOC, and then CASE to finish. Over BLE,
-  it does PASE over BTP, sends the network credentials (Wi-Fi or Thread) and
-  ConnectNetwork, and then does CASE over IP.
+  it does PASE over BTP, reads the root Network Commissioning cluster's
+  FeatureMap to learn whether the device joins Wi-Fi or Thread, then AddNOC,
+  sends the network credentials of that kind and ConnectNetwork, and then does
+  CASE over IP. Reading the network kind before ArmFailSafe means a device we
+  have no network for is given nothing (CHIP reads it in its
+  `kReadCommissioningInfo` stage, also before AddNOC).
+- The credentials come from the commission, else from the saved networks: the
+  store keeps the networks devices joined (Wi-Fi SSID and password, Thread
+  dataset), the newest first, at most 8, one per SSID or extended PAN ID. The
+  API lists them without their secrets.
 - The PASE session stays open until commissioning completes. On failure, the
   fail-safe is disarmed over it, after which the device accepts PASE again.
 - Whether the device supports a concurrent connection is read from General

@@ -27,11 +27,20 @@ New devices can be commissioned over IP, or over Bluetooth LE. When a device is
 commissioned over Bluetooth LE, matter-peek also gives it the Wi-Fi or Thread
 network it should join.
 
-- In the web UI, use the **Commission** page.
+Neither the QR code nor the pairing code says whether a device joins Wi-Fi or
+Thread. So matter-peek asks the device right after it connects, and gives it
+the network of that kind: the one given for this commission, else the one
+saved from an earlier commission. The network a device joins is saved for the
+next device. If matter-peek has no network of the kind the device asks for, it
+stops before the device is given anything, and says which kind it needs.
+
+- In the web UI, use the **Commission** page. It shows the saved networks,
+  each with a button to forget it.
 - In the CLI, use `matter-peek commission <code> --ip <addr>`, or
-  `matter-peek commission <code> --ble`. With `--ble`, the network to join is
-  given with `--wifi <ssid> --wifi-password <pw>` or with
-  `--thread-dataset <hex>`.
+  `matter-peek commission <code> --ble`. With `--ble`, a network is given with
+  `--wifi <ssid> --wifi-password <pw>`, with `--thread-dataset <hex>`, or with
+  both. `matter-peek saved-networks` lists the saved networks, and
+  `matter-peek saved-networks forget <id>` forgets one.
 
 While a device is being commissioned, the web UI shows each step and a
 progress bar, and the CLI prints a line for each step. A commission can be

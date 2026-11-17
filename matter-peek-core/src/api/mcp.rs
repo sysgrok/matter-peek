@@ -41,6 +41,7 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2024-11-05"];
 const MUTATING_TOOLS: &[&str] = &[
     "commission",
     "cancel_commission",
+    "forget_network",
     "decommission",
     "register_check_ins",
     "unregister_check_ins",
@@ -71,8 +72,8 @@ const MUTATING_TOOLS: &[&str] = &[
 pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-only tools \
      (discover, list_devices, peek_device, check_health, read_model, read_events, read_network, retrieve_logs, identify, wake_device, stay_awake, \
      read_qr_image, ota_images, ota_updates, commissioning_window, \
-     device_time, list_fabrics) are always available. The tools that change \
-     devices or the stored state (commission, cancel_commission, decommission, \
+     device_time, list_fabrics, saved_networks) are always available. The tools that change \
+     devices or the stored state (commission, cancel_commission, forget_network, decommission, \
      register/unregister_check_ins, remember, set_tags, sync, ota_upload, ota_delete, ota_update, add_network, \
      remove_network, connect_network, reorder_network, \
      open/close_commissioning_window, set_device_time, remove_device_fabric, \
@@ -242,6 +243,16 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
              with a root CA of its own: name, index, fabric ID, our node ID on \
              it, how many devices are on it, and which is the default (what a \
              tool naming no fabric gets).",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "saved_networks",
+            "List the Wi-Fi and Thread networks earlier commissions over \
+             Bluetooth LE gave devices, the newest first: kind, name (SSID or \
+             Thread network name) and id (SSID, or extended PAN ID in hex). A \
+             device commissioned over Bluetooth LE that asks for a network of \
+             their kind gets the newest, unless the commission gives it another. \
+             Their passwords and datasets are not shown.",
             json!({ "type": "object", "properties": {} }),
         ),
         tool(
@@ -533,19 +544,24 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
             "commission",
             "Commission a Matter device onto a fabric of ours (`fabric`, else \
              the default one), reaching it over the \
-             network at peer_addr, or over Bluetooth LE with ble=true (then \
-             giving it the Wi-Fi or Thread network to join). It is listed from \
-             then on. With remember=true a record of it is also kept (see \
-             remember). MUTATING — alters the device's fabric table.",
+             network at peer_addr, or over Bluetooth LE with ble=true. Over \
+             Bluetooth LE, the device is asked which kind of network it joins \
+             (Wi-Fi or Thread) and gets that one: the one given here, else the \
+             newest saved one (see saved_networks). Give both kinds if unsure. \
+             Without a network of its kind, the commission stops before the \
+             device is given anything, saying which kind it needs. A network a \
+             device joined is saved. It is listed from then on. With \
+             remember=true a record of it is also kept (see remember). \
+             MUTATING — alters the device's fabric table.",
             json!({
                 "type": "object",
                 "properties": {
                     "peer_addr": { "type": "string", "description": "Over the network: e.g. \"192.168.1.20:5540\" or \"[fe80::1]:5540\"." },
                     "ble": { "type": "boolean", "description": "Over Bluetooth LE instead (see discover). Default false." },
                     "ble_addr": { "type": "string", "description": "Over Bluetooth: the device's address (e.g. \"E8:F6:0A:12:34:56\"); else the one matching the setup code." },
-                    "wifi_ssid": { "type": "string", "description": "Over Bluetooth: the Wi-Fi network the device joins." },
+                    "wifi_ssid": { "type": "string", "description": "Over Bluetooth: the Wi-Fi network the device joins, if it joins Wi-Fi." },
                     "wifi_password": { "type": "string", "description": "The password of that Wi-Fi network." },
-                    "thread_dataset": { "type": "string", "description": "Over Bluetooth: the Thread network the device joins, as its operational dataset in hex." },
+                    "thread_dataset": { "type": "string", "description": "Over Bluetooth: the Thread network the device joins, if it joins Thread, as its operational dataset in hex." },
                     "setup_code": { "type": "string", "description": "Setup passcode, manual pairing code or MT: QR code payload (default 20202021)." },
                     "remember": { "type": "boolean", "description": "Also keep a record of the device. Default false." },
                     "fabric": fabric_schema()
@@ -559,6 +575,18 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
              device is rolled back; after, it is decommissioned. The commission \
              then ends as cancelled. MUTATING — alters the device's fabric table.",
             json!({ "type": "object", "properties": {} }),
+        ));
+        tools.push(tool(
+            "forget_network",
+            "Forget a saved network (see saved_networks) by its id, with its \
+             password or dataset. MUTATING — alters the stored state.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The network's id: an SSID, or a Thread extended PAN ID in hex." }
+                },
+                "required": ["id"]
+            }),
         ));
         tools.push(tool(
             "decommission",
@@ -1023,6 +1051,10 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
                 .map(str::to_string),
         },
         "list_fabrics" => wire::Request::Fabrics,
+        "saved_networks" => wire::Request::SavedNetworks,
+        "forget_network" => wire::Request::ForgetNetwork {
+            id: arg_str(args, "id")?,
+        },
         "create_fabric" => wire::Request::CreateFabric {
             name: arg_str(args, "name")?,
         },
@@ -1252,18 +1284,16 @@ fn commission_via(args: &Value) -> Result<api::CommissionVia, ToolErr> {
         });
     }
 
-    let network = match (opt_str("wifi_ssid"), opt_str("thread_dataset")) {
-        (Some(ssid), _) => Some(api::NetworkCredentials::Wifi {
-            ssid,
-            password: opt_str("wifi_password").unwrap_or_default(),
-        }),
-        (None, Some(dataset)) => Some(api::NetworkCredentials::Thread { dataset }),
-        (None, None) => None,
-    };
+    let wifi = opt_str("wifi_ssid").map(|ssid| api::NetworkCredentials::Wifi {
+        ssid,
+        password: opt_str("wifi_password").unwrap_or_default(),
+    });
+    let thread =
+        opt_str("thread_dataset").map(|dataset| api::NetworkCredentials::Thread { dataset });
 
     Ok(api::CommissionVia::Ble {
         addr: opt_str("ble_addr"),
-        network,
+        networks: wifi.into_iter().chain(thread).collect(),
     })
 }
 
@@ -1379,6 +1409,10 @@ fn arg_str(args: &Value, key: &str) -> Result<String, ToolErr> {
 fn tool_result(response: &wire::Response) -> Value {
     let (text, is_error) = match response {
         wire::Response::Error { message } => (message.clone(), true),
+        wire::Response::NetworkNeeded { kind } => (
+            api::PeekError::NetworkNeeded { kind: *kind }.to_string(),
+            true,
+        ),
         wire::Response::Logs { intent, data, .. } => (log_text(*intent, data), false),
         other => (compact(labelled(other)).to_string(), false),
     };

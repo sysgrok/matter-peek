@@ -335,6 +335,14 @@ impl WireSession {
                         mesh: Box::new(mesh),
                     })
             }
+            Request::SavedNetworks => peek
+                .saved_networks()
+                .await
+                .map(|networks| Response::SavedNetworks { networks }),
+            Request::ForgetNetwork { id } => peek
+                .forget_network(id)
+                .await
+                .map(|networks| Response::SavedNetworks { networks }),
             Request::Assistant => peek.assistant().await.map(assistant),
             Request::SetAssistant { update } => peek
                 .set_assistant(update)
@@ -358,6 +366,7 @@ impl WireSession {
 
         response.unwrap_or_else(|e| match e {
             PeekError::Cancelled { decommissioned } => Response::Cancelled { decommissioned },
+            PeekError::NetworkNeeded { kind } => Response::NetworkNeeded { kind },
             e => Response::Error {
                 message: e.to_string(),
             },
