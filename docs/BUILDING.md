@@ -39,7 +39,7 @@ architecture.
   `sudo apt install pkg-config libwebkit2gtk-4.1-dev libdbus-1-dev`. On Windows
   and macOS, the web view (WebView2 and WKWebView) comes with the OS.
 - For Thread sharing codes (the core's `meshcop` feature, on by default on
-  Linux): clang, cmake 3.19 or newer and ninja
+  Linux, and on in the Android app): clang, cmake 3.19 or newer and ninja
   (`sudo apt install clang cmake ninja-build`). `mbedtls-rs-sys` builds MbedTLS
   from source with them, for its DTLS.
 
@@ -130,7 +130,8 @@ phone without Google Play services, the Commission page does not offer it.
 # The desktop app (build the web UI first, as above)
 cargo install --path matter-peek-app      # or: (cd matter-peek-app && cargo tauri build)
 
-# Android: needs the SDK with NDK 27 and a JDK, with ANDROID_HOME, NDK_HOME and JAVA_HOME set
+# Android: needs the SDK with NDK 27 and a JDK, with ANDROID_HOME, NDK_HOME and JAVA_HOME set,
+# and the host's clang and cmake (for MbedTLS, see above)
 (cd matter-peek-app && cargo tauri android build --apk --target aarch64)
 ```
 

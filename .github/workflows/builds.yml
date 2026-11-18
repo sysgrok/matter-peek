@@ -81,12 +81,13 @@ jobs:
       FILE: matter-peek-x86_64-linux-${{ needs.web.outputs.stamp }}.tar.gz
 
     steps:
-      # clang: ring's bit of C, for musl (see .cargo/config.toml).
+      # clang: ring's bit of C, for musl (see .cargo/config.toml). cmake and
+      # clang: MbedTLS, built from source by mbedtls-rs-sys (`meshcop`).
       - name: Install the build tools, WebKitGTK and D-Bus
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential ca-certificates clang curl git pkg-config libwebkit2gtk-4.1-dev libdbus-1-dev
+            build-essential ca-certificates clang cmake curl git pkg-config libwebkit2gtk-4.1-dev libdbus-1-dev
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -351,7 +352,7 @@ jobs:
           - `matter-peek-x86_64-linux-*.tar.gz`: the `matter-peek` executable, static, for any Linux on x86_64; and the app, for Linux with glibc 2.35 or newer (Ubuntu 22.04, Debian 12) and WebKitGTK 4.1 (`libwebkit2gtk-4.1-0`). `install-service.sh` runs the executable as a systemd service.
           - `matter-peek-aarch64-linux-*.tar.gz`: the `matter-peek` executable, static, for any Linux on aarch64 (for example a Raspberry Pi). `install-service.sh` runs it as a systemd service.
           - `matter-peek-x86_64-windows-*.zip`: the executable and the app, for Windows 10 and 11. There is no Bluetooth commissioning on Windows. `install-service.ps1` runs the executable at boot.
-          - `matter-peek-aarch64-android-*.apk`: the app, for 64-bit ARM Android phones (Android 7 and newer). Open it on the phone to install it.
+          - `matter-peek-aarch64-android-*.apk`: the app, for 64-bit ARM Android phones (Android 8 and newer). Open it on the phone to install it.
 
           The server asks for an access token, which it shows when it starts. There is no TLS yet: the token and everything else travel unencrypted, so use the server on a network you trust, or reach it through a VPN or an SSH tunnel.
           EOF

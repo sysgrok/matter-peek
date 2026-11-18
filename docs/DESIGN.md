@@ -778,8 +778,8 @@ not been tried on hardware yet.
 through Apple's own commissioner (MatterSupport) rather than over BLE, and
 getting the phone's preferred Thread network from Apple's ThreadNetwork
 framework, as the Android app does from Google Play services. Sharing codes
-on Windows, macOS and Android: the `meshcop` feature there, once
-`mbedtls-rs-sys` is seen to build for them in CI.
+on Windows and macOS: the `meshcop` feature there, once `mbedtls-rs-sys` is
+seen to build for them in CI.
 
 **AI agent**: The assistant (`api::agent`) works with any OpenAI-compatible
 API, in the terminal and in the web UI. Next are the Anthropic API and the
