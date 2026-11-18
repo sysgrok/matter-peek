@@ -633,7 +633,7 @@ impl Findings<'_> {
         let mut weak = Vec::new();
         let mut one_way = Vec::new();
 
-        for link in self.links {
+        for link in self.links.iter().filter(|link| self.relied_on(link)) {
             let (a, b) = (self.label(link.a), self.label(link.b));
 
             let directions = [(&a, &b, link.a_hears_b), (&b, &a, link.b_hears_a)];
@@ -696,6 +696,23 @@ impl Findings<'_> {
                 alloc::vec![link.a, link.b],
             );
         }
+    }
+
+    /// Whether a node relies on `link`: a child on the link to its parent, or
+    /// a router of ours on its only good link to a router. A spare link
+    /// between routers is not relied on, as Thread routes around it. A node
+    /// not ours may have links no table shows, so it is not judged.
+    fn relied_on(&self, link: &MeshLink) -> bool {
+        link.parent_child
+            || [link.a, link.b].into_iter().any(|ext| {
+                self.reported(ext)
+                    && !self.links.iter().any(|other| {
+                        !core::ptr::eq(other, link)
+                            && !other.parent_child
+                            && (other.a == ext || other.b == ext)
+                            && is_good(other)
+                    })
+            })
     }
 
     /// Who hears whom, if only one of `link`'s nodes hears the other.
@@ -1144,27 +1161,45 @@ pub(crate) fn quality(lqi: u8) -> u8 {
     }
 }
 
+/// Whether a node hears another weakly: by the signal strength, where it is
+/// known, as the link quality depends on the noise floor each device's
+/// firmware assumes (ESP-IDF before 5.5.6 assumed -120 dBm, which rates
+/// -93 dBm as 3 of 3).
 fn is_weak(signal: LinkSignal) -> bool {
-    signal.quality.is_some_and(|q| q <= WEAK_QUALITY) || signal.rssi.is_some_and(|r| r <= WEAK_RSSI)
+    match (signal.rssi, signal.quality) {
+        (Some(rssi), _) => rssi <= WEAK_RSSI,
+        (None, Some(q)) => q <= WEAK_QUALITY,
+        (None, None) => false,
+    }
 }
 
+/// Whether neither node of `link` hears the other weakly, or not at all.
+fn is_good(link: &MeshLink) -> bool {
+    [link.a_hears_b, link.b_hears_a]
+        .into_iter()
+        .flatten()
+        .all(|signal| !is_weak(signal) && signal.quality != Some(0))
+}
+
+/// How a node hears another, as [`is_weak`] judges it.
 fn signal_text(signal: LinkSignal) -> String {
-    match (signal.quality, signal.rssi) {
-        (Some(q), Some(rssi)) => format!("at quality {q}/3 ({rssi} dBm)"),
-        (Some(q), None) => format!("at quality {q}/3"),
-        (None, Some(rssi)) => format!("at {rssi} dBm"),
+    match (signal.rssi, signal.quality) {
+        (Some(rssi), _) => format!("at {rssi} dBm"),
+        (None, Some(q)) => format!("at quality {q}/3"),
         (None, None) => "faintly".to_string(),
     }
 }
 
-/// A border router by its model, with what tells it from others of the same
-/// model (`Google Nest Hub #1234`), else by its name.
+/// A border router by its name, from its model on (`Google Nest Hub #1234`
+/// of `Google Inc. Google Nest Hub #1234`). A name without the model is one
+/// its user gave it, and is kept whole.
 pub(crate) fn border_router_label(router: &BorderRouter) -> String {
-    match router.model.as_deref() {
-        Some(model) => match router.name.find(model) {
-            Some(at) => router.name[at..].to_string(),
-            None => model.to_string(),
-        },
+    match router
+        .model
+        .as_deref()
+        .and_then(|model| router.name.find(model))
+    {
+        Some(at) => router.name[at..].to_string(),
         None => router.name.clone(),
     }
 }
@@ -1468,12 +1503,70 @@ mod tests {
             .find(|f| f.kind == FindingKind::WeakLink)
             .unwrap();
         assert!(
-            weak.text
-                .contains("ACME Test hears Door sensor at quality 1/3 (-88 dBm)"),
+            weak.text.contains("ACME Test hears Door sensor at -88 dBm"),
             "{}",
             weak.text
         );
         assert_eq!(mesh.findings[0].severity, FindingSeverity::Warning);
+    }
+
+    #[test]
+    fn only_links_relied_on_are_weak() {
+        // A border router of no fabric of ours, which ACME Test hears faintly,
+        // as it hears the hub well, or without the hub.
+        let input = |with_hub: bool| {
+            let mut input = healthy();
+            let router = input.devices[0].network.thread.as_mut().unwrap();
+            router.neighbors.push(neighbor(FAR, 3, -93, false));
+            router.routes.push(route(FAR, 20, 3, 1));
+            if !with_hub {
+                router.neighbors.remove(0);
+                router.routes.remove(0);
+            }
+            input.border_routers.push(BorderRouter {
+                name: "TBR1".into(),
+                vendor: Some("sysgrok".into()),
+                model: Some("TbrNode".into()),
+                extended_pan_id: Some(XPAN),
+                ext_address: Some(FAR),
+                ..Default::default()
+            });
+            input
+        };
+
+        let mesh = build(input(true));
+        assert!(
+            !kinds(&mesh).contains(&FindingKind::WeakLink),
+            "{:?}",
+            mesh.findings
+        );
+
+        // Without the hub, ACME Test relies on it.
+        let mesh = build(input(false));
+        let weak = mesh
+            .findings
+            .iter()
+            .find(|f| f.kind == FindingKind::WeakLink)
+            .unwrap();
+        assert!(
+            weak.text.contains("TBR1 hears ACME Test at quality 1/3")
+                && weak.text.contains("ACME Test hears TBR1 at -93 dBm"),
+            "{}",
+            weak.text
+        );
+    }
+
+    #[test]
+    fn border_routers_by_their_names() {
+        assert_eq!(border_router_label(&hub()), "Google Nest Hub #1234");
+
+        // Renamed by its user
+        let renamed = BorderRouter {
+            name: "TBR1".into(),
+            model: Some("TbrNode".into()),
+            ..Default::default()
+        };
+        assert_eq!(border_router_label(&renamed), "TBR1");
     }
 
     #[test]
