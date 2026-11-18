@@ -786,6 +786,7 @@ pre.log-text { max-height: 70vh; margin: 0; padding: .75rem 0; overflow: auto; b
 .tnet-form > * + * { margin-top: .75rem; }
 .tnet-code { max-width: 14rem; font-size: 1.2rem; letter-spacing: .08em; }
 .tnet-routers { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.tnet-routers .share-hint { margin-bottom: 0; }
 .tnet-select, .tnet-select select { max-width: 100%; }
 .tnet-check { display: block; font-size: .9rem; }
 
