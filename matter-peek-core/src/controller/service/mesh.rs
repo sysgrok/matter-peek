@@ -125,6 +125,11 @@ impl<C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'_, C, S, O> {
         let mut seen = self.border_routers.borrow_mut();
 
         for router in fresh {
+            // The same Thread node under its old name, if it was renamed
+            if let Some(ext) = router.ext_address {
+                seen.retain(|name, (old, _)| *name == router.name || old.ext_address != Some(ext));
+            }
+
             seen.insert(router.name.clone(), (router, now));
         }
         seen.retain(|_, (_, at)| now.duration_since(*at) < BORDER_ROUTERS_KEPT);
