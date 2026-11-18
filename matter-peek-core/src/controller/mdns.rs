@@ -16,7 +16,7 @@
 use core::future::Future;
 
 use alloc::string::String;
-#[cfg(any(feature = "mdns-avahi", test))]
+#[cfg(any(feature = "mdns-avahi", feature = "meshcop", test))]
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
@@ -28,6 +28,8 @@ use rs_matter::utils::sync::MaybeSend;
 use rs_matter::Matter;
 
 use crate::api::BorderRouter;
+#[cfg(feature = "meshcop")]
+use crate::api::SharingBorderRouter;
 #[cfg(any(feature = "mdns-avahi", feature = "mdns-resolve"))]
 use crate::dbus::{has_owner, system_bus};
 
@@ -368,6 +370,67 @@ pub(crate) async fn thread_networks(wanted: &[u64]) -> Vec<(u64, String)> {
         .collect()
 }
 
+/// The Thread border routers that share their network with a one-time code
+/// now (`_meshcop-e._udp`): from Avahi when it runs, else by asking on the
+/// network ourselves.
+#[cfg(feature = "meshcop")]
+pub(crate) async fn sharing_border_routers() -> Vec<SharingBorderRouter> {
+    let mut found: Vec<(String, std::net::SocketAddr)> = Vec::new();
+
+    #[cfg(feature = "mdns-avahi")]
+    let asked_avahi = if avahi_running().await {
+        match avahi_browse("_meshcop-e._udp", |_| false).await {
+            Ok(resolved) => {
+                found.extend(
+                    resolved
+                        .iter()
+                        .filter_map(|r| Some((r.name.clone(), socket_addr(r)?))),
+                );
+                true
+            }
+            Err(e) => {
+                log::debug!("mdns: no sharing border routers from Avahi: {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    #[cfg(not(feature = "mdns-avahi"))]
+    let asked_avahi = false;
+
+    if !asked_avahi {
+        for instance in crate::dnssd::browse("_meshcop-e._udp.local", SHARING_BROWSE_WINDOW).await {
+            found.extend(
+                instance
+                    .addrs
+                    .into_iter()
+                    .map(|addr| (instance.name.clone(), addr)),
+            );
+        }
+    }
+
+    // One address each: a routable IPv6 one, else IPv4, else link-local.
+    let rank = |addr: &std::net::SocketAddr| match addr {
+        std::net::SocketAddr::V6(v6) if !v6.ip().is_unicast_link_local() => 0,
+        std::net::SocketAddr::V4(_) => 1,
+        std::net::SocketAddr::V6(_) => 2,
+    };
+    found.sort_by_key(|(_, addr)| rank(addr));
+
+    let mut routers: Vec<SharingBorderRouter> = Vec::new();
+    for (name, addr) in found {
+        if !routers.iter().any(|router| router.name == name) {
+            routers.push(SharingBorderRouter {
+                name,
+                addr: addr.to_string(),
+            });
+        }
+    }
+
+    routers
+}
+
 /// A Matter node the local network advertises (`_matter._tcp`), of any
 /// fabric.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -400,6 +463,11 @@ pub(crate) async fn matter_hosts() -> Vec<MatterHost> {
     Vec::new()
 }
 
+/// How long the browse for sharing border routers listens, without a daemon.
+#[cfg(feature = "meshcop")]
+const SHARING_BROWSE_WINDOW: rs_matter::utils::timers::Duration =
+    rs_matter::utils::timers::Duration::from_secs(2);
+
 /// How long a browse looks at most.
 #[cfg(feature = "mdns-avahi")]
 const BROWSE_WINDOW: rs_matter::utils::timers::Duration =
@@ -411,12 +479,20 @@ const BROWSE_WINDOW: rs_matter::utils::timers::Duration =
 const BROWSE_MIN: rs_matter::utils::timers::Duration =
     rs_matter::utils::timers::Duration::from_millis(1500);
 
-/// A service instance, resolved.
+/// A service instance, resolved. Only sharing codes read its interface and
+/// port.
 #[cfg(any(feature = "mdns-avahi", test))]
+#[cfg_attr(
+    not(all(feature = "mdns-avahi", feature = "meshcop")),
+    allow(dead_code)
+)]
 struct Resolved {
     name: String,
     host: String,
     address: String,
+    /// The index of the interface it was found on.
+    interface: i32,
+    port: u16,
     txt: Vec<Vec<u8>>,
 }
 
@@ -486,6 +562,8 @@ async fn avahi_browse(
                 name: resolved.2,
                 host: resolved.5,
                 address: resolved.7,
+                interface: resolved.0,
+                port: resolved.8,
                 txt: resolved.9,
             }),
             Either::First(Err(_)) => continue,
@@ -530,6 +608,24 @@ fn border_router(resolved: &Resolved) -> BorderRouter {
         omr_prefix: value(b"omr").and_then(omr_prefix),
         address: Some(resolved.address.clone()).filter(|a| !a.is_empty()),
     }
+}
+
+/// Where `resolved` listens; a link-local address with the interface it was
+/// found on.
+#[cfg(all(feature = "mdns-avahi", feature = "meshcop"))]
+fn socket_addr(resolved: &Resolved) -> Option<std::net::SocketAddr> {
+    let ip: std::net::IpAddr = resolved.address.parse().ok()?;
+
+    Some(match ip {
+        std::net::IpAddr::V6(v6) if v6.is_unicast_link_local() => std::net::SocketAddrV6::new(
+            v6,
+            resolved.port,
+            0,
+            resolved.interface.try_into().unwrap_or(0),
+        )
+        .into(),
+        ip => (ip, resolved.port).into(),
+    })
 }
 
 /// An OMR prefix as MeshCoP gives it (its length in bits, then its bytes) in
@@ -678,6 +774,8 @@ mod tests {
             name: "Google Inc. Google Nest Hub #1234".into(),
             host: "fuchsia-1a2b-3c4d-5e6f.local".into(),
             address: "192.168.0.170".into(),
+            interface: 2,
+            port: 49152,
             txt: vec![
                 b"mn=Google Nest Hub".to_vec(),
                 b"vn=Google Inc.".to_vec(),
@@ -726,6 +824,8 @@ mod tests {
             name: name.into(),
             host: "430500CDAE446BE3.local".into(),
             address: "fd12:3456:789a:1:62cb:eb4c:4e4a:8c73".into(),
+            interface: 2,
+            port: 5540,
             txt,
         };
 

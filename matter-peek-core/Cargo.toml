@@ -22,7 +22,7 @@ required-features = ["uniffi-cli"]
 # backends it chooses from when it starts (Avahi, systemd-resolved, its own).
 # Without default features, `core` is `no_std`: only the API types, unless
 # `controller` is on.
-default = ["mdns-avahi", "mdns-resolve", "mdns-builtin"]
+default = ["mdns-avahi", "mdns-resolve", "mdns-builtin", "meshcop"]
 
 # The controller: the Matter stack and the service behind `api::MatterPeek`.
 controller = [
@@ -31,6 +31,7 @@ controller = [
     "dep:async-channel",
     "dep:futures-util",
     "dep:embassy-sync",
+    "dep:qrcodegen-no-heap",
 ]
 
 # The controller's tasks are `Send` (and rs-matter's, `rs-matter/send-sync`),
@@ -67,6 +68,11 @@ mdns-resolve = ["std", "rs-matter/zbus"]                       # Linux + systemd
 mdns-astro = ["std", "rs-matter/astro-dnssd"]                  # macOS / iOS (Bonjour)
 mdns-builtin = ["std", "dep:socket2", "dep:nix", "dep:if-addrs"] # fallback / Windows / same-host tests
 
+# Getting a Thread network from a border router that shares it with a one-time
+# code (Thread 1.4), as a MeshCoP commissioner candidate over DTLS. MbedTLS is
+# built from source for it, which takes clang, cmake and ninja.
+meshcop = ["std", "dep:mbedtls-rs-sys"]
+
 # BLE commissioning (Commissioner over BTP/GATT Central), over the host's
 # Bluetooth stack: a build with `ble` needs one of the two below.
 ble = ["std"]
@@ -101,6 +107,9 @@ futures-util = { version = "0.3", optional = true, default-features = false, fea
 # Only for `CriticalSectionRawMutex`, the raw mutex of what the API handles share
 # with the service across threads, whether `send-sync` is on or not.
 embassy-sync = { version = "0.8", optional = true, default-features = false }
+# QR codes of any size (a Thread dataset's); rs-matter's own stop at what a
+# setup payload needs. rs-matter uses the same crate.
+qrcodegen-no-heap = { version = "1.8", optional = true }
 
 # --- This host (`std`). ---
 # Only for its `std` time driver; the code uses `rs_matter::utils::timers`.
@@ -119,9 +128,30 @@ image = { version = "0.25", optional = true, default-features = false, features 
 socket2 = { workspace = true, optional = true }
 nix = { workspace = true, optional = true }
 
+# --- The MeshCoP commissioner candidate (`meshcop`). ---
+# MbedTLS with DTLS 1.2 and the EC-JPAKE cipher suite only.
+mbedtls-rs-sys = { version = "0.3.1", optional = true, default-features = false, features = [
+    "nohook",
+    "tls-engine", "tls-client", "tls-proto-tls12", "tls-proto-dtls",
+    "kex-ecjpake", "alg-ecjpake", "alg-ecp", "curve-secp256r1",
+    "alg-aes", "alg-ccm", "alg-sha256",
+] }
+
 # --- Mobile bindings (`uniffi`). ---
 uniffi = { version = "0.32", optional = true, default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # mDNS builtin backend on Windows: the interface enum, which `nix` has not.
 if-addrs = { version = "0.15", optional = true }
+
+[dev-dependencies]
+# The DTLS tests' own server. The whole list: without `meshcop`, nothing else
+# asks for the rest.
+mbedtls-rs-sys = { version = "0.3.1", default-features = false, features = [
+    "nohook",
+    "tls-engine", "tls-client", "tls-server", "tls-proto-tls12", "tls-proto-dtls",
+    "kex-ecjpake", "alg-ecjpake", "alg-ecp", "curve-secp256r1",
+    "alg-aes", "alg-ccm", "alg-sha256",
+] }
+# Reads the dataset QR codes back in the tests.
+rqrr = "0.11"

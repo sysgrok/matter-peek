@@ -284,6 +284,22 @@ pub enum Request {
     /// See `MatterPeek::forget_network`. Answered with
     /// [`Response::SavedNetworks`].
     ForgetNetwork { id: String },
+    /// See `MatterPeek::sharing_border_routers`. Answered with
+    /// [`Response::SharingBorderRouters`].
+    SharingBorderRouters,
+    /// See `MatterPeek::get_thread_network`. Answered with
+    /// [`Response::ThreadNetwork`].
+    GetThreadNetwork { source: ThreadSource },
+    /// See `MatterPeek::thread_dataset`. Answered with
+    /// [`Response::ThreadDataset`].
+    ThreadDataset { id: String },
+    /// See `MatterPeek::give_thread_network`. Answered with
+    /// [`Response::Ok`].
+    GiveThreadNetwork {
+        node_id: u64,
+        id: String,
+        to: ThreadTarget,
+    },
     /// See `MatterPeek::assistant`. Answered with [`Response::Assistant`].
     Assistant,
     /// See `MatterPeek::set_assistant`. Answered with [`Response::Assistant`].
@@ -419,6 +435,14 @@ pub enum Response {
     SavedNetworks {
         networks: Vec<SavedNetwork>,
     },
+    SharingBorderRouters {
+        routers: Vec<SharingBorderRouter>,
+    },
+    ThreadNetwork {
+        network: SavedNetwork,
+    },
+    /// It holds the network key.
+    ThreadDataset(ThreadDataset),
     /// `already` is `true` if this connection followed the device already.
     Subscribed {
         node_id: u64,

@@ -35,10 +35,12 @@ use super::{convert, failed, Ctx, FIRST_DEVICE_NODE_ID};
 const BLE_SCAN_SECS: u16 = 5;
 
 /// How many networks are saved, the newest first.
-#[cfg(feature = "ble")]
 const MAX_SAVED_NETWORKS: usize = 8;
 
-/// The Thread operational dataset TLV with the network name.
+/// The Thread operational dataset TLVs with the channel, the PAN ID and the
+/// network name.
+const THREAD_CHANNEL: u8 = 0;
+const THREAD_PAN_ID: u8 = 1;
 const THREAD_NETWORK_NAME: u8 = 3;
 
 /// How a commission reaches the device.
@@ -451,10 +453,10 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
         Ok(networks.iter().map(saved_network).collect())
     }
 
-    /// Save `network`, which a device just joined, as the newest. It takes the
-    /// place of a saved network with the same SSID or extended PAN ID.
-    #[cfg(feature = "ble")]
-    fn save_network(&self, network: &NetworkCredentials) {
+    /// Save `network`, which a device just joined or which we were given, as
+    /// the newest. It takes the place of a saved network with the same SSID
+    /// or extended PAN ID.
+    pub(super) fn save_network(&self, network: &NetworkCredentials) {
         let mut networks = self.store.load_networks().unwrap_or_default();
 
         let saved = saved_network(network);
@@ -564,12 +566,14 @@ fn check_network(network: &NetworkCredentials) -> Result<(), PeekError> {
 }
 
 /// `network` as the API shows it: its kind, name and what it is forgotten by.
-fn saved_network(network: &NetworkCredentials) -> SavedNetwork {
+pub(super) fn saved_network(network: &NetworkCredentials) -> SavedNetwork {
     match network {
         NetworkCredentials::Wifi { ssid, .. } => SavedNetwork {
             kind: NetworkKind::WiFi,
             name: ssid.clone(),
             id: ssid.clone(),
+            channel: None,
+            pan_id: None,
         },
         NetworkCredentials::Thread { dataset } => {
             let dataset = crate::network::decode_hex(dataset).unwrap_or_default();
@@ -583,11 +587,24 @@ fn saved_network(network: &NetworkCredentials) -> SavedNetwork {
                         .then(|| String::from_utf8_lossy(value).into_owned())
                 })
                 .unwrap_or_else(|| id.clone());
+            let value = |wanted| {
+                ThreadTLV::new(&dataset)
+                    .find_map(|(tlv_type, value)| (tlv_type == wanted).then_some(value))
+            };
+            // The channel TLV: its page, then the channel.
+            let channel = value(THREAD_CHANNEL)
+                .and_then(|v| v.get(1..3))
+                .map(|v| u16::from_be_bytes([v[0], v[1]]));
+            let pan_id = value(THREAD_PAN_ID)
+                .and_then(|v| v.try_into().ok())
+                .map(u16::from_be_bytes);
 
             SavedNetwork {
                 kind: NetworkKind::Thread,
                 name,
                 id,
+                channel,
+                pan_id,
             }
         }
     }

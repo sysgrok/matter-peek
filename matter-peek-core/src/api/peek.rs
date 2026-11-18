@@ -219,6 +219,46 @@ impl MatterPeek {
         self.call(|reply| Op::ForgetNetwork { id, reply }).await
     }
 
+    /// The Thread border routers that share their network with a one-time
+    /// code now (Thread 1.4). Listens for about two seconds.
+    pub async fn sharing_border_routers(&self) -> Result<Vec<SharingBorderRouter>, PeekError> {
+        self.call(Op::SharingBorderRouters).await
+    }
+
+    /// Get a Thread network, with its keys, from `source`, and save it as the
+    /// newest saved network: the next Thread device commissioned over
+    /// Bluetooth LE gets it, and [`Self::give_thread_network`] gives it on.
+    pub async fn get_thread_network(
+        &self,
+        source: ThreadSource,
+    ) -> Result<SavedNetwork, PeekError> {
+        self.call(|reply| Op::GetThreadNetwork { source, reply })
+            .await
+    }
+
+    /// The operational dataset of the saved Thread network `id`, to show. It
+    /// holds the network key: whoever has it can join the network.
+    pub async fn thread_dataset(&self, id: String) -> Result<ThreadDataset, PeekError> {
+        self.call(|reply| Op::ThreadDataset { id, reply }).await
+    }
+
+    /// Give the saved Thread network `id` to the listed Matter device
+    /// `node_id`, as `to` says.
+    pub async fn give_thread_network(
+        &self,
+        node_id: u64,
+        id: String,
+        to: ThreadTarget,
+    ) -> Result<(), PeekError> {
+        self.call(|reply| Op::GiveThreadNetwork {
+            node_id,
+            id,
+            to,
+            reply,
+        })
+        .await
+    }
+
     /// Our fabrics.
     pub async fn fabrics(&self) -> Result<Vec<FabricInfo>, PeekError> {
         self.call(Op::Fabrics).await
@@ -1028,6 +1068,21 @@ pub(crate) enum Op {
     ForgetNetwork {
         id: String,
         reply: Reply<Vec<SavedNetwork>>,
+    },
+    SharingBorderRouters(Reply<Vec<SharingBorderRouter>>),
+    GetThreadNetwork {
+        source: ThreadSource,
+        reply: Reply<SavedNetwork>,
+    },
+    ThreadDataset {
+        id: String,
+        reply: Reply<ThreadDataset>,
+    },
+    GiveThreadNetwork {
+        node_id: u64,
+        id: String,
+        to: ThreadTarget,
+        reply: Reply<()>,
     },
     Fabrics(Reply<Vec<FabricInfo>>),
     CreateFabric {

@@ -10,6 +10,7 @@ fn main() {
             "commission",
             "handed_over",
             "share",
+            "thread_network",
         ])
         .default_permission(DefaultPermissionRule::AllowAllCommands);
     // The window's colours, light or dark, as the page's:

@@ -42,6 +42,7 @@ mod play;
 mod share;
 mod theme;
 mod thread;
+mod thread_networks;
 mod transport;
 mod ui;
 mod updates;
@@ -189,6 +190,7 @@ enum Msg {
     Model(datamodel::ModelMsg),
     /// In a device's share popup.
     Share(share::ShareMsg),
+    ThreadNetworks(thread_networks::ThreadNetworksMsg),
     /// In a device's clock popup.
     Clock(clock::ClockMsg),
     /// In a device's fabrics popup.
@@ -411,6 +413,8 @@ struct App {
     can_ble: Option<(bool, Option<String>)>,
     /// Whether Google Play services commissions here (in the Android app).
     can_play: bool,
+    /// Whether the controller takes Thread sharing codes, once it said.
+    can_share_codes: bool,
     /// The device another Matter app shared with us, while it is commissioned.
     shared: Option<play::Shared>,
     /// Google Play services' screens are open.
@@ -561,6 +565,8 @@ struct App {
     model_view: Option<datamodel::ModelView>,
     /// The share popup, while open.
     share: Option<share::ShareView>,
+    /// The Thread networks popup, while open.
+    thread_networks: Option<thread_networks::ThreadNetworksView>,
     /// The clock popup, while open.
     clock: Option<clock::ClockView>,
     /// The device whose fabrics popup is open.
@@ -640,6 +646,7 @@ impl Component for App {
             via: Via::Network,
             can_ble: None,
             can_play: false,
+            can_share_codes: false,
             shared: None,
             play_open: false,
             handing_over: false,
@@ -709,6 +716,7 @@ impl Component for App {
             health_view: None,
             model_view: None,
             share: None,
+            thread_networks: None,
             clock: None,
             fabrics_of: None,
             fabrics: Vec::new(),
@@ -791,6 +799,7 @@ impl Component for App {
             Msg::Health(msg) => self.update_health(ctx, msg),
             Msg::Model(msg) => self.update_model(ctx, msg),
             Msg::Share(msg) => self.update_share(ctx, msg),
+            Msg::ThreadNetworks(msg) => self.update_thread_networks(ctx, msg),
             Msg::Clock(msg) => self.update_clock(ctx, msg),
             Msg::Fabrics(msg) => self.update_fabrics(msg),
             Msg::OurFabrics(msg) => self.update_fabrics_list(ctx, msg),
@@ -1958,6 +1967,7 @@ impl Component for App {
                         self.advertised = Some(devices);
                     }
                     wire::Response::Capabilities { capabilities } => {
+                        self.can_share_codes = capabilities.sharing_codes;
                         let usable = capabilities.ble && capabilities.ble_unavailable.is_none();
                         self.can_ble = Some((capabilities.ble, capabilities.ble_unavailable));
                         if self.via == Via::Bluetooth && !usable && !self.running {
@@ -1989,6 +1999,10 @@ impl Component for App {
                     | wire::Response::CommissioningWindow { .. }
                     | wire::Response::DeviceTime { .. }
                     | wire::Response::TimeSetup { .. } => {}
+                    // The Thread networks popup's own.
+                    wire::Response::SharingBorderRouters { .. }
+                    | wire::Response::ThreadNetwork { .. }
+                    | wire::Response::ThreadDataset(_) => {}
                     // The fabric module's own.
                     wire::Response::Fabrics { .. } => {}
                     // The Assistant page's requests answer to it.
@@ -2143,6 +2157,7 @@ impl Component for App {
                 { self.view_manage_modal(link) }
                 { self.view_backup_popup(link) }
                 { self.view_share_modal(link) }
+                { self.view_thread_networks_modal(link) }
                 { self.view_clock_modal(link) }
                 { self.view_settings_modal(link) }
                 { self.view_network_modal(link) }
@@ -3464,7 +3479,7 @@ fn valid_hex(hex: &str) -> bool {
     !digits.is_empty() && digits.len().is_multiple_of(2) && digits.iter().all(u8::is_ascii_hexdigit)
 }
 
-fn textarea_value(e: InputEvent) -> String {
+pub(crate) fn textarea_value(e: InputEvent) -> String {
     use wasm_bindgen::JsCast;
 
     e.target()
@@ -3510,7 +3525,7 @@ pub(crate) fn select_value(e: Event) -> String {
         .unwrap_or_default()
 }
 
-fn checkbox_checked(e: Event) -> bool {
+pub(crate) fn checkbox_checked(e: Event) -> bool {
     use wasm_bindgen::JsCast;
     use web_sys::HtmlInputElement;
     e.target()

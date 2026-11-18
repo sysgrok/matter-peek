@@ -343,6 +343,21 @@ impl WireSession {
                 .forget_network(id)
                 .await
                 .map(|networks| Response::SavedNetworks { networks }),
+            Request::SharingBorderRouters => peek
+                .sharing_border_routers()
+                .await
+                .map(|routers| Response::SharingBorderRouters { routers }),
+            Request::GetThreadNetwork { source } => peek
+                .get_thread_network(source)
+                .await
+                .map(|network| Response::ThreadNetwork { network }),
+            Request::ThreadDataset { id } => {
+                peek.thread_dataset(id).await.map(Response::ThreadDataset)
+            }
+            Request::GiveThreadNetwork { node_id, id, to } => peek
+                .give_thread_network(node_id, id, to)
+                .await
+                .map(|()| Response::Ok),
             Request::Assistant => peek.assistant().await.map(assistant),
             Request::SetAssistant { update } => peek
                 .set_assistant(update)

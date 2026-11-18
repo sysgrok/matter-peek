@@ -77,6 +77,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-process:2.10.0")
     // Google Play services' Matter commissioning.
     implementation("com.google.android.gms:play-services-home:16.0.0")
+    // The phone's preferred Thread network.
+    implementation("com.google.android.gms:play-services-threadnetwork:16.3.0")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.4")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")

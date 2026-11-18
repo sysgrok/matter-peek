@@ -41,7 +41,7 @@ use rs_matter::Matter;
 
 use crate::api::{
     BorderRouter, CancelSignal, Capabilities, DeviceInfo, DevicesListener, FabricRef, ModelScope,
-    Op, PeekConfig, PeekError, Service,
+    Op, PeekConfig, PeekError, Service, ThreadSource,
 };
 use crate::fabrics::OurFabrics;
 use crate::logs::LogUploads;
@@ -72,6 +72,7 @@ mod mesh;
 mod netconfig;
 mod ota;
 mod store;
+mod thread_networks;
 mod time;
 mod watch;
 mod window;
@@ -321,6 +322,7 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
             | Op::Assistant(_)
             | Op::SavedNetworks(_)
             | Op::ForgetNetwork { .. }
+            | Op::ThreadDataset { .. }
             | Op::SetAssistant { .. }
             | Op::Remember { .. }
             | Op::Forget { .. }
@@ -340,7 +342,14 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
             | Op::OtaUploadEnd { .. }
             | Op::OtaUploadDiscard { .. }
             | Op::OtaDelete { .. } => return None,
-            Op::Discover { .. } | Op::AdvertisedDevices(_) | Op::Capabilities(_) => Vec::new(),
+            Op::Discover { .. }
+            | Op::AdvertisedDevices(_)
+            | Op::Capabilities(_)
+            | Op::SharingBorderRouters(_) => Vec::new(),
+            Op::GetThreadNetwork { source, .. } => match source {
+                ThreadSource::Device { node_id, .. } => self.device_keys(*node_id, Mode::Read),
+                _ => Vec::new(),
+            },
             Op::Sync { .. } => self.sync_keys(),
             // The fabric must not go meanwhile.
             Op::Commission { fabric, .. }
@@ -364,6 +373,7 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
             | Op::WriteAttribute { node_id, .. }
             | Op::InvokeCommand { node_id, .. }
             | Op::ChangeNetwork { node_id, .. }
+            | Op::GiveThreadNetwork { node_id, .. }
             | Op::RemoveDeviceFabric { node_id, .. }
             | Op::OpenWindow { node_id, .. }
             | Op::CloseWindow { node_id, .. }
@@ -532,6 +542,24 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
             }
             Op::ForgetNetwork { id, reply } => {
                 let _ = reply.send(self.forget_network(&id)).await;
+            }
+            Op::SharingBorderRouters(reply) => {
+                let _ = reply.send(self.sharing_border_routers().await).await;
+            }
+            Op::GetThreadNetwork { source, reply } => {
+                let _ = reply.send(self.get_thread_network(source).await).await;
+            }
+            Op::ThreadDataset { id, reply } => {
+                let _ = reply.send(self.show_thread_dataset(&id)).await;
+            }
+            Op::GiveThreadNetwork {
+                node_id,
+                id,
+                to,
+                reply,
+            } => {
+                let given = self.give_thread_network(node_id, &id, to).await;
+                let _ = reply.send(given).await;
             }
             Op::Assistant(reply) => {
                 let model = self
@@ -991,6 +1019,7 @@ async fn capabilities() -> Capabilities {
     Capabilities {
         ble: cfg!(feature = "ble"),
         ble_unavailable,
+        sharing_codes: cfg!(feature = "meshcop"),
     }
 }
 
@@ -1052,6 +1081,10 @@ pub(crate) async fn refuse_all(service: Service, error: PeekError) {
             Op::SavedNetworks(reply) | Op::ForgetNetwork { reply, .. } => {
                 refuse(reply, error).await
             }
+            Op::SharingBorderRouters(reply) => refuse(reply, error).await,
+            Op::GetThreadNetwork { reply, .. } => refuse(reply, error).await,
+            Op::ThreadDataset { reply, .. } => refuse(reply, error).await,
+            Op::GiveThreadNetwork { reply, .. } => refuse(reply, error).await,
             Op::ReadThreadMesh { reply, .. } => refuse(reply, error).await,
             Op::SetAssistant { reply, .. } => refuse(reply, error).await,
             Op::WatchDevices { reply, .. } | Op::WatchOta { reply, .. } => {

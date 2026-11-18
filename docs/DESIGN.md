@@ -200,6 +200,13 @@ Below the service, these modules wrap rs-matter's controller side:
 - `datamodel`, with `schema` and `values`: any cluster, by name, as JSON;
 - `logs`, `ota`, `icd`, `mesh`, `time` and `window`: diagnostic logs, the OTA
   Provider, sleepy devices, the Thread mesh, time and commissioning windows;
+- `tbr`: a Matter border router's Thread networks (Thread Border Router
+  Management and Thread Network Directory);
+- `meshcop`, `dtls` and `dnssd` (feature `meshcop`): getting a Thread network
+  from a border router that shares it with a one-time code. `dtls` is a DTLS
+  1.2 client over any datagram transport, on `mbedtls-rs-sys` only, so that it
+  can move into `mbedtls-rs`; `dnssd` is a one-shot legacy unicast mDNS browse,
+  for hosts without Avahi;
 - `node`: our own node, which devices reach;
 - `fabrics`, `ca` and `persist`: our fabrics, their CAs, and the store.
 
@@ -513,6 +520,30 @@ filter.
   to a border router without it. A one-way link can only be detected with both
   sides' tables, or from a route with quality 0 in one direction.
 
+### Thread networks
+- `get_thread_network` saves what it gets with the saved networks, so a Thread
+  device commissioned over BLE gets it, and so the network key stays in the
+  store: the other operations name a network by its extended PAN ID. Only
+  `thread_dataset` returns the key, for the web UI and the CLI to show; no MCP
+  tool does. Its QR code holds `TD:` and the dataset in uppercase hex. There is
+  no standard for it; this is what Google's Home sample app for Matter shows
+  and scans (it reads what follows the `:`).
+- With a sharing code (Thread 1.4's ephemeral PSKc), we are a MeshCoP
+  commissioner candidate: DTLS 1.2 with `TLS_ECJPAKE_WITH_AES_128_CCM_8` and
+  the code as the password, to the address the border router advertises
+  (`_meshcop-e._udp`), then CoAP: `c/cp` (petition; the border agent
+  acknowledges it, then answers on its own once the leader has), `c/ag`
+  (`MGMT_ACTIVE_GET`) and `c/ca` with State Reject (resign). OpenThread answers
+  `c/ag` itself and ignores the security policy's O bit there, so the network
+  key comes back; the petition is for older border agents that pass the read
+  on to the leader. A 9-digit code is checked against its Verhoeff check digit
+  first, as each failed handshake costs one of the border router's attempts.
+- Giving a network to a border router is `SetActiveDatasetRequest`, which the
+  spec allows only while the border router has no active dataset, under a
+  fail-safe and over CASE. One already on the same network is left alone. One
+  on another network is refused: moving it takes a pending dataset (PAN
+  Change), which applies to the whole of its current network.
+
 ### OTA
 We are the devices' OTA Provider. Images are stored as files; they are uploaded
 in chunks and checked as they arrive. `ota_update` announces us to the device,
@@ -725,7 +756,10 @@ not been tried on hardware yet.
 - the web UI, the CLI and MCP on one API, in one executable; the API in `core`
   (`MatterPeek`), exported over UniFFI;
 - the app (Tauri), on the desktop and on Android; on Android, commissioning
-  with Google Play services, and devices shared from Google Home.
+  with Google Play services, and devices shared from Google Home;
+- Thread networks: getting one from a border router's sharing code (Thread
+  1.4), from a Matter border router, from the phone (Android) or as a dataset;
+  showing it; giving it to a Matter border router.
 
 **Next**
 - Migrating devices to a new Wi-Fi network, and other changes to the networks
@@ -741,7 +775,11 @@ not been tried on hardware yet.
   test device: continue? A retryable step failed: retry?).
 
 **Platforms**: the macOS and Windows desktops; an iOS app, commissioning
-through Apple's own commissioner (MatterSupport) rather than over BLE.
+through Apple's own commissioner (MatterSupport) rather than over BLE, and
+getting the phone's preferred Thread network from Apple's ThreadNetwork
+framework, as the Android app does from Google Play services. Sharing codes
+on Windows, macOS and Android: the `meshcop` feature there, once
+`mbedtls-rs-sys` is seen to build for them in CI.
 
 **AI agent**: The assistant (`api::agent`) works with any OpenAI-compatible
 API, in the terminal and in the web UI. Next are the Anthropic API and the
@@ -752,10 +790,11 @@ which needs a relay to a controller that is always on.
 
 **Thread**: Moving our Thread devices onto one network. This is the Thread
 counterpart of the Wi-Fi migration: add and connect under a fail-safe, find the
-device again, and commit. After that, if the mesh built from Matter data proves
-too thin, diagnostics through the Border Agent (a MeshCoP commissioner: DTLS
-EC-JPAKE with the PSKc or ePSKc, and `DIAG_GET` traversal), which sees every
-node.
+device again, and commit. Moving a Matter border router that has a network
+onto another one, with a pending dataset (PAN Change). After that, if the mesh
+built from Matter data proves too thin, diagnostics through the Border Agent
+(the MeshCoP commissioner of `meshcop`, with the PSKc or ePSKc, and `DIAG_GET`
+traversal), which sees every node.
 
 **Later**: consent-gated upload of logs and crash dumps; per-vendor crash
 parsers.

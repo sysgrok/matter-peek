@@ -324,6 +324,53 @@ The findings are described in plain words. matter-peek looks for:
 matter-peek reads the devices one after another, so this takes a few seconds.
 Only the links that our devices report are known.
 
+## Thread networks
+
+matter-peek can get a Thread network, with its keys, and save it with the
+saved networks: the next Thread device commissioned over Bluetooth gets it. It
+can also give a saved network to a Matter Thread border router, for example to
+have a second border router join the network of the first. In the web UI,
+**Networks** on the **Thread** page does both; in the CLI, `matter-peek thread
+get`, `show` and `give`.
+
+A network can come from:
+
+- **A border router that shares it with a one-time code** (Thread 1.4). Ask
+  the border router to share its network, for example with "Share Thread
+  network credentials" on a Google TV Streamer, and enter the code it shows
+  (usually 9 digits) within its few minutes. matter-peek finds the border
+  router (`_meshcop-e._udp`), and reads the network from it as a MeshCoP
+  commissioner, over DTLS with the code. A mistyped code costs one of the few
+  attempts the border router allows; matter-peek checks the last digit of a
+  9-digit code first. `matter-peek thread sharing` lists the border routers
+  sharing now, and `matter-peek thread get --code 123456789` gets the network.
+- **A listed Matter border router**: its own network, through Thread Border
+  Router Management, or a network of its Thread Network Directory
+  (`matter-peek thread get --device <node> [--network <xpan>]`).
+- **The phone**, in the Android app: the preferred Thread network that Google
+  Home and other apps keep in Google Play services, once you allow it.
+- **A dataset in hex**, for example from `ot-ctl dataset active -x`
+  (`matter-peek thread get --dataset <hex>`).
+
+A saved network can be shown as hex and as a QR code
+(`matter-peek thread show <xpan>`). The QR code holds `TD:` and the hex, as in
+Google's Home sample app for Matter, which can scan it. The dataset holds the network key: whoever
+has it can join the network, so the web UI asks before it shows it, and the
+MCP tools never show it.
+
+A saved network can be given to a listed Matter device
+(`matter-peek thread give <xpan> <node>`):
+
+- as the network of a Matter Thread border router that has none yet (Thread
+  Border Router Management), under a fail-safe that reverts it if the border
+  router does not get onto the network. A border router already on another
+  network refuses: it has to leave that one first (on TbrNode, from its page);
+- into the device's Thread Network Directory (`--directory`), with
+  `--preferred` as the network the user prefers.
+
+The MCP tools are `sharing_border_routers`, `get_thread_network` and
+`give_thread_network`.
+
 ## The data model
 
 matter-peek shows every endpoint, cluster, attribute and command of a device

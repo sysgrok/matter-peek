@@ -26,6 +26,8 @@ import com.google.android.gms.home.matter.commissioning.ShareDeviceRequest
 import com.google.android.gms.home.matter.commissioning.SharedDeviceData
 import com.google.android.gms.home.matter.common.DeviceDescriptor
 import com.google.android.gms.home.matter.common.Discriminator
+import com.google.android.gms.threadnetwork.ThreadNetwork
+import com.google.android.gms.threadnetwork.ThreadNetworkCredentials
 
 private const val TAG = "matter-peek"
 
@@ -67,7 +69,8 @@ class ShareArgs {
  * services puts a new device on the network (its QR code, Bluetooth, Wi-Fi or
  * Thread), then hands it over to [HandoffService] for the page to commission
  * onto our fabric. A device another Matter app shares with us, such as Google
- * Home, goes the same way, with its pairing code.
+ * Home, goes the same way, with its pairing code. And the phone's preferred
+ * Thread network, from Google Play services' Thread API.
  */
 @TauriPlugin
 class PlayPlugin(private val activity: Activity) : Plugin(activity) {
@@ -184,6 +187,39 @@ class PlayPlugin(private val activity: Activity) : Plugin(activity) {
   @ActivityCallback
   private fun shared(invoke: Invoke, result: ActivityResult) {
     invoke.resolve(JSObject().put("done", result.resultCode == Activity.RESULT_OK))
+  }
+
+  /**
+   * The phone's preferred Thread network, once the user allows it in Google
+   * Play services' screen: its operational dataset in hex, or none if the
+   * phone has no preferred network or the user said no.
+   */
+  @Command
+  fun threadNetwork(invoke: Invoke) {
+    ThreadNetwork.getClient(activity)
+      .preferredCredentials
+      .addOnSuccessListener { result ->
+        val sender = result.intentSender
+        if (sender == null) {
+          invoke.resolve(JSObject())
+        } else {
+          startIntentSenderForResult(invoke, IntentSenderRequest.Builder(sender).build(), "threadNetworkGot")
+        }
+      }
+      .addOnFailureListener { e ->
+        invoke.reject(e.message ?: "Google Play services has no Thread network for us", e)
+      }
+  }
+
+  @ActivityCallback
+  private fun threadNetworkGot(invoke: Invoke, result: ActivityResult) {
+    val data = result.data
+    if (result.resultCode != Activity.RESULT_OK || data == null) {
+      invoke.resolve(JSObject())
+      return
+    }
+    val dataset = ThreadNetworkCredentials.fromIntentSenderResultData(data).activeOperationalDataset
+    invoke.resolve(JSObject().put("dataset", dataset.joinToString("") { "%02X".format(it) }))
   }
 
   /** How the page's commission of the device handed over went: its node ID, or why not. */

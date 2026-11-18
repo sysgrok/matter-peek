@@ -42,6 +42,8 @@ const MUTATING_TOOLS: &[&str] = &[
     "commission",
     "cancel_commission",
     "forget_network",
+    "get_thread_network",
+    "give_thread_network",
     "decommission",
     "register_check_ins",
     "unregister_check_ins",
@@ -72,8 +74,9 @@ const MUTATING_TOOLS: &[&str] = &[
 pub(crate) const INSTRUCTIONS: &str = "Vendor-agnostic Matter controller. Read-only tools \
      (discover, list_devices, peek_device, check_health, read_model, read_events, read_network, retrieve_logs, identify, wake_device, stay_awake, \
      read_qr_image, ota_images, ota_updates, commissioning_window, \
-     device_time, list_fabrics, saved_networks) are always available. The tools that change \
-     devices or the stored state (commission, cancel_commission, forget_network, decommission, \
+     device_time, list_fabrics, saved_networks, sharing_border_routers) are always available. \
+     The tools that change devices or the stored state (commission, cancel_commission, \
+     forget_network, get_thread_network, give_thread_network, decommission, \
      register/unregister_check_ins, remember, set_tags, sync, ota_upload, ota_delete, ota_update, add_network, \
      remove_network, connect_network, reorder_network, \
      open/close_commissioning_window, set_device_time, remove_device_fabric, \
@@ -103,6 +106,7 @@ const DESTRUCTIVE_TOOLS: &[&str] = &[
     "add_network",
     "remove_network",
     "connect_network",
+    "give_thread_network",
 ];
 
 /// How much of an OTA image goes in one upload request.
@@ -252,7 +256,19 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
              Thread network name) and id (SSID, or extended PAN ID in hex). A \
              device commissioned over Bluetooth LE that asks for a network of \
              their kind gets the newest, unless the commission gives it another. \
-             Their passwords and datasets are not shown.",
+             Thread networks got with get_thread_network are saved too, with \
+             their channel and PAN ID. Their passwords and datasets are not \
+             shown.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "sharing_border_routers",
+            "List the Thread border routers that share their Thread network with \
+             a one-time code now (Thread 1.4): name, and addr, where they take \
+             the code. A border router does so once the user asks it to share \
+             (e.g. \"Share Thread network credentials\" on a Google TV \
+             Streamer), for a few minutes. Listens for about two seconds. See \
+             get_thread_network.",
             json!({ "type": "object", "properties": {} }),
         ),
         tool(
@@ -586,6 +602,52 @@ pub(crate) fn tool_list(caps: Caps) -> Vec<Value> {
                     "id": { "type": "string", "description": "The network's id: an SSID, or a Thread extended PAN ID in hex." }
                 },
                 "required": ["id"]
+            }),
+        ));
+        tools.push(tool(
+            "get_thread_network",
+            "Get a Thread network with its keys and save it as the newest saved \
+             network (see saved_networks): the next Thread device commissioned \
+             over Bluetooth LE gets it, and give_thread_network gives it on. \
+             From one of: sharing_code, the one-time code a Thread 1.4 border \
+             router shows when asked to share its network (with \
+             border_router_addr from sharing_border_routers, else the only one \
+             sharing); node_id, a listed Matter border router, for its own \
+             network (or extended_pan_id, a network of its Thread Network \
+             Directory); or thread_dataset, an operational dataset in hex. The \
+             answer names the network; its keys are not shown. A mistyped code \
+             costs one of the few attempts the border router allows. MUTATING — \
+             alters the stored state.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "sharing_code": { "type": "string", "description": "The one-time code a border router shows, usually 9 digits." },
+                    "border_router_addr": { "type": "string", "description": "With sharing_code: where the border router takes it (see sharing_border_routers)." },
+                    "node_id": node_id_schema(),
+                    "extended_pan_id": { "type": "string", "description": "With node_id: a network of the device's Thread Network Directory, in hex." },
+                    "thread_dataset": { "type": "string", "description": "An operational dataset, in hex." }
+                }
+            }),
+        ));
+        tools.push(tool(
+            "give_thread_network",
+            "Give a saved Thread network (see saved_networks) to a listed Matter \
+             device. to=\"border_router\": as the network of a Matter Thread \
+             border router that has none yet (Thread Border Router Management), \
+             under a fail-safe that reverts it if the border router does not \
+             get onto the network; one already on another network refuses. \
+             to=\"directory\": into the device's Thread Network Directory, with \
+             preferred=true as the network the user prefers. MUTATING — \
+             changes the device's Thread network.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node_id": node_id_schema(),
+                    "id": { "type": "string", "description": "The saved network's id: its extended PAN ID in hex." },
+                    "to": { "type": "string", "enum": ["border_router", "directory"], "description": "Where it goes (default border_router)." },
+                    "preferred": { "type": "boolean", "description": "With to=directory: make it the preferred network. Default false." }
+                },
+                "required": ["node_id", "id"]
             }),
         ));
         tools.push(tool(
@@ -1052,6 +1114,54 @@ fn build_request(name: &str, args: &Value) -> Result<wire::Request, ToolErr> {
         },
         "list_fabrics" => wire::Request::Fabrics,
         "saved_networks" => wire::Request::SavedNetworks,
+        "sharing_border_routers" => wire::Request::SharingBorderRouters,
+        "get_thread_network" => wire::Request::GetThreadNetwork {
+            source: if let Some(code) = args.get("sharing_code").and_then(Value::as_str) {
+                api::ThreadSource::SharingCode {
+                    code: code.to_string(),
+                    addr: args
+                        .get("border_router_addr")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                }
+            } else if let Some(dataset) = args.get("thread_dataset").and_then(Value::as_str) {
+                api::ThreadSource::Dataset {
+                    dataset: dataset.to_string(),
+                }
+            } else if args.get("node_id").is_some() {
+                api::ThreadSource::Device {
+                    node_id: arg_node(args)?,
+                    extended_pan_id: args
+                        .get("extended_pan_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                }
+            } else {
+                return Err((
+                    jsonrpc::INVALID_PARAMS,
+                    "give one of sharing_code, node_id or thread_dataset".to_string(),
+                ));
+            },
+        },
+        "give_thread_network" => wire::Request::GiveThreadNetwork {
+            node_id: arg_node(args)?,
+            id: arg_str(args, "id")?,
+            to: match args.get("to").and_then(Value::as_str) {
+                None | Some("border_router") => api::ThreadTarget::BorderRouter,
+                Some("directory") => api::ThreadTarget::Directory {
+                    preferred: args
+                        .get("preferred")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                },
+                Some(other) => {
+                    return Err((
+                        jsonrpc::INVALID_PARAMS,
+                        format!("'to' is border_router or directory, not '{other}'"),
+                    ))
+                }
+            },
+        },
         "forget_network" => wire::Request::ForgetNetwork {
             id: arg_str(args, "id")?,
         },

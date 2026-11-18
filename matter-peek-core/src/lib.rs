@@ -44,6 +44,10 @@ mod controller {
     pub mod dbus;
     pub mod diagnostics;
     pub mod discovery;
+    #[cfg(feature = "meshcop")]
+    pub mod dnssd;
+    #[cfg(feature = "meshcop")]
+    pub mod dtls;
     pub mod explain;
     pub mod fabrics;
     pub mod health;
@@ -54,6 +58,8 @@ mod controller {
     pub mod matter;
     pub mod mdns;
     pub mod mesh;
+    #[cfg(feature = "meshcop")]
+    pub mod meshcop;
     pub mod model;
     pub mod netconfig;
     pub mod network;
@@ -64,6 +70,7 @@ mod controller {
     pub mod service;
     pub mod setup_code;
     pub mod subscribe;
+    pub mod tbr;
     pub mod time;
     pub mod values;
     pub mod window;

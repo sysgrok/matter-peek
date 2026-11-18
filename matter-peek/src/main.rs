@@ -295,10 +295,12 @@ enum Command {
     #[command(subcommand)]
     Icd(Icd),
     /// The Thread mesh as our Thread devices see it: networks, nodes, links
-    /// and what is wrong. Reads each Thread device in turn.
+    /// and what is wrong; reads each Thread device in turn. And Thread
+    /// networks: getting them from border routers, giving them to Matter
+    /// border routers.
     Thread {
         #[command(subcommand)]
-        view: Option<ThreadView>,
+        cmd: Option<ThreadCmd>,
     },
     /// Write the store to FILE: our fabrics and their keys, the devices, the
     /// saved networks with their passwords, the assistant's model with its API
@@ -498,11 +500,64 @@ enum NetworkChange {
 
 /// What of the Thread mesh to show.
 #[derive(Subcommand)]
-enum ThreadView {
+enum ThreadCmd {
     /// Networks, nodes, links and findings.
     Mesh,
     /// Only what is wrong, and the networks.
     Findings,
+    /// The border routers that share their Thread network with a one-time
+    /// code now (Thread 1.4).
+    Sharing,
+    /// Get a Thread network with its keys, and save it as the newest saved
+    /// network: the next Thread device commissioned over Bluetooth gets it.
+    Get {
+        #[command(flatten)]
+        source: ThreadSourceArgs,
+        /// With --code: where the border router takes it (see `thread
+        /// sharing`); else the only one sharing now.
+        #[arg(long, value_name = "ADDR", requires = "code")]
+        router: Option<String>,
+        /// With --device: that network of its Thread Network Directory, by
+        /// extended PAN ID (hex).
+        #[arg(long, value_name = "XPAN", requires = "device")]
+        network: Option<String>,
+    },
+    /// Show a saved Thread network's dataset, in hex and as a QR code. It
+    /// holds the network key: whoever has it can join the network.
+    Show {
+        /// Its extended PAN ID (see `saved-networks`).
+        id: String,
+    },
+    /// Give a saved Thread network to a listed Matter device: as the network
+    /// of a border router that has none yet, or into its Thread Network
+    /// Directory.
+    Give {
+        /// Its extended PAN ID (see `saved-networks`).
+        id: String,
+        node: Node,
+        /// Into its Thread Network Directory instead.
+        #[arg(long)]
+        directory: bool,
+        /// With --directory: as the network the user prefers.
+        #[arg(long, requires = "directory")]
+        preferred: bool,
+    },
+}
+
+/// Where `thread get` gets a network from: one of them.
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+struct ThreadSourceArgs {
+    /// The one-time code a border router shows when asked to share its
+    /// network.
+    #[arg(long, value_name = "CODE")]
+    code: Option<String>,
+    /// A listed Matter border router: its own network.
+    #[arg(long, value_name = "NODE")]
+    device: Option<Node>,
+    /// An operational dataset, in hex.
+    #[arg(long, value_name = "HEX")]
+    dataset: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1386,16 +1441,100 @@ async fn run(cli: Cli) -> io::Result<bool> {
             }
         }
         Command::Assistant { action } => assistant(&conn, &out, action).await,
-        Command::Thread { view } => {
-            let response = call(&conn, &out, wire::Request::ReadThreadMesh { fabric }).await?;
-            if let Some(wire::Response::ThreadMesh { mesh }) = &response {
-                if !out.json {
-                    let findings_only = matches!(view, Some(ThreadView::Findings));
-                    println!("{}", thread_text(mesh, findings_only));
+        Command::Thread { cmd } => match cmd.unwrap_or(ThreadCmd::Mesh) {
+            cmd @ (ThreadCmd::Mesh | ThreadCmd::Findings) => {
+                let response = call(&conn, &out, wire::Request::ReadThreadMesh { fabric }).await?;
+                if let Some(wire::Response::ThreadMesh { mesh }) = &response {
+                    if !out.json {
+                        let findings_only = matches!(cmd, ThreadCmd::Findings);
+                        println!("{}", thread_text(mesh, findings_only));
+                    }
                 }
+                Ok(response.is_some())
             }
-            Ok(response.is_some())
-        }
+            ThreadCmd::Sharing => {
+                let response = call(&conn, &out, wire::Request::SharingBorderRouters).await?;
+                if let Some(wire::Response::SharingBorderRouters { routers }) = &response {
+                    if !out.json {
+                        if routers.is_empty() {
+                            println!("No border router shares its network now.");
+                        }
+                        for router in routers {
+                            println!("{:<40} {}", router.name, router.addr);
+                        }
+                    }
+                }
+                Ok(response.is_some())
+            }
+            ThreadCmd::Get {
+                source,
+                router,
+                network,
+            } => {
+                let source = match source {
+                    ThreadSourceArgs {
+                        code: Some(code), ..
+                    } => api::ThreadSource::SharingCode { code, addr: router },
+                    ThreadSourceArgs {
+                        device: Some(node), ..
+                    } => api::ThreadSource::Device {
+                        node_id: node.0,
+                        extended_pan_id: network,
+                    },
+                    ThreadSourceArgs { dataset, .. } => api::ThreadSource::Dataset {
+                        dataset: dataset.unwrap_or_default(),
+                    },
+                };
+
+                let response =
+                    call(&conn, &out, wire::Request::GetThreadNetwork { source }).await?;
+                if let Some(wire::Response::ThreadNetwork { network }) = &response {
+                    if !out.json {
+                        println!(
+                            "Saved the Thread network {}{}: its id is {}.",
+                            network.name,
+                            thread_details(network),
+                            network.id
+                        );
+                    }
+                }
+                Ok(response.is_some())
+            }
+            ThreadCmd::Show { id } => {
+                let response = call(&conn, &out, wire::Request::ThreadDataset { id }).await?;
+                if let Some(wire::Response::ThreadDataset(shown)) = &response {
+                    if !out.json {
+                        eprintln!(
+                            "Keep it private: it holds the network key, and whoever has it can \
+                             join the network."
+                        );
+                        println!("{}", shown.dataset);
+                        for line in qr_lines(&shown.qr_rows) {
+                            println!("  {line}");
+                        }
+                    }
+                }
+                Ok(response.is_some())
+            }
+            ThreadCmd::Give {
+                id,
+                node,
+                directory,
+                preferred,
+            } => {
+                let to = if directory {
+                    api::ThreadTarget::Directory { preferred }
+                } else {
+                    api::ThreadTarget::BorderRouter
+                };
+                let request = wire::Request::GiveThreadNetwork {
+                    node_id: node.0,
+                    id,
+                    to,
+                };
+                ok(&out, call(&conn, &out, request).await?, "Done.")
+            }
+        },
         Command::Serve { .. }
         | Command::Token { .. }
         | Command::Mcp { .. }
@@ -1733,14 +1872,34 @@ fn saved_networks(out: &Out, response: Option<wire::Response>) -> io::Result<boo
 
     for network in networks {
         println!(
-            "{:<7} {:<32} {}",
+            "{:<7} {:<32} {}{}",
             network.kind.label(),
             network.name,
-            network.id
+            network.id,
+            thread_details(&network)
         );
     }
 
     Ok(true)
+}
+
+/// A Thread network's channel and PAN ID, as ` (channel 15, PAN ID 0x1A2B)`.
+fn thread_details(network: &api::SavedNetwork) -> String {
+    let details: Vec<String> = [
+        network.channel.map(|channel| format!("channel {channel}")),
+        network
+            .pan_id
+            .map(|pan_id| format!("PAN ID 0x{pan_id:04X}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    if details.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", details.join(", "))
+    }
 }
 
 fn fabrics(out: &Out, response: Option<wire::Response>) -> io::Result<bool> {

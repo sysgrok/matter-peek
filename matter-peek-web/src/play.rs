@@ -5,7 +5,8 @@
 //! another Matter app, such as Google Home, shares with us comes with its
 //! pairing code, and goes the same way. The other way round, we share a device
 //! with another Matter app on the phone, through a commissioning window we
-//! opened on it.
+//! opened on it. And the phone's preferred Thread network, from Google Play
+//! services' Thread API.
 
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -46,6 +47,12 @@ struct Available {
 #[derive(Deserialize)]
 struct Ended {
     done: bool,
+}
+
+#[derive(Deserialize)]
+struct ThreadNetwork {
+    #[serde(default)]
+    dataset: Option<String>,
 }
 
 /// Whether Google Play services commissions here: in the Android app, with
@@ -148,6 +155,16 @@ pub async fn share(device: ToShare) -> Result<bool, String> {
 
     match invoke("plugin:play|share", args(&fields)).await {
         Ok(answer) => Ok(from_js::<Ended>(&answer).is_some_and(|e| e.done)),
+        Err(e) => Err(js_error(e)),
+    }
+}
+
+/// The phone's preferred Thread network, once the user allows it: its
+/// operational dataset in hex; `None` if the phone has none or the user said
+/// no.
+pub async fn thread_network() -> Result<Option<String>, String> {
+    match invoke("plugin:play|thread_network", args(&[])).await {
+        Ok(answer) => Ok(from_js::<ThreadNetwork>(&answer).and_then(|t| t.dataset)),
         Err(e) => Err(js_error(e)),
     }
 }

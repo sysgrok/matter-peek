@@ -108,9 +108,11 @@ pub enum NetworkCredentials {
     },
 }
 
-/// A network a commission over Bluetooth LE gave a device, saved so that the
-/// next device of its kind gets it without asking. Saved once the commission
-/// succeeds; the newest first. Its password or dataset stays in the store.
+/// A network saved so that the next device of its kind commissioned over
+/// Bluetooth LE gets it without asking: one a commission gave a device (saved
+/// once the commission succeeds), or a Thread network got with
+/// `MatterPeek::get_thread_network`. The newest first. Its password or dataset
+/// stays in the store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SavedNetwork {
@@ -120,6 +122,68 @@ pub struct SavedNetwork {
     /// What it is forgotten by: the SSID of a Wi-Fi network, or the extended
     /// PAN ID of a Thread network, in hex.
     pub id: String,
+    /// A Thread network's channel and PAN ID, as its dataset has them.
+    #[serde(default)]
+    pub channel: Option<u16>,
+    #[serde(default)]
+    pub pan_id: Option<u16>,
+}
+
+/// Where `MatterPeek::get_thread_network` gets a Thread network from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "from", rename_all = "snake_case")]
+pub enum ThreadSource {
+    /// A border router that shares its network with a one-time code (Thread
+    /// 1.4): the code it shows, and the border router at `addr` (see
+    /// [`SharingBorderRouter`]), else the only one sharing now.
+    SharingCode {
+        code: String,
+        #[serde(default)]
+        addr: Option<String>,
+    },
+    /// A listed Matter border router: its own network (Thread Border Router
+    /// Management), or the network `extended_pan_id` (hex) of its Thread
+    /// Network Directory. A device with a directory but no network of its
+    /// own gives the directory's preferred network.
+    Device {
+        node_id: u64,
+        #[serde(default)]
+        extended_pan_id: Option<String>,
+    },
+    /// An operational dataset in hex, e.g. the phone's preferred Thread
+    /// network, which only an app on the phone can get.
+    Dataset { dataset: String },
+}
+
+/// A saved Thread network's dataset, to show. It holds the network key:
+/// whoever has it can join the network.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ThreadDataset {
+    /// The network's id (see [`SavedNetwork::id`]).
+    pub id: String,
+    /// In hex, as `ot-ctl dataset active -x` prints it.
+    pub dataset: String,
+    /// The modules of its QR code (`TD:` and the hex), row by row, `1` dark.
+    pub qr_rows: Vec<String>,
+}
+
+/// Where `MatterPeek::give_thread_network` puts a saved Thread network on a
+/// listed Matter device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "to", rename_all = "snake_case")]
+pub enum ThreadTarget {
+    /// As the network of a border router that has none yet (Thread Border
+    /// Router Management), under a fail-safe.
+    BorderRouter,
+    /// Into its Thread Network Directory; with `preferred`, as the network
+    /// the user prefers.
+    Directory {
+        #[serde(default)]
+        preferred: bool,
+    },
 }
 
 /// The steps of a commission, reported as it goes. `Commission` is the whole
@@ -583,6 +647,10 @@ pub struct Capabilities {
     /// BlueZ does not run, there is no Bluetooth adapter, or it is off.
     #[serde(default)]
     pub ble_unavailable: Option<String>,
+    /// Whether it was built to get Thread networks from border routers that
+    /// share them with a one-time code ([`ThreadSource::SharingCode`]).
+    #[serde(default)]
+    pub sharing_codes: bool,
 }
 
 /// A device on our fabric. See also its [`display`](super::display) helpers.
@@ -1661,6 +1729,18 @@ pub struct BorderRouter {
     pub omr_prefix: Option<String>,
     /// Its address on the LAN.
     pub address: Option<String>,
+}
+
+/// A Thread border router that shares its network with a one-time code now
+/// (Thread 1.4; it advertises `_meshcop-e._udp`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SharingBorderRouter {
+    /// As it names itself.
+    pub name: String,
+    /// Where it takes the code, e.g. `"[fd12:3456::1]:49191"`
+    /// ([`ThreadSource::SharingCode`]).
+    pub addr: String,
 }
 
 /// The Thread mesh as our devices see it: their networks, the nodes and links

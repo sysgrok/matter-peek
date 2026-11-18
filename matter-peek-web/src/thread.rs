@@ -14,6 +14,7 @@ use matter_peek_core::api::{
 };
 
 use crate::icons::{icon, Icon};
+use crate::thread_networks::ThreadNetworksMsg;
 use crate::{request_loop, ui, App, Msg};
 
 /// How far from the middle of the map the routers are, and the children.
@@ -102,12 +103,20 @@ impl App {
             None => "The mesh the Thread devices on our fabric see".to_string(),
         };
         let actions = html! {
-            <button class={classes!("button", "is-tinted", page.loading.then_some("is-loading"))}
-                title="Read the Thread devices again" disabled={page.loading}
-                onclick={link.callback(|_| Msg::Thread(ThreadMsg::Read))}>
-                <span class="icon">{ icon(Icon::Refresh, 18) }</span>
-                <span>{ "Read again" }</span>
-            </button>
+            <>
+                <button class="button is-tinted"
+                    title="Thread networks: get one from a border router, show it, give it to a Matter border router"
+                    onclick={link.callback(|_| Msg::ThreadNetworks(ThreadNetworksMsg::Open))}>
+                    <span class="icon">{ icon(Icon::Key, 18) }</span>
+                    <span>{ "Networks" }</span>
+                </button>
+                <button class={classes!("button", "is-tinted", page.loading.then_some("is-loading"))}
+                    title="Read the Thread devices again" disabled={page.loading}
+                    onclick={link.callback(|_| Msg::Thread(ThreadMsg::Read))}>
+                    <span class="icon">{ icon(Icon::Refresh, 18) }</span>
+                    <span>{ "Read again" }</span>
+                </button>
+            </>
         };
 
         html! {
