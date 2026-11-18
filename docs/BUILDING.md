@@ -41,7 +41,7 @@ architecture.
 - For Thread sharing codes (the core's `meshcop` feature, on by default on
   Linux, and on in the Android app): clang, cmake 3.19 or newer and ninja
   (`sudo apt install clang cmake ninja-build`). `mbedtls-rs-sys` builds MbedTLS
-  from source with them, for its DTLS.
+  from source with them, for the DTLS sessions of `mbedtls-rs`.
 
 ## One executable
 

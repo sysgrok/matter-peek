@@ -71,7 +71,7 @@ mdns-builtin = ["std", "dep:socket2", "dep:nix", "dep:if-addrs"] # fallback / Wi
 # Getting a Thread network from a border router that shares it with a one-time
 # code (Thread 1.4), as a MeshCoP commissioner candidate over DTLS. MbedTLS is
 # built from source for it, which takes clang, cmake and ninja.
-meshcop = ["std", "dep:mbedtls-rs-sys"]
+meshcop = ["std", "dep:mbedtls-rs", "dep:critical-section"]
 
 # BLE commissioning (Commissioner over BTP/GATT Central), over the host's
 # Bluetooth stack: a build with `ble` needs one of the two below.
@@ -129,13 +129,12 @@ socket2 = { workspace = true, optional = true }
 nix = { workspace = true, optional = true }
 
 # --- The MeshCoP commissioner candidate (`meshcop`). ---
-# MbedTLS with DTLS 1.2 and the EC-JPAKE cipher suite only.
-mbedtls-rs-sys = { version = "0.3.1", optional = true, default-features = false, features = [
-    "nohook",
-    "tls-engine", "tls-client", "tls-proto-tls12", "tls-proto-dtls",
-    "kex-ecjpake", "alg-ecjpake", "alg-ecp", "curve-secp256r1",
-    "alg-aes", "alg-ccm", "alg-sha256",
+# DTLS sessions, with EC-JPAKE.
+mbedtls-rs = { version = "0.3", optional = true, default-features = false, features = [
+    "tls-proto-dtls", "kex-ecjpake", "alg-ecjpake", "alg-ccm",
 ] }
+# mbedtls-rs's critical sections.
+critical-section = { version = "1", optional = true, features = ["std"] }
 
 # --- Mobile bindings (`uniffi`). ---
 uniffi = { version = "0.32", optional = true, default-features = false }
@@ -145,13 +144,5 @@ uniffi = { version = "0.32", optional = true, default-features = false }
 if-addrs = { version = "0.15", optional = true }
 
 [dev-dependencies]
-# The DTLS tests' own server. The whole list: without `meshcop`, nothing else
-# asks for the rest.
-mbedtls-rs-sys = { version = "0.3.1", default-features = false, features = [
-    "nohook",
-    "tls-engine", "tls-client", "tls-server", "tls-proto-tls12", "tls-proto-dtls",
-    "kex-ecjpake", "alg-ecjpake", "alg-ecp", "curve-secp256r1",
-    "alg-aes", "alg-ccm", "alg-sha256",
-] }
 # Reads the dataset QR codes back in the tests.
 rqrr = "0.11"

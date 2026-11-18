@@ -5,14 +5,23 @@
 //! code as the EC-JPAKE password, then CoAP over it: petition to become the
 //! commissioner, read the active operational dataset, and resign.
 
+use core::future::Future;
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use std::io;
 use std::net::{SocketAddr, UdpSocket};
 
 use async_io::Async;
 use log::{debug, info, warn};
+use mbedtls_rs::dtls::{Clock, Datagram, DtlsConfig, Session};
+use mbedtls_rs::io::{ErrorKind, ErrorType};
+use mbedtls_rs::sys::{MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE, MBEDTLS_ERR_SSL_TIMEOUT};
+use mbedtls_rs::{
+    Authentication, ClientSessionConfig, SessionConfig, SessionError, Tls, TlsReference,
+};
 use rand::rngs::StdRng;
 use rand::Rng as _;
 
@@ -20,10 +29,19 @@ use rs_matter::utils::futures::{select, Either};
 use rs_matter::utils::timers::{Duration, Instant, Timer};
 
 use crate::api::PeekError;
-use crate::dtls::{Datagram, DtlsConfig, DtlsError, DtlsSession};
 
 /// The name we petition under.
 const COMMISSIONER_ID: &str = "matter-peek";
+
+/// The DTLS handshake waits this long for an answer before it sends its
+/// flight again, doubling the wait up to `HANDSHAKE_TIMEOUT_MAX`; in
+/// milliseconds.
+const HANDSHAKE_TIMEOUT_MIN: u32 = 2_000;
+const HANDSHAKE_TIMEOUT_MAX: u32 = 8_000;
+
+/// The largest datagram we send: IPv6's minimum MTU, without the IPv6 and UDP
+/// headers.
+const MTU: u16 = 1232;
 
 /// How long a CoAP request waits for its acknowledgement before it is sent
 /// again; doubled each time.
@@ -58,30 +76,45 @@ const COAP_URI_PATH: u8 = 11;
 /// A connected UDP socket, for DTLS.
 struct Udp(Async<UdpSocket>);
 
+impl ErrorType for Udp {
+    type Error = ErrorKind;
+}
+
 impl Datagram for Udp {
-    async fn send(&mut self, data: &[u8]) -> Result<(), DtlsError> {
-        self.0.send(data).await.map(|_| ()).map_err(|e| {
-            debug!("meshcop: send failed: {e}");
-            DtlsError::Io
-        })
+    async fn readable(&mut self) -> Result<(), ErrorKind> {
+        self.0.readable().await.map_err(io_failed)
     }
 
-    async fn recv(&mut self, buf: &mut [u8]) -> Result<usize, DtlsError> {
-        self.0.recv(buf).await.map_err(|e| {
-            debug!("meshcop: receive failed: {e}");
-            DtlsError::Io
-        })
+    async fn recv(&mut self, buf: &mut [u8]) -> Result<usize, ErrorKind> {
+        self.0.recv(buf).await.map_err(io_failed)
+    }
+
+    async fn send(&mut self, data: &[u8]) -> Result<(), ErrorKind> {
+        self.0.send(data).await.map(|_| ()).map_err(io_failed)
+    }
+}
+
+/// The DTLS session's clock: rs-matter's.
+struct MatterClock;
+
+impl Clock for MatterClock {
+    fn now(&self) -> u64 {
+        Instant::now().as_millis()
+    }
+
+    fn wait_until(&mut self, at: u64) -> impl Future<Output = ()> {
+        Timer::at(Instant::from_millis(at))
     }
 }
 
 /// CoAP requests over a DTLS session.
-struct Coap<'a, D> {
-    dtls: DtlsSession<'a, D>,
+struct Coap<'a> {
+    dtls: Session<'a, Udp, MatterClock>,
     message_id: u16,
     token: u32,
 }
 
-impl<D: Datagram> Coap<'_, D> {
+impl Coap<'_> {
     /// POST `payload` to `path` (e.g. `c/cp`) and answer the payload of a 2.04
     /// (Changed) response. The response may come with the acknowledgement or
     /// after it, on its own.
@@ -97,7 +130,7 @@ impl<D: Datagram> Coap<'_, D> {
         let mut buf = [0; 1280];
 
         loop {
-            self.dtls.send(&request).await.map_err(dtls_failed)?;
+            self.dtls.write(&request).await.map_err(dtls_failed)?;
             sends += 1;
             let resend = Instant::now() + ACK_TIMEOUT * (1 << (sends - 1));
 
@@ -107,7 +140,10 @@ impl<D: Datagram> Coap<'_, D> {
                 } else {
                     resend.min(deadline)
                 };
-                let len = match select(self.dtls.recv(&mut buf), Timer::at(wait)).await {
+                let len = match select(self.dtls.read(&mut buf), Timer::at(wait)).await {
+                    Either::First(Ok(0)) => {
+                        return Err(PeekError::failed("the border router ended the session"))
+                    }
                     Either::First(len) => len.map_err(dtls_failed)?,
                     Either::Second(()) if !acked && sends < MAX_SENDS && wait < deadline => break,
                     Either::Second(()) => {
@@ -132,7 +168,7 @@ impl<D: Datagram> Coap<'_, D> {
                     COAP_CON | COAP_NON if message.code != 0 && message.token == token => {
                         if message.kind == COAP_CON {
                             self.dtls
-                                .send(&coap_ack(message.message_id))
+                                .write(&coap_ack(message.message_id))
                                 .await
                                 .map_err(dtls_failed)?;
                         }
@@ -209,7 +245,37 @@ impl<'a> CoapMessage<'a> {
 /// Fetch the active operational dataset of the Thread network of the border
 /// agent at `agent`, with the one-time `code` it shows; the dataset's TLVs,
 /// with the network key.
+///
+/// On a thread of its own: MbedTLS's sessions are not `Send`, and the
+/// service's futures may have to be.
 pub async fn fetch_dataset(agent: SocketAddr, code: &str) -> Result<Vec<u8>, PeekError> {
+    let code = String::from(code);
+    let (sender, receiver) = async_channel::bounded(1);
+
+    std::thread::Builder::new()
+        .name("meshcop".into())
+        .spawn(move || {
+            let mut rng = rand::make_rng::<StdRng>();
+
+            // SAFETY: `tls` is dropped at the end of its arm, before `rng`, and
+            // is not leaked.
+            let dataset = match unsafe { Tls::new_local_borrows(&mut rng) } {
+                Ok(tls) => async_io::block_on(fetch(tls.reference(), agent, &code)),
+                Err(_) => Err(PeekError::failed("another sharing code is in use")),
+            };
+
+            let _ = sender.send_blocking(dataset);
+        })
+        .map_err(|e| PeekError::failed(format!("cannot start the fetch: {e}")))?;
+
+    receiver
+        .recv()
+        .await
+        .map_err(|_| PeekError::failed("the fetch stopped"))?
+}
+
+/// [`fetch_dataset`], with the active `Tls` instance.
+async fn fetch(tls: TlsReference<'_>, agent: SocketAddr, code: &str) -> Result<Vec<u8>, PeekError> {
     let local: SocketAddr = match agent {
         SocketAddr::V4(_) => (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
         SocketAddr::V6(_) => (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
@@ -225,20 +291,29 @@ pub async fn fetch_dataset(agent: SocketAddr, code: &str) -> Result<Vec<u8>, Pee
     let message_id = rng.next_u32() as u16;
     let token = rng.next_u32();
 
-    let config = DtlsConfig {
-        handshake_min: Duration::from_secs(2),
-        handshake_max: Duration::from_secs(8),
-        ..DtlsConfig::ecjpake(code.as_bytes())
+    let config = SessionConfig::Client(ClientSessionConfig {
+        authentication: Some(Authentication::EcJpake(code.as_bytes())),
+        ..ClientSessionConfig::new()
+    });
+    let dtls_config = DtlsConfig {
+        handshake_timeout_min: HANDSHAKE_TIMEOUT_MIN,
+        handshake_timeout_max: HANDSHAKE_TIMEOUT_MAX,
+        mtu: Some(MTU),
+        ..DtlsConfig::new()
     };
-    let mut dtls = DtlsSession::new(Udp(socket), &config, &mut rng).map_err(dtls_failed)?;
+    let mut dtls =
+        Session::new(tls, Udp(socket), MatterClock, &config, &dtls_config).map_err(dtls_failed)?;
 
     info!("meshcop: connecting to the border agent at {agent}");
     dtls.connect().await.map_err(|e| match e {
-        DtlsError::Timeout => PeekError::failed(
+        // With EC-JPAKE, a peer given another password stays silent.
+        SessionError::MbedTls(e) if e.code() == MBEDTLS_ERR_SSL_TIMEOUT => PeekError::failed(
             "the border router did not answer: the code may be mistyped, expired or used already",
         ),
-        DtlsError::Refused => PeekError::failed("the border router refused the code"),
-        DtlsError::Io => {
+        SessionError::MbedTls(e) if e.code() == MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE => {
+            PeekError::failed("the border router refused the code")
+        }
+        SessionError::Io(ErrorKind::ConnectionRefused) => {
             PeekError::failed("the border router is not listening: its code may have expired")
         }
         e => dtls_failed(e),
@@ -318,8 +393,17 @@ pub fn sharing_code(code: &str) -> Result<String, PeekError> {
     Ok(code)
 }
 
-fn dtls_failed(e: DtlsError) -> PeekError {
+fn dtls_failed(e: SessionError) -> PeekError {
     PeekError::failed(format!("DTLS with the border router failed: {e}"))
+}
+
+fn io_failed(e: io::Error) -> ErrorKind {
+    debug!("meshcop: the socket failed: {e}");
+
+    match e.kind() {
+        io::ErrorKind::ConnectionRefused => ErrorKind::ConnectionRefused,
+        _ => ErrorKind::Other,
+    }
 }
 
 /// A CoAP confirmable POST.
@@ -433,9 +517,14 @@ fn verhoeff_valid(digits: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use mbedtls_rs::dtls::{CookieCheck, Cookies};
+    use mbedtls_rs::ServerSessionConfig;
     use rs_matter::utils::futures::join;
 
     use super::*;
+
+    /// mbedtls-rs has one `Tls` instance at a time.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// The border agent's end: answers whoever sent the last datagram.
     struct AgentUdp {
@@ -443,24 +532,28 @@ mod tests {
         peer: Option<SocketAddr>,
     }
 
+    impl ErrorType for AgentUdp {
+        type Error = ErrorKind;
+    }
+
     impl Datagram for AgentUdp {
-        async fn send(&mut self, data: &[u8]) -> Result<(), DtlsError> {
-            let peer = self.peer.ok_or(DtlsError::Io)?;
+        async fn readable(&mut self) -> Result<(), ErrorKind> {
+            self.socket.readable().await.map_err(io_failed)
+        }
+
+        async fn recv(&mut self, buf: &mut [u8]) -> Result<usize, ErrorKind> {
+            let (len, peer) = self.socket.recv_from(buf).await.map_err(io_failed)?;
+            self.peer = Some(peer);
+            Ok(len)
+        }
+
+        async fn send(&mut self, data: &[u8]) -> Result<(), ErrorKind> {
+            let peer = self.peer.ok_or(ErrorKind::NotConnected)?;
             self.socket
                 .send_to(data, peer)
                 .await
                 .map(|_| ())
-                .map_err(|_| DtlsError::Io)
-        }
-
-        async fn recv(&mut self, buf: &mut [u8]) -> Result<usize, DtlsError> {
-            let (len, peer) = self
-                .socket
-                .recv_from(buf)
-                .await
-                .map_err(|_| DtlsError::Io)?;
-            self.peer = Some(peer);
-            Ok(len)
+                .map_err(io_failed)
         }
     }
 
@@ -482,36 +575,51 @@ mod tests {
     /// A border agent as OpenThread's answers: the petition with an empty
     /// acknowledgement, then a separate response; the read at once. Answers
     /// the requests it got.
-    async fn agent(socket: Async<UdpSocket>, code: &[u8]) -> Vec<Vec<u8>> {
-        let mut rng = rand::make_rng::<StdRng>();
-        let mut dtls = DtlsSession::server(
+    async fn agent(tls: TlsReference<'_>, socket: Async<UdpSocket>, code: &[u8]) -> Vec<Vec<u8>> {
+        // As OpenThread's, it checks the client's address with a cookie.
+        let (_, client) = socket.peek_from(&mut [0]).await.unwrap();
+        let client = format!("{client}");
+        let cookies = Cookies::new(tls).unwrap();
+
+        let config = SessionConfig::Server(ServerSessionConfig::new(Authentication::EcJpake(code)));
+        let dtls_config = DtlsConfig {
+            cookie_check: Some(CookieCheck::Verify {
+                cookies: &cookies,
+                client: client.as_bytes(),
+            }),
+            ..DtlsConfig::new()
+        };
+        let mut dtls = Session::new(
+            tls,
             AgentUdp { socket, peer: None },
-            &DtlsConfig::ecjpake(code),
-            &mut rng,
+            MatterClock,
+            &config,
+            &dtls_config,
         )
         .unwrap();
         dtls.connect().await.unwrap();
 
         let mut requests = Vec::new();
         let mut buf = [0; 1280];
-        while let Ok(len) = dtls.recv(&mut buf).await {
+        // Until the close notify.
+        while let Ok(len @ 1..) = dtls.read(&mut buf).await {
             let request = CoapMessage::parse(&buf[..len]).unwrap();
             let (message_id, token) = (request.message_id, request.token.to_vec());
             requests.push(request.payload.to_vec());
 
             if tlv(request.payload, TLV_COMMISSIONER_ID).is_some() {
-                dtls.send(&coap_ack(message_id)).await.unwrap();
+                dtls.write(&coap_ack(message_id)).await.unwrap();
                 let mut answer = Vec::new();
                 put_tlv(&mut answer, TLV_STATE, &[STATE_ACCEPT]);
                 put_tlv(&mut answer, TLV_COMMISSIONER_SESSION_ID, &[0, 1]);
                 let response = coap_response(COAP_NON, 0x7000, &token, &answer);
-                dtls.send(&response).await.unwrap();
+                dtls.write(&response).await.unwrap();
             } else if request.payload.is_empty() {
                 let response = coap_response(COAP_ACK, message_id, &token, DATASET);
-                dtls.send(&response).await.unwrap();
+                dtls.write(&response).await.unwrap();
             } else {
                 let response = coap_response(COAP_ACK, message_id, &token, &[TLV_STATE, 1, 1]);
-                dtls.send(&response).await.unwrap();
+                dtls.write(&response).await.unwrap();
             }
         }
 
@@ -520,12 +628,19 @@ mod tests {
 
     #[test]
     fn fetches_the_dataset_from_a_border_agent() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
         let socket = Async::<UdpSocket>::bind(([127, 0, 0, 1], 0)).unwrap();
         let addr = socket.get_ref().local_addr().unwrap();
 
+        let mut rng = rand::make_rng::<StdRng>();
+        // SAFETY: `tls` is dropped at the end of the test, before `rng`, and is
+        // not leaked.
+        let tls = unsafe { Tls::new_local_borrows(&mut rng) }.unwrap();
+
         let (dataset, requests) = async_io::block_on(join(
-            fetch_dataset(addr, "123456789"),
-            agent(socket, b"123456789"),
+            fetch(tls.reference(), addr, "123456789"),
+            agent(tls.reference(), socket, b"123456789"),
         ));
 
         assert_eq!(dataset.unwrap(), DATASET);
@@ -541,6 +656,20 @@ mod tests {
             tlv(&requests[2], TLV_COMMISSIONER_SESSION_ID),
             Some(&[0, 1][..])
         );
+    }
+
+    #[test]
+    fn says_when_no_border_agent_listens() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+        // A port that was free a moment ago.
+        let addr = UdpSocket::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+
+        let error = async_io::block_on(fetch_dataset(addr, "123456789")).unwrap_err();
+        assert!(format!("{error}").contains("not listening"), "{error}");
     }
 
     #[test]

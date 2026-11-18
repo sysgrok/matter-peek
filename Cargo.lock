@@ -3563,6 +3563,7 @@ dependencies = [
  "async-channel",
  "async-io",
  "base64 0.22.1",
+ "critical-section",
  "directories",
  "embassy-sync",
  "embassy-time",
@@ -3572,7 +3573,7 @@ dependencies = [
  "image",
  "libc",
  "log",
- "mbedtls-rs-sys",
+ "mbedtls-rs",
  "nix 0.30.1",
  "qrcodegen-no-heap",
  "rand 0.10.3",
@@ -3609,10 +3610,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mbedtls-rs"
+version = "0.3.0"
+source = "git+https://github.com/esp-rs/mbedtls-rs?branch=dtls#9e1cc11ed19eda19a70288b5776d103889792609"
+dependencies = [
+ "critical-section",
+ "embedded-io",
+ "embedded-io-async",
+ "enumset",
+ "mbedtls-rs-sys",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "mbedtls-rs-sys"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed3d6fe75492994df511a63da8de669a0c59938ada3345e3d4756aec095d2ffb"
+source = "git+https://github.com/esp-rs/mbedtls-rs?branch=dtls#9e1cc11ed19eda19a70288b5776d103889792609"
 dependencies = [
  "anyhow",
  "bindgen",

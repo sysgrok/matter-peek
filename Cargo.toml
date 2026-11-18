@@ -49,6 +49,10 @@ nix = { version = "0.30", features = ["net"] }
 [patch.crates-io]
 rs-matter = { git = "https://github.com/project-chip/rs-matter" }
 rs-matter-codegen = { git = "https://github.com/project-chip/rs-matter" }
+# TEMPORARY - remove once a released mbedtls-rs has the DTLS sessions
+# (`meshcop`), which are on its `dtls` branch.
+mbedtls-rs = { git = "https://github.com/esp-rs/mbedtls-rs", branch = "dtls" }
+mbedtls-rs-sys = { git = "https://github.com/esp-rs/mbedtls-rs", branch = "dtls" }
 
 # `--profile dist`: the executable to hand out, as small as it gets without
 # slowing the crypto down much (x86_64: 20.3 MB as `release`, 13.0 MB;

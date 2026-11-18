@@ -46,8 +46,6 @@ mod controller {
     pub mod discovery;
     #[cfg(feature = "meshcop")]
     pub mod dnssd;
-    #[cfg(feature = "meshcop")]
-    pub mod dtls;
     pub mod explain;
     pub mod fabrics;
     pub mod health;

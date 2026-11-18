@@ -202,11 +202,10 @@ Below the service, these modules wrap rs-matter's controller side:
   Provider, sleepy devices, the Thread mesh, time and commissioning windows;
 - `tbr`: a Matter border router's Thread networks (Thread Border Router
   Management and Thread Network Directory);
-- `meshcop`, `dtls` and `dnssd` (feature `meshcop`): getting a Thread network
-  from a border router that shares it with a one-time code. `dtls` is a DTLS
-  1.2 client over any datagram transport, on `mbedtls-rs-sys` only, so that it
-  can move into `mbedtls-rs`; `dnssd` is a one-shot legacy unicast mDNS browse,
-  for hosts without Avahi;
+- `meshcop` and `dnssd` (feature `meshcop`): getting a Thread network from a
+  border router that shares it with a one-time code, over a DTLS session of
+  `mbedtls-rs`; `dnssd` is a one-shot legacy unicast mDNS browse, for hosts
+  without Avahi;
 - `node`: our own node, which devices reach;
 - `fabrics`, `ca` and `persist`: our fabrics, their CAs, and the store.
 
@@ -538,6 +537,8 @@ filter.
   key comes back; the petition is for older border agents that pass the read
   on to the leader. A 9-digit code is checked against its Verhoeff check digit
   first, as each failed handshake costs one of the border router's attempts.
+  mbedtls-rs's sessions are not `Send` and it has one `Tls` instance at a
+  time, so a fetch runs on a thread of its own, one at a time.
 - Giving a network to a border router is `SetActiveDatasetRequest`, which the
   spec allows only while the border router has no active dataset, under a
   fail-safe and over CASE. One already on the same network is left alone. One
@@ -778,8 +779,8 @@ not been tried on hardware yet.
 through Apple's own commissioner (MatterSupport) rather than over BLE, and
 getting the phone's preferred Thread network from Apple's ThreadNetwork
 framework, as the Android app does from Google Play services. Sharing codes
-on Windows and macOS: the `meshcop` feature there, once `mbedtls-rs-sys` is
-seen to build for them in CI.
+on Windows, macOS and Android: the `meshcop` feature there, once
+`mbedtls-rs-sys` is seen to build and link for them in CI.
 
 **AI agent**: The assistant (`api::agent`) works with any OpenAI-compatible
 API, in the terminal and in the web UI. Next are the Anthropic API and the
