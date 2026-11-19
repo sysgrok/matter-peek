@@ -819,7 +819,7 @@ impl App {
             .find(|d| d.handle.node_id == node_id)
             .and_then(|d| d.online);
         let offline = match live.map(|sub| sub.conn) {
-            Some(SubConn::Live { .. }) => false,
+            Some(SubConn::Live { .. } | SubConn::Refused) => false,
             Some(SubConn::Offline) => true,
             _ => recorded == Some(false),
         };
@@ -831,6 +831,15 @@ impl App {
                 format!(
                     "Subscribed: it reports at least every {max_int_secs} s ({} reports so far)",
                     live.map_or(0, |sub| sub.updates)
+                ),
+            ),
+            Some(SubConn::Refused) => (
+                "Refused",
+                Some("is-warning"),
+                format!(
+                    "It answers, but refused the subscription ({}); retrying. Refresh reads its \
+                     health now",
+                    live.map_or("", |sub| sub.refused.as_str())
                 ),
             ),
             Some(SubConn::Reconnecting) => (

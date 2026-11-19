@@ -1596,6 +1596,9 @@ impl Out {
                 api::SubscriptionState::Live { max_int_secs } => {
                     println!("(live, reporting at least every {max_int_secs} s)")
                 }
+                api::SubscriptionState::Refused { reason } => {
+                    println!("(it refused the subscription: {reason}; retrying...)")
+                }
                 api::SubscriptionState::Offline => println!("(offline, retrying...)"),
                 api::SubscriptionState::Stopped => println!("(stopped)"),
             },

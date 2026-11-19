@@ -434,9 +434,14 @@ filter.
   re-established subscription brings only new events. The latest 500 events
   are kept per device.
 - A device is **offline** when no report arrived within the maximum interval
-  plus two MRP round trips of a report. Re-establishing the subscription is
-  retried with a backoff of 2 to 60 s. A successful `peek_device` retries at
-  once. A device that sleeps long is the exception, see below.
+  plus two MRP round trips of a report, or it did not answer the subscription.
+  Re-establishing the subscription is retried with a backoff of 2 to 60 s. A
+  successful `peek_device` retries at once. A device that sleeps long is the
+  exception, see below.
+- A device that answers but **refuses** the subscription (e.g. with
+  `ResourceExhausted` when it has no room for another) is online, with the
+  subscription state `refused` and the reason. It is retried the same way, and
+  its health is checked once as it starts refusing.
 
 ### Sleepy devices (ICD)
 - A device that can idle long (an ICD that supports Check-Ins) sleeps long

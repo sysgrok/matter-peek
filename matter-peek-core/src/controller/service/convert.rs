@@ -1,5 +1,7 @@
 //! From the controller's own records to the API types.
 
+use alloc::format;
+
 use crate::api;
 use crate::model::{DeviceFingerprint, DeviceHandle, StoredDevice};
 use crate::ota::OtaImage;
@@ -8,6 +10,9 @@ use crate::subscribe::SubState;
 pub(super) fn sub_state(state: SubState) -> api::SubscriptionState {
     match state {
         SubState::Live { max_int_secs } => api::SubscriptionState::Live { max_int_secs },
+        SubState::Refused { code } => api::SubscriptionState::Refused {
+            reason: format!("{code:?}"),
+        },
         SubState::Offline => api::SubscriptionState::Offline,
     }
 }

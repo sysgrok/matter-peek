@@ -85,7 +85,7 @@ impl App {
         let node_id = device.handle.node_id;
         let sub = self.subs.get(&node_id);
         let online = match sub.map(|sub| sub.conn) {
-            Some(SubConn::Live { .. }) => Some(true),
+            Some(SubConn::Live { .. } | SubConn::Refused) => Some(true),
             Some(SubConn::Offline) => Some(false),
             _ => None,
         };

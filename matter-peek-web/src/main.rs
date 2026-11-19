@@ -60,6 +60,8 @@ struct LiveSub {
     health: api::DeviceHealth,
     /// Connection state of this subscription (live / offline / …).
     conn: SubConn,
+    /// Why the device refused the subscription, while `conn` is `Refused`.
+    refused: String,
     /// How many reports the device's subscription has delivered.
     updates: u64,
 }
@@ -69,6 +71,7 @@ impl Default for LiveSub {
         Self {
             health: api::DeviceHealth::default(),
             conn: SubConn::Connecting,
+            refused: String::new(),
             updates: 0,
         }
     }
@@ -82,6 +85,9 @@ enum SubConn {
     Live {
         max_int_secs: u16,
     },
+    /// The device answers, but refused the subscription (see
+    /// `LiveSub::refused`); the server keeps retrying.
+    Refused,
     /// The device stopped reporting or cannot be reached; the server keeps
     /// retrying.
     Offline,
@@ -1680,6 +1686,12 @@ impl Component for App {
                     api::SubscriptionState::Live { max_int_secs } => {
                         if let Some(sub) = self.subs.get_mut(&node_id) {
                             sub.conn = SubConn::Live { max_int_secs };
+                        }
+                    }
+                    api::SubscriptionState::Refused { reason } => {
+                        if let Some(sub) = self.subs.get_mut(&node_id) {
+                            sub.conn = SubConn::Refused;
+                            sub.refused = reason;
                         }
                     }
                     api::SubscriptionState::Offline => {

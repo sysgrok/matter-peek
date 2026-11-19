@@ -47,7 +47,7 @@ use futures_util::FutureExt as _;
 use log::{debug, info, warn};
 
 use rs_matter::crypto::Crypto;
-use rs_matter::error::Error;
+use rs_matter::error::{Error, ErrorCode};
 use rs_matter::im::encoding::{EventFilter, EventPath, ReportDataResp};
 use rs_matter::im::{
     AttrPath, GenericPath, IMStatusCode, ImClient as _, ReportContext, ReportDataHandler,
@@ -311,10 +311,37 @@ pub enum SubState {
     /// maximum reporting interval (seconds) — the device will report at least
     /// this often.
     Live { max_int_secs: u16 },
-    /// No report arrived within the staleness window, or establishment failed:
-    /// the device is offline. Re-establishing is retried in the background; the
-    /// next [`SubState::Live`] marks recovery (with a *new* device-side sub id).
+    /// The device answered, but refused the subscription with `code`, e.g.
+    /// `ResourceExhausted` when it has no room for another: it is reachable.
+    /// Re-establishing is retried in the background.
+    Refused { code: ErrorCode },
+    /// No report arrived within the staleness window, or the device did not
+    /// answer the subscription: it is offline. Re-establishing is retried in the
+    /// background; the next [`SubState::Live`] marks recovery (with a *new*
+    /// device-side sub id).
     Offline,
+}
+
+impl SubState {
+    /// The state after a subscription could not be established, with `err`:
+    /// offline if the device did not answer or could not be found, else
+    /// refused, as it answered.
+    fn failed(err: &Error) -> Self {
+        let unreachable = err.is_peer_unresponsive()
+            || matches!(
+                err.code(),
+                ErrorCode::NotFound
+                    | ErrorCode::NoSession
+                    | ErrorCode::NoSpaceSessions
+                    | ErrorCode::NoNetworkInterface
+            );
+
+        if unreachable {
+            Self::Offline
+        } else {
+            Self::Refused { code: err.code() }
+        }
+    }
 }
 
 /// Routes the reports of our health subscriptions to them, by publisher and
@@ -514,8 +541,9 @@ impl Drop for Registration<'_> {
 ///   those known), then deltas. Each event comes once: a re-established
 ///   subscription asks for those after the last.
 /// - `on_state` receives [`SubState`] transitions: `Live { max_int }` on each
-///   (re-)establishment, `Offline` when the subscription went stale or could not
-///   be established. The UI uses these to show "live" vs. "offline".
+///   (re-)establishment, `Refused` when the device answered but refused it,
+///   `Offline` when the subscription went stale or the device did not answer.
+///   The UI uses these to show "live", "refused" or "offline".
 /// - `retry` cuts the backoff before the next attempt short, e.g. once the
 ///   device answered something else; it re-establishes a live subscription
 ///   too, e.g. once the device checked in, which it does when it lost it.
@@ -595,7 +623,7 @@ where
                 Ok(found) => endpoints = Some(found),
                 Err(e) => {
                     warn!("subscribe(0x{node_id:016X}): no endpoints: {e:?}");
-                    on_state(SubState::Offline);
+                    on_state(SubState::failed(&e));
                     if !sleepy.long.get() {
                         backoff = back_off(backoff, retry).await;
                     }
@@ -655,14 +683,15 @@ where
                 }
             }
             Err(e) => {
-                // Establishment / transport error: report Offline and back off
-                // (capped-exponential) so a cold / unreachable device isn't hammered
-                // (which would exhaust its CASE session table).
+                // Establishment / transport error: report Offline, or Refused if
+                // the device answered, and back off (capped-exponential) so a
+                // cold / unreachable device isn't hammered (which would exhaust
+                // its CASE session table).
                 warn!(
                     "subscribe(0x{node_id:016X}): {e:?}; re-establishing in {}s",
                     backoff.as_secs()
                 );
-                on_state(SubState::Offline);
+                on_state(SubState::failed(&e));
                 if !sleepy.long.get() {
                     backoff = back_off(backoff, retry).await;
                 }
@@ -1028,4 +1057,31 @@ fn decoded(report: &ReportDataResp<'_>) -> Vec<Decoded> {
         .filter_map(Result::ok)
         .filter_map(datamodel::decode)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A device that did not answer, or could not be found, is offline; one
+    /// that answered refused the subscription.
+    #[test]
+    fn failed_subscriptions() {
+        for code in [
+            ErrorCode::TxTimeout,
+            ErrorCode::RxTimeout,
+            ErrorCode::NotFound,
+            ErrorCode::NoSession,
+        ] {
+            assert_eq!(SubState::failed(&code.into()), SubState::Offline);
+        }
+
+        for code in [
+            ErrorCode::ResourceExhausted,
+            ErrorCode::Busy,
+            ErrorCode::InvalidOpcode,
+        ] {
+            assert_eq!(SubState::failed(&code.into()), SubState::Refused { code });
+        }
+    }
 }

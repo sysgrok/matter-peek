@@ -1082,16 +1082,20 @@ pub struct HealthFinding {
 }
 
 /// The state of a live health subscription.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum SubscriptionState {
     /// Established and reporting; the device reports at least every
     /// `max_int_secs` seconds.
     Live { max_int_secs: u16 },
-    /// The device went silent past its deadline (or the subscription failed to
-    /// establish): it is offline. The subscription keeps being re-established in
-    /// the background; the next `Live` marks recovery.
+    /// The device answers, but refused the subscription, for `reason` (e.g.
+    /// `ResourceExhausted` when it has no room for another): it is reachable.
+    /// The subscription keeps being re-established in the background.
+    Refused { reason: String },
+    /// The device went silent past its deadline (or did not answer the
+    /// subscription): it is offline. The subscription keeps being re-established
+    /// in the background; the next `Live` marks recovery.
     Offline,
     /// The subscription was stopped (e.g. the device was decommissioned). No
     /// further reports arrive.

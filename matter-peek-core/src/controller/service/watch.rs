@@ -13,6 +13,7 @@ use rs_matter::persist::KvBlobStore;
 use rs_matter::utils::futures::{select, Either};
 use rs_matter::utils::sync::MaybeSend;
 use rs_matter::utils::sync::Notification;
+use rs_matter::utils::timers::Duration;
 
 use crate::api::{
     DeviceFabric, DeviceHealth, HealthListener, ModelListener, NetworkKind, PeekError,
@@ -168,13 +169,13 @@ impl Watch {
     }
 
     fn set_state(&mut self, node_id: u64, state: SubscriptionState) {
-        // Failed retries repeat `Offline`; tell the listeners once.
-        if self.state != Some(state) {
-            self.state = Some(state);
-
+        // Failed retries repeat `Offline` or `Refused`; tell the listeners once.
+        if self.state.as_ref() != Some(&state) {
             for (_, listener) in &self.listeners {
-                listener.on_state(node_id, state);
+                listener.on_state(node_id, state.clone());
             }
+
+            self.state = Some(state);
         }
     }
 
@@ -183,8 +184,8 @@ impl Watch {
         if self.reports > 0 {
             listener.on_report(node_id, self.reports, self.health.clone());
         }
-        if let Some(state) = self.state {
-            listener.on_state(node_id, state);
+        if let Some(state) = &self.state {
+            listener.on_state(node_id, state.clone());
         }
 
         self.listeners.push((id, listener));
@@ -394,13 +395,26 @@ impl<'a, C: Crypto, S: KvBlobStore + MaybeSend, O: OtaImageStore> Ctx<'a, C, S, 
             },
             |state| {
                 let state = convert::sub_state(state);
-                match state {
+                match &state {
                     SubscriptionState::Live { .. } => self.set_online(node_id, true),
+                    SubscriptionState::Refused { .. } => {
+                        // It answers. Its health comes from reads meanwhile:
+                        // check it once, as it starts refusing.
+                        let mut refusing = false;
+                        with_watch(&mut |watch| {
+                            refusing =
+                                matches!(watch.state, Some(SubscriptionState::Refused { .. }))
+                        });
+                        self.set_online(node_id, true);
+                        if !refusing {
+                            self.health_due(node_id, Duration::from_secs(0));
+                        }
+                    }
                     SubscriptionState::Offline => self.set_online(node_id, false),
                     SubscriptionState::Stopped => {}
                 }
                 self.tell_devices();
-                with_watch(&mut |watch| watch.set_state(node_id, state));
+                with_watch(&mut |watch| watch.set_state(node_id, state.clone()));
             },
         );
 
