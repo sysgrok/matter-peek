@@ -63,10 +63,16 @@ const THREAD_POOR_RSSI: i8 = -92;
 const THREAD_FAIR_QUALITY: u8 = 1;
 const THREAD_POOR_QUALITY: u8 = 0;
 
-/// Frames to a neighbour that fail, in percent, from which a link is lossy,
-/// and very lossy.
-const FRAME_ERRORS_FAIR: u8 = 10;
-const FRAME_ERRORS_POOR: u8 = 30;
+/// Frames to a neighbour that are not acknowledged and are sent again, in
+/// percent, from which a link is lossy. Each try counts, so a busy link, or a
+/// neighbour that shares its radio with Wi-Fi, can have many while it still
+/// delivers every message: never more than fair.
+const FRAME_ERRORS_FAIR: u8 = 30;
+
+/// Messages to a neighbour that fail even after all their resends, in percent,
+/// from which a link is lossy, and very lossy.
+const MESSAGE_ERRORS_FAIR: u8 = 2;
+const MESSAGE_ERRORS_POOR: u8 = 10;
 
 /// From how many parent changes, or detaches, since it started a Thread
 /// device's links are unstable.
@@ -541,11 +547,20 @@ fn judge_link(area: &mut Area, neighbor: &ThreadNeighbor, what: &str) {
         area.fair(format!("{what} is weak: {}.", signal(neighbor)));
     }
 
-    let errors = neighbor.frame_error_rate;
-    if errors >= FRAME_ERRORS_POOR {
-        area.poor(format!("{what} loses {errors}% of its frames."));
-    } else if errors >= FRAME_ERRORS_FAIR {
-        area.fair(format!("{what} loses {errors}% of its frames."));
+    let errors = neighbor.message_error_rate;
+    if errors >= MESSAGE_ERRORS_POOR {
+        area.poor(format!(
+            "{what} loses {errors}% of its messages, even after resends."
+        ));
+    } else if errors >= MESSAGE_ERRORS_FAIR {
+        area.fair(format!(
+            "{what} loses {errors}% of its messages, even after resends."
+        ));
+    }
+
+    let resends = neighbor.frame_error_rate;
+    if resends >= FRAME_ERRORS_FAIR {
+        area.fair(format!("{what} has to resend {resends}% of its frames."));
     }
 }
 
@@ -833,6 +848,7 @@ mod tests {
             parent_change_count: Some(4),
             neighbors: vec![ThreadNeighbor {
                 frame_error_rate: 35,
+                message_error_rate: 12,
                 ..neighbor(1, -88, false)
             }],
             ..Default::default()
@@ -850,10 +866,37 @@ mod tests {
         assert_eq!(
             texts,
             [
-                "Its link to its parent loses 35% of its frames.",
+                "Its link to its parent loses 12% of its messages, even after resends.",
                 "Its link to its parent is weak: quality 1/3, -88 dBm.",
+                "Its link to its parent has to resend 35% of its frames.",
                 "It changed its parent 4 times since it started: its links are unstable.",
             ]
+        );
+    }
+
+    /// ClimaNode "Parents Fancoil" on 2026-11-18: a strong link to a Thread
+    /// border router that shares its radio with Wi-Fi, so many frames go
+    /// unacknowledged at first, yet every message gets through.
+    #[test]
+    fn resends_alone_are_fair() {
+        let mut read = climanode();
+        read.network.thread = Some(ThreadDiag {
+            role: Some(ThreadRole::Router),
+            neighbors: vec![ThreadNeighbor {
+                frame_error_rate: 43,
+                ..neighbor(3, -60, false)
+            }],
+            ..Default::default()
+        });
+
+        let check = judge(&read, None);
+        let link = area(&check, HealthAreaKind::Link);
+
+        assert_eq!(link.verdict, HealthVerdict::Fair);
+        let texts: Vec<&str> = link.findings.iter().map(|f| f.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["Even its best link to another router has to resend 43% of its frames."]
         );
     }
 }
