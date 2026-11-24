@@ -121,7 +121,7 @@ pub async fn register<C: Crypto>(
         })
         .await?;
 
-    let counter = handle.response().and_then(|resp| resp.icd_counter());
+    let counter = handle.response().and_then(|resp| Ok(resp.icd_counter()?));
     handle.complete().await?;
 
     counter
@@ -165,7 +165,7 @@ pub async fn stay_active<C: Crypto>(
 
     let promised = handle
         .response()
-        .and_then(|resp| resp.promised_active_duration());
+        .and_then(|resp| Ok(resp.promised_active_duration()?));
     handle.complete().await?;
 
     promised

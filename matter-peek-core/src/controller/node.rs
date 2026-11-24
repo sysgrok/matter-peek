@@ -38,7 +38,7 @@ use rs_matter::im::{InteractionModel, InteractionModelState};
 use rs_matter::persist::{DummyKvBlobStore, KvBlobStore};
 use rs_matter::respond::{ChainedExchangeHandler, Responder};
 use rs_matter::sc::{SecureChannel, PROTO_ID_SECURE_CHANNEL};
-use rs_matter::transport::exchange::MatterBuffers;
+use rs_matter::transport::MatterBuffers;
 use rs_matter::utils::sync::{MaybeSend, MaybeSendSync};
 use rs_matter::utils::timers::{Duration, Timer};
 use rs_matter::{clusters, devices, with, Matter};

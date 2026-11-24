@@ -182,7 +182,7 @@ pub async fn set_preferred<C: Crypto>(
                 .write_requests()?
                 .push()?
                 .path(endpoint, DIRECTORY, DIRECTORY_PREFERRED)?
-                .data(|w| w.str(&tag, extended_pan_id))?
+                .data(|w| Ok(w.str(&tag, extended_pan_id)?))?
                 .end()?
                 .end()?
                 .end()
@@ -192,7 +192,7 @@ pub async fn set_preferred<C: Crypto>(
 
     let resp = handle.response().map_err(|e| failed(step, e))?;
     for status in resp.write_responses.iter() {
-        let status = status.map_err(|e| failed(step, e))?;
+        let status = status.map_err(|e| failed(step, e.into()))?;
         if status.status.status != IMStatusCode::Success {
             return Err(status_failed(step, status.status.status));
         }
@@ -232,7 +232,7 @@ async fn invoke<C: Crypto>(
                     if let Some(field) = field {
                         w.str(&TLVTag::Context(0), field)?;
                     }
-                    w.end_container()
+                    Ok(w.end_container()?)
                 })?
                 .end()?
                 .end()?
@@ -251,7 +251,7 @@ async fn invoke<C: Crypto>(
             .as_ref()
             .and_then(|responses| responses.iter().next())
             .ok_or_else(|| failed(step, ErrorCode::InvalidData.into()))?
-            .map_err(|e| failed(step, e))?;
+            .map_err(|e| failed(step, e.into()))?;
 
         match first {
             CmdResp::Cmd(data) => Some(
@@ -260,7 +260,7 @@ async fn invoke<C: Crypto>(
                     .and_then(|fields| fields.find_ctx(0))
                     .and_then(|field| field.octets())
                     .map(<[u8]>::to_vec)
-                    .map_err(|e| failed(step, e))?,
+                    .map_err(|e| failed(step, e.into()))?,
             ),
             CmdResp::Status(status) if status.status.status == IMStatusCode::Success => None,
             CmdResp::Status(status) => return Err(status_failed(step, status.status.status)),

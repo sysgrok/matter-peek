@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use serde_json::{Map, Number, Value};
 
 use rs_matter::error::{Error, ErrorCode};
-use rs_matter::tlv::{TLVElement, TLVTag, TLVValue, TLVWrite};
+use rs_matter::tlv::{TLVElement, TLVTag, TLVValue, TLVWrite, TlvError};
 
 use crate::schema::{BitmapSchema, FieldSchema, TypeRef, ValueSchema};
 
@@ -30,6 +30,12 @@ impl ValueError {
 impl From<Error> for ValueError {
     fn from(e: Error) -> Self {
         Self(format!("{:?}", e.code()))
+    }
+}
+
+impl From<TlvError> for ValueError {
+    fn from(e: TlvError) -> Self {
+        Error::from(e).into()
     }
 }
 

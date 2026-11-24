@@ -59,7 +59,7 @@ impl<C: Crypto> Target<'_, '_, C> {
             .await
             .map_err(|e| failed(step, e))?;
 
-        let code = handle.response().and_then(|resp| resp.error_code());
+        let code = handle.response().and_then(|resp| Ok(resp.error_code()?));
         handle.complete().await.map_err(|e| failed(step, e))?;
 
         commissioning_status(step, code.map_err(|e| failed(step, e))?)
@@ -78,7 +78,7 @@ impl<C: Crypto> Target<'_, '_, C> {
             .await
             .map_err(|e| failed(step, e))?;
 
-        let code = handle.response().and_then(|resp| resp.error_code());
+        let code = handle.response().and_then(|resp| Ok(resp.error_code()?));
         handle.complete().await.map_err(|e| failed(step, e))?;
 
         commissioning_status(step, code.map_err(|e| failed(step, e))?)

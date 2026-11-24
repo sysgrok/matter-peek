@@ -16,7 +16,7 @@ use rs_matter::im::encoding::{
 };
 use rs_matter::im::{AttrDataTag, AttrPath, CmdDataTag, GenericPath, IMStatusCode, ImClient as _};
 use rs_matter::sc::ExchangeInitiator as _;
-use rs_matter::tlv::TLVTag;
+use rs_matter::tlv::{TLVTag, TlvError};
 use rs_matter::transport::exchange::Exchange;
 use rs_matter::utils::storage::WriteBuf;
 use rs_matter::Matter;
@@ -83,6 +83,12 @@ pub enum ModelError {
 impl From<Error> for ModelError {
     fn from(e: Error) -> Self {
         Self::Device(e)
+    }
+}
+
+impl From<TlvError> for ModelError {
+    fn from(e: TlvError) -> Self {
+        Self::Device(e.into())
     }
 }
 
