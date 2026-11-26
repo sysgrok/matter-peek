@@ -601,31 +601,14 @@ pub fn hex_u64(id: u64) -> String {
 /// to seconds (`6m 1s`, `0s`). A year is 365 days, a month 30.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn duration(secs: u64) -> String {
-    const UNITS: [(u64, &str); 6] = [
-        (365 * 24 * 3600, "y"),
-        (30 * 24 * 3600, "mo"),
-        (24 * 3600, "d"),
-        (3600, "h"),
-        (60, "m"),
-        (1, "s"),
-    ];
+    duration_down_to(secs, 1)
+}
 
-    let mut out = String::new();
-    let mut rest = secs;
-
-    for (unit, suffix) in UNITS {
-        let count = rest / unit;
-        rest %= unit;
-
-        if count > 0 || !out.is_empty() || unit == 1 {
-            if !out.is_empty() {
-                out.push(' ');
-            }
-            out.push_str(&format!("{count}{suffix}"));
-        }
-    }
-
-    out
+/// A duration of whole hours, e.g. `8d 8h`: as [`duration`], but down to
+/// hours only (`5h`, `0h`).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn hours_duration(hours: u32) -> String {
+    duration_down_to(u64::from(hours) * 3600, 3600)
 }
 
 /// A duration in short, e.g. `5m`, `1h 30m`, `45s`: its largest two units
@@ -755,6 +738,40 @@ pub fn bytes(size: u64) -> String {
     }
 
     format!("{size}B")
+}
+
+/// A duration from its largest unit present down to the `smallest` unit, in
+/// seconds; what is below it is dropped.
+fn duration_down_to(secs: u64, smallest: u64) -> String {
+    const UNITS: [(u64, &str); 6] = [
+        (365 * 24 * 3600, "y"),
+        (30 * 24 * 3600, "mo"),
+        (24 * 3600, "d"),
+        (3600, "h"),
+        (60, "m"),
+        (1, "s"),
+    ];
+
+    let mut out = String::new();
+    let mut rest = secs;
+
+    for (unit, suffix) in UNITS {
+        let count = rest / unit;
+        rest %= unit;
+
+        if count > 0 || !out.is_empty() || unit == smallest {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&format!("{count}{suffix}"));
+        }
+
+        if unit == smallest {
+            break;
+        }
+    }
+
+    out
 }
 
 /// `2026-10-23 14:05:09`, from milliseconds since the Unix epoch.
@@ -1021,6 +1038,14 @@ mod tests {
         assert_eq!(duration(90_061), "1d 1h 1m 1s");
         let secs = 5 * 365 * 86_400 + 2 * 30 * 86_400 + 4 * 86_400 + 5 * 3600 + 6 * 60 + 1;
         assert_eq!(duration(secs), "5y 2mo 4d 5h 6m 1s");
+    }
+
+    #[test]
+    fn hours_durations_stop_at_hours() {
+        assert_eq!(hours_duration(0), "0h");
+        assert_eq!(hours_duration(5), "5h");
+        assert_eq!(hours_duration(24), "1d 0h");
+        assert_eq!(hours_duration(200), "8d 8h");
     }
 
     #[test]

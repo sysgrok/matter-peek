@@ -2941,12 +2941,14 @@ fn health_text(health: &api::DeviceHealth) -> String {
     let mut parts = Vec::new();
     if let Some(g) = &health.general {
         let mut general = format!(
-            "uptime {}, reboots {}, operational {} h",
+            "uptime {}, reboots {}, operational {}",
             g.up_time_secs
                 .map(display::duration)
                 .unwrap_or_else(|| "-".into()),
             opt(g.reboot_count),
-            opt(g.total_operational_hours)
+            g.total_operational_hours
+                .map(display::hours_duration)
+                .unwrap_or_else(|| "-".into())
         );
         if let Some(reason) = g.boot_reason {
             general.push_str(&format!(", last start: {}", reason.label()));

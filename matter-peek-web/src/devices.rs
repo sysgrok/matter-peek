@@ -539,7 +539,7 @@ impl App {
             (
                 Icon::Timer,
                 "Operating",
-                g.total_operational_hours.map(|hours| format!("{hours} h")),
+                g.total_operational_hours.map(display::hours_duration),
             ),
         ]
         .into_iter()
