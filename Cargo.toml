@@ -43,17 +43,6 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 socket2 = { version = "0.5", features = ["all"] }
 nix = { version = "0.30", features = ["net"] }
 
-# TEMPORARY - remove once a released rs-matter has what this crate uses from
-# `main`: `Transport::browse`, the OTA Provider changes and the Commissioner's
-# PASE session reuse. The published crates get no patch, so publishing waits too.
-[patch.crates-io]
-rs-matter = { git = "https://github.com/project-chip/rs-matter" }
-rs-matter-codegen = { git = "https://github.com/project-chip/rs-matter" }
-# TEMPORARY - remove once a released mbedtls-rs has the DTLS sessions
-# (`meshcop`), which are on its `main` branch.
-mbedtls-rs = { git = "https://github.com/esp-rs/mbedtls-rs" }
-mbedtls-rs-sys = { git = "https://github.com/esp-rs/mbedtls-rs" }
-
 # `--profile dist`: the executable to hand out, as small as it gets without
 # slowing the crypto down much (x86_64: 20.3 MB as `release`, 13.0 MB;
 # `opt-level = "z"` would save 0.6 MB more).

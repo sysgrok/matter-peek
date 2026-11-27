@@ -62,7 +62,7 @@ No official releases yet.
 
 matter-peek is fully usable, but not yet released. Planned next:
 
-- `cargo install matter-peek` from crates.io: the names are reserved, but the real crates wait for an rs-matter release that has everything matter-peek uses.
+- `cargo install matter-peek` from crates.io: the names are reserved, but the real crates are not published yet.
 - Releases for Linux, Windows and macOS, in place of the CI builds above.
 - The app in Google Play, and an app for iPhone.
 

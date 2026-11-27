@@ -3717,8 +3717,9 @@ dependencies = [
 
 [[package]]
 name = "mbedtls-rs"
-version = "0.3.0"
-source = "git+https://github.com/esp-rs/mbedtls-rs#85e68df76543694b464786733ad9f6a7aef0364d"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfbde06c2a4001377fdda0b9ab44b27d69dc01e7dea225c1ba7df7aff0ef0d96"
 dependencies = [
  "critical-section",
  "embedded-io",
@@ -3730,8 +3731,9 @@ dependencies = [
 
 [[package]]
 name = "mbedtls-rs-sys"
-version = "0.3.1"
-source = "git+https://github.com/esp-rs/mbedtls-rs#85e68df76543694b464786733ad9f6a7aef0364d"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5586017fce4c3567499b09f109eab0408578f0f36d24decf7d946450f5087c0e"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -5092,8 +5094,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "128812eeafd0432f14811ff0fa950497596255411ff26df68f32a65e89024b6e"
 dependencies = [
  "bitflags 2.13.2",
  "defmt",
@@ -5121,8 +5124,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-bdx"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c097f71d274fbc8fa6dc12fd29befe98eab718e543d191fabdce7627b8eaf49c"
 dependencies = [
  "defmt",
  "log",
@@ -5135,8 +5139,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-cert"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d9aef17fcc2846f34f458c4dce617e5da52876d241a1d7c3b94c98b4a3ed2d3"
 dependencies = [
  "defmt",
  "der",
@@ -5152,8 +5157,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-codegen"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f9528019adc856a564480ec6989f86fa26423fca82c109724ef5a4857c2fe41"
 dependencies = [
  "convert_case 0.6.0",
  "miette",
@@ -5171,8 +5177,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-crypto"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc3fb8bf383edccd054afbf9df827df9a9bc647487118a4076068d5e950afb4a"
 dependencies = [
  "aes",
  "ccm",
@@ -5200,8 +5207,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-dm"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fb47e82ebd01192a06c401094541584ad318a061ca9b3cb1f86131b0c20544b"
 dependencies = [
  "async-channel",
  "bitflags 2.13.2",
@@ -5235,8 +5243,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-dm-clusters"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba6dada1cdd5a7f7c97f667515d1d16cceb602f3abb996fb7f8337891521d868"
 dependencies = [
  "bitflags 2.13.2",
  "defmt",
@@ -5250,8 +5259,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-dm-core"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74278c465a0e88a2649a366bcfcb8e597c7bbee915d0574d971fcd31e4f21afd"
 dependencies = [
  "cfg-if",
  "defmt",
@@ -5267,8 +5277,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-im"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63184fdc22f28a5b9636490f20b429737e152bac16f5bed542b4faa525f166f8"
 dependencies = [
  "defmt",
  "log",
@@ -5284,8 +5295,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-im-core"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1160e17e54c356026186408a4ca82a0b2460dc0f2039479f20313a007074253"
 dependencies = [
  "defmt",
  "log",
@@ -5299,8 +5311,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-macros"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce20fdbc8e5f8797ffa127dc725498766b732158e3544f1aed61e0c22fdef25"
 dependencies = [
  "proc-macro-crate 3.5.0",
  "proc-macro2",
@@ -5310,8 +5323,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-node"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90481bc51f4e6678273f459a6e649062e0c4753bfda80c778c7c19120576a8b0"
 dependencies = [
  "defmt",
  "log",
@@ -5330,8 +5344,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-node-core"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "255887729b4e9a71ca71ad37e961e643e54cb2a978e3a9e08b715f1afd29c145"
 dependencies = [
  "bitflags 2.13.2",
  "cfg-if",
@@ -5351,8 +5366,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-onboard"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78e5a567c1251291a275013c7d101b6a85df1d237d553bfa81d0ce58a414bc48"
 dependencies = [
  "defmt",
  "log",
@@ -5369,8 +5385,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-pairing"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4601894775712b3108e0cdca0f80bfb832ccb6921a4bc51f1b4cc0b8f53a57eb"
 dependencies = [
  "defmt",
  "log",
@@ -5384,8 +5401,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-respond"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c82d326c2fa95db9cf8f17ed06f539a0aed6e651ce5f6fff16af252bcf7bf3eb"
 dependencies = [
  "defmt",
  "log",
@@ -5400,8 +5418,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-sc"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e46372e1d3d6af1327e4882a7e137d6afc530070d922f501731bb92d8d1c3006"
 dependencies = [
  "defmt",
  "log",
@@ -5420,8 +5439,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-stack"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d59328c5e07fe17ebea87d52f0a63442e3e88072a46b1957eec8d85c74a09dc2"
 dependencies = [
  "async-io",
  "cfg-if",
@@ -5444,8 +5464,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-tlv"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9ba8a59d9a8dd1a22c1e9e622056ff112a5fdad9eb2e44038ea096e595194a3"
 dependencies = [
  "defmt",
  "log",
@@ -5459,8 +5480,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-transport"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a07d31e11a5ed6f6abc626ac5e868646474e4d66fc8434df862c25d91d5a93d9"
 dependencies = [
  "astro-dnssd",
  "async-channel",
@@ -5492,8 +5514,9 @@ dependencies = [
 
 [[package]]
 name = "rs-matter-utils"
-version = "0.4.1"
-source = "git+https://github.com/project-chip/rs-matter#04e4c263c6487cf5ccf4f28faf606e9fcfa49d29"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2cc64a2afbc72eb7025c168c0a6275b0ff021dd82b02bc53ef8f6fd239af8299"
 dependencies = [
  "bitflags 2.13.2",
  "critical-section",

@@ -642,9 +642,6 @@ device's own setup code, which we do not keep.
 | QR / manual codes | `pairing` (including `qr-scan` from pixels) |
 | Persistence | `KvBlobStore`, `DirKvBlobStore` |
 
-matter-peek follows rs-matter's `main` branch and patches it into the
-workspace until the pieces it uses are released.
-
 ---
 
 ## 6. Portability
@@ -882,8 +879,6 @@ only as far as `ICACCSRRequest`.
 
 ## 8. Risks
 
-- **rs-matter `main`.** matter-peek depends on unreleased rs-matter, patched
-  into the workspace.
 - **mDNS** behaves differently with each host daemon, and operational resolves
   need the backend running all the time.
 - **Devices that misreport** their commissioning flow or their reporting

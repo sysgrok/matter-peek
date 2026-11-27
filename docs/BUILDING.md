@@ -195,7 +195,11 @@ cargo run -p matter-peek-core --features uniffi-cli --bin uniffi-bindgen -- \
 
 ## Working on rs-matter at the same time
 
-Until an rs-matter release has everything matter-peek uses, the workspace
-`Cargo.toml` patches `rs-matter` and `rs-matter-codegen` to rs-matter's git
-`main`. To work against a local clone instead, point those `[patch.crates-io]`
-entries at `../rs-matter/rs-matter` and `../rs-matter/rs-matter-codegen`.
+matter-peek uses the rs-matter crates from crates.io. To work against a local
+clone instead, add this to the workspace `Cargo.toml`:
+
+```toml
+[patch.crates-io]
+rs-matter = { path = "../rs-matter/rs-matter" }
+rs-matter-codegen = { path = "../rs-matter/rs-matter-codegen" }
+```

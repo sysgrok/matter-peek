@@ -88,7 +88,7 @@ uniffi-cli = ["uniffi", "uniffi/cli", "uniffi/cargo-metadata"]
 
 [build-dependencies]
 # The Matter IDL, for the data model schema (`build.rs`).
-rs-matter-codegen = { version = "0.4", optional = true }
+rs-matter-codegen = { version = "0.5", optional = true }
 
 [dependencies]
 # The API types and its MCP tools, for every build (the web UI's too).
@@ -100,8 +100,8 @@ log = { workspace = true }
 
 # --- The controller (`controller`), `no_std` + `alloc`. ---
 # rs-matter without default features (its `os` implies `std`); `std` turns `os`
-# on. A plain registry dep, so the workspace `[patch.crates-io]` applies.
-rs-matter = { version = "0.4", optional = true, default-features = false, features = ["alloc", "rustcrypto", "log"] }
+# on.
+rs-matter = { version = "0.5", optional = true, default-features = false, features = ["alloc", "rustcrypto", "log"] }
 async-channel = { version = "2", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["alloc"] }
 # Only for `CriticalSectionRawMutex`, the raw mutex of what the API handles share
@@ -130,7 +130,7 @@ nix = { workspace = true, optional = true }
 
 # --- The MeshCoP commissioner candidate (`meshcop`). ---
 # DTLS sessions, with EC-JPAKE.
-mbedtls-rs = { version = "0.3", optional = true, default-features = false, features = [
+mbedtls-rs = { version = "0.4", optional = true, default-features = false, features = [
     "tls-proto-dtls", "kex-ecjpake", "alg-ecjpake", "alg-ccm",
 ] }
 # mbedtls-rs's critical sections.
