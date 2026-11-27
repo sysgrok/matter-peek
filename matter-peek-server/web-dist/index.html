@@ -17,12 +17,12 @@
     <!-- Bulma, vendored locally (offline-safe; no CDN at runtime). -->
     
     <link rel="stylesheet" href="bulma.min.css" />
-    <link rel="stylesheet" href="/style-39a7a326760c9a9d.css" integrity="sha384-Ghcv6dqG5dL/1t1BAWtXz/wB3VJ4qqlFYv1VPuhtktRF0j6qroX+1TPcmwZyW34W"/>
+    <link rel="stylesheet" href="/style-119f67baa3637048.css" integrity="sha384-qjlUNbMEZlDFHk4jOUkyPwAy2eptBpwNzaD0ej+DqwRstBCTj7OeKDQcsIgVFIrT"/>
     <!-- The app; its release build goes through wasm-opt for size. -->
     
 <script type="module">
-import init, * as bindings from '/matter-peek-web-988c6fc96c392d81.js';
-const wasm = await init({ module_or_path: '/matter-peek-web-988c6fc96c392d81_bg.wasm' });
+import init, * as bindings from '/matter-peek-web-b886b456d6a4bb8a.js';
+const wasm = await init({ module_or_path: '/matter-peek-web-b886b456d6a4bb8a_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -31,6 +31,6 @@ window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
-  <link rel="modulepreload" href="/matter-peek-web-988c6fc96c392d81.js" crossorigin="anonymous" integrity="sha384-GbbF9oq3SE5c/1lhbVAc0m69wynkt7dicNrguKEzj4qZrY44tq1irOOHvW7X4g0U"><link rel="preload" href="/matter-peek-web-988c6fc96c392d81_bg.wasm" crossorigin="anonymous" integrity="sha384-rE26vU+sbmyQPXUHoUp4rUzRr8/Mnet3Hz9wxR9S1G26mkJ0E5Bd6wEEwnYoigXJ" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/matter-peek-web-b886b456d6a4bb8a.js" crossorigin="anonymous" integrity="sha384-XVrDa9EiA/SHvu9KhXOy0hY8slHOGbNoMNM9A8qOscUkKKFDFw9qRsuwF7o5TFzj"><link rel="preload" href="/matter-peek-web-b886b456d6a4bb8a_bg.wasm" crossorigin="anonymous" integrity="sha384-yiyUCsHsQ/PUFL2XxHOUibIHXzEudG33i1jHPecMGocNPzBngRsyvbQSzeGWR33S" as="fetch" type="application/wasm"></head>
   <body></body>
 </html>

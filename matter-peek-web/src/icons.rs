@@ -23,6 +23,7 @@ pub enum Icon {
     Connect,
     Trash,
     Plus,
+    Minus,
     Lock,
     Eye,
     EyeOff,
@@ -143,6 +144,7 @@ pub fn icon(glyph: Icon, size: u32) -> Html {
             </>
         },
         Icon::Plus => html! { <path d="M12 5v14M5 12h14" /> },
+        Icon::Minus => html! { <path d="M5 12h14" /> },
         Icon::Lock => html! {
             <>
                 <rect x="3" y="11" width="18" height="11" rx="2" />

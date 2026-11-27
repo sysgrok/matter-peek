@@ -1174,6 +1174,15 @@ button.dm-chip:hover { border-color: var(--bulma-link); color: var(--bulma-link)
 .dm-control > .button, .dm-control > .select, .dm-control > .buttons { justify-self: start; grid-column: 2 / span 2; }
 .dm-control > .buttons { margin-bottom: 0; }
 .dm-slider { width: 100%; accent-color: var(--bulma-link); }
+/* A slider between its two step buttons; its value is tinted while picked and not yet the device's. */
+.dm-slider-row { display: flex; align-items: center; gap: .45rem; min-width: 0; }
+.dm-slider-row .dm-slider { flex: 1; min-width: 0; }
+.dm-slider-row > .select { flex: none; margin-right: .2rem; }
+.dm-slider-step { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 1.7rem; height: 1.7rem; padding: 0; border: 1px solid var(--bulma-border); border-radius: 50%; background: var(--bulma-scheme-main); color: var(--bulma-text); cursor: pointer; }
+.dm-slider-step:hover:not(:disabled) { border-color: var(--bulma-link); color: var(--bulma-link); }
+.dm-slider-step:disabled { cursor: default; opacity: .45; }
+.dm-control-value.is-picked { color: var(--bulma-link); }
+.dm-control > .dm-control-note { grid-column: 2 / span 2; margin-top: -.4rem; font-size: .8rem; color: var(--bulma-text-weak); }
 .dm-control-value { font-variant-numeric: tabular-nums; min-width: 4.5rem; text-align: right; }
 .dm-control-value.is-reading { grid-column: 2 / span 2; text-align: left; font-size: 1.1rem; font-weight: 600; }
 

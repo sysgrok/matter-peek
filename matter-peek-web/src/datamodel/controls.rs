@@ -15,6 +15,7 @@ use yew::prelude::*;
 use matter_peek_core::api::{AttributeModel, ClusterModel, DeviceModel, EndpointModel, ValueKind};
 
 use super::Action;
+use crate::icons::{icon, Icon};
 use crate::{field_value, select_value};
 
 const IDENTIFY: u32 = 0x0003;
@@ -159,8 +160,20 @@ enum Kind {
     },
     /// A writable number, typed in.
     Number { attr: u32 },
-    /// A writable enum, among its values.
-    Choice { attr: u32 },
+    /// A writable enum, among its values (`only` those, if given, and the
+    /// one it has).
+    Choice {
+        attr: u32,
+        only: Option<Vec<&'static str>>,
+    },
+    /// A fan: its mode as attribute `mode` (among `modes`, if given), in
+    /// front of a slider of its speed in percent, as attribute `percent`; the
+    /// device keeps the two in step.
+    Fan {
+        mode: u32,
+        modes: Option<Vec<&'static str>>,
+        percent: u32,
+    },
     /// One of the entries list attribute `list` has, each shown by its field
     /// `label`, the one `current` reads (by the entry's `keys`) picked; a pick
     /// invokes `cmd`, with the entry's `keys` as its `fields`.
@@ -182,6 +195,8 @@ enum Kind {
     Keypad { cmd: u32 },
     /// A value to read.
     Reading { attr: u32, unit: Unit },
+    /// A line of text about the controls before it.
+    Note { text: String },
 }
 
 /// A command, as a button: what it shows, and its fields (JSON).
@@ -243,9 +258,18 @@ enum Unit {
 /// ones first, then those derived from the schema (with `brief`, only where
 /// it has no others).
 pub(super) fn of(endpoint: &EndpointModel, brief: bool) -> Vec<Group<'_>> {
+    // A thermostat shows the room's temperature already; a Temperature
+    // Measurement next to it is, as a rule, the same sensor.
+    let room = endpoint.clusters.iter().any(|c| {
+        c.id == THERMOSTAT
+            && attribute(c, 0x0000).is_some()
+            && !has_feature(c, "LocalTemperatureNotExposed")
+    });
+
     let mut groups: Vec<Group<'_>> = endpoint
         .clusters
         .iter()
+        .filter(|cluster| !(room && cluster.id == TEMPERATURE))
         .filter_map(|cluster| {
             let (title, controls) = match curated(cluster).or_else(|| shaped(cluster)) {
                 Some(controls) => (None, controls),
@@ -267,6 +291,38 @@ pub(super) fn of(endpoint: &EndpointModel, brief: bool) -> Vec<Group<'_>> {
     groups.sort_by_key(|group| group.title.is_some());
     if brief && groups.first().is_some_and(|group| group.title.is_none()) {
         groups.retain(|group| group.title.is_none());
+    }
+
+    // Next to a thermostat, the room's humidity goes under its temperature,
+    // or, unknown, away: a device may serve the cluster with no sensor behind
+    // it, as null.
+    let humidity = groups
+        .iter()
+        .position(|g| room && g.cluster.id == HUMIDITY && g.title.is_none());
+    if let Some(h) = humidity {
+        let humidity = groups.remove(h);
+        let known = number(attribute(humidity.cluster, 0x0000)).is_some();
+        if let Some(t) = groups
+            .iter()
+            .position(|g| g.cluster.id == THERMOSTAT)
+            .filter(|_| known)
+        {
+            let rest = groups[t].controls.split_off(1);
+            let thermostat = groups[t].cluster;
+            groups.insert(t + 1, humidity);
+            if !rest.is_empty() {
+                groups.insert(
+                    t + 2,
+                    Group {
+                        cluster: thermostat,
+                        title: None,
+                        controls: rest,
+                    },
+                );
+            }
+        } else if known {
+            groups.insert(h, humidity);
+        }
     }
 
     groups
@@ -338,28 +394,15 @@ fn curated(cluster: &ClusterModel) -> Option<Vec<Control>> {
                 },
             },
         )],
-        THERMOSTAT => vec![
-            reading(0x0000, "Room temperature", Unit::Scaled(100.0, "°C")),
-            control("Mode", Kind::Choice { attr: 0x001C }),
-            setpoint(cluster, "Heat to", 0x0012, 0x0015, 0x0016, 700.0, 3000.0),
-            setpoint(cluster, "Cool to", 0x0011, 0x0017, 0x0018, 1600.0, 3200.0),
-        ],
-        FAN_CONTROL => vec![
-            control("Fan", Kind::Choice { attr: 0x0000 }),
-            control(
-                "Fan speed",
-                Kind::Slider {
-                    attr: 0x0002,
-                    from: None,
-                    min: 0.0,
-                    max: 100.0,
-                    step: 1.0,
-                    scale: 1.0,
-                    unit: "%",
-                    set: Set::Attr,
-                },
-            ),
-        ],
+        THERMOSTAT => thermostat(cluster),
+        FAN_CONTROL => vec![control(
+            "Fan",
+            Kind::Fan {
+                mode: 0x0000,
+                modes: fan_modes(cluster),
+                percent: 0x0002,
+            },
+        )],
         WINDOW_COVERING => vec![
             control(
                 "Cover",
@@ -389,8 +432,20 @@ fn curated(cluster: &ClusterModel) -> Option<Vec<Control>> {
         CLOSURE_DIMENSION => closure_dimension(cluster),
         VALVE => valve(cluster),
         PUMP => vec![
-            control("Pump mode", Kind::Choice { attr: 0x0020 }),
-            control("Pump control", Kind::Choice { attr: 0x0021 }),
+            control(
+                "Pump mode",
+                Kind::Choice {
+                    attr: 0x0020,
+                    only: None,
+                },
+            ),
+            control(
+                "Pump control",
+                Kind::Choice {
+                    attr: 0x0021,
+                    only: None,
+                },
+            ),
             reading(0x0011, "Pump running as", Unit::Plain),
             reading(0x0012, "Pump controlled by", Unit::Plain),
             reading(0x0013, "Pump capacity", Unit::Scaled(200.0, "%")),
@@ -869,6 +924,101 @@ fn pick(
     )
 }
 
+/// A thermostat's controls: only the setpoint its mode heats or cools to, or
+/// both in any other mode, with the gap the device keeps between them.
+fn thermostat(cluster: &ClusterModel) -> Vec<Control> {
+    let (heat, cool) = match string(attribute(cluster, 0x001C)).as_deref() {
+        Some("Heat" | "EmergencyHeat") => (true, false),
+        Some("Cool" | "Precooling") => (false, true),
+        _ => (true, true),
+    };
+
+    let mut controls = vec![
+        control(
+            "Room temperature",
+            Kind::Reading {
+                attr: 0x0000,
+                unit: Unit::Scaled(100.0, "°C"),
+            },
+        ),
+        control(
+            "Mode",
+            Kind::Choice {
+                attr: 0x001C,
+                only: Some(system_modes(cluster)),
+            },
+        ),
+    ];
+    if heat {
+        controls.push(setpoint(
+            cluster, "Heat to", 0x0012, 0x0015, 0x0016, 700.0, 3000.0,
+        ));
+    }
+    if cool {
+        controls.push(setpoint(
+            cluster, "Cool to", 0x0011, 0x0017, 0x0018, 1600.0, 3200.0,
+        ));
+    }
+    // MinSetpointDeadBand, in 0.1 °C: a write of one setpoint closer than
+    // that to the other moves the other.
+    if let Some(gap) = number(attribute(cluster, 0x0019)).filter(|gap| heat && cool && *gap > 0.0) {
+        controls.push(control(
+            "",
+            Kind::Note {
+                text: format!(
+                    "The device keeps them at least {} apart, moving the other one if needed.",
+                    scaled(gap, 10.0, "°C")
+                ),
+            },
+        ));
+    }
+
+    controls
+}
+
+/// The system modes a thermostat can be put into, as its features and
+/// `ControlSequenceOfOperation` say. The optional ones (emergency heat,
+/// precooling, fan only, dry, sleep) are left out: nothing in the data model
+/// says whether a device has them.
+fn system_modes(cluster: &ClusterModel) -> Vec<&'static str> {
+    let sequence = string(attribute(cluster, 0x001B));
+    let heats = has_feature(cluster, "Heating")
+        && !matches!(
+            sequence.as_deref(),
+            Some("CoolingOnly" | "CoolingWithReheat")
+        );
+    let cools = has_feature(cluster, "Cooling")
+        && !matches!(
+            sequence.as_deref(),
+            Some("HeatingOnly" | "HeatingWithReheat")
+        );
+
+    let mut modes = vec!["Off"];
+    if has_feature(cluster, "AutoMode") {
+        modes.push("Auto");
+    }
+    if cools {
+        modes.push("Cool");
+    }
+    if heats {
+        modes.push("Heat");
+    }
+    modes
+}
+
+/// The modes a fan has, as its `FanModeSequence` says, if it is known.
+fn fan_modes(cluster: &ClusterModel) -> Option<Vec<&'static str>> {
+    Some(match string(attribute(cluster, 0x0001))?.as_str() {
+        "OffLowMedHigh" => vec!["Off", "Low", "Medium", "High"],
+        "OffLowHigh" => vec!["Off", "Low", "High"],
+        "OffLowMedHighAuto" => vec!["Off", "Low", "Medium", "High", "Auto"],
+        "OffLowHighAuto" => vec!["Off", "Low", "High", "Auto"],
+        "OffHighAuto" => vec!["Off", "High", "Auto"],
+        "OffHigh" => vec!["Off", "High"],
+        _ => return None,
+    })
+}
+
 /// A setpoint slider, bounded by its limit attributes.
 fn setpoint(
     cluster: &ClusterModel,
@@ -1046,7 +1196,10 @@ fn derived(cluster: &ClusterModel) -> Vec<Control> {
         let label = words(a.name.as_deref().unwrap_or_default());
         let kind = match (a.writable, ty.kind) {
             (true, ValueKind::Bool) => Kind::Toggle { attr: a.id },
-            (true, ValueKind::Enum) => Kind::Choice { attr: a.id },
+            (true, ValueKind::Enum) => Kind::Choice {
+                attr: a.id,
+                only: None,
+            },
             (true, ValueKind::UInt | ValueKind::Int | ValueKind::Float) => {
                 Kind::Number { attr: a.id }
             }
@@ -1127,30 +1280,33 @@ fn view_control(
                 Some(field) => json(attribute(cluster, *attr)).and_then(|v| v.get(field)?.as_f64()),
                 None => number(attribute(cluster, *attr)),
             };
-            let shown = value.map_or_else(|| "—".to_string(), |v| scaled(v, *scale, unit));
             let (attr, min) = (*attr, *min);
             let set = match set {
                 Set::Attr => None,
                 Set::Command { cmd, field, others } => Some((*cmd, *field, others.clone())),
             };
+            let on_pick = on_act.reform(move |v: String| match set {
+                None => Action::Write {
+                    endpoint,
+                    cluster: cluster_id,
+                    attribute: attr,
+                    value: v,
+                },
+                Some((cmd, field, ref others)) => {
+                    let mut fields: serde_json::Value =
+                        serde_json::from_str(others).unwrap_or_default();
+                    fields[field] = serde_json::from_str(&v).unwrap_or_default();
+                    Action::Invoke {
+                        endpoint,
+                        cluster: cluster_id,
+                        command: cmd,
+                        fields: fields.to_string(),
+                    }
+                }
+            });
             html! {
-                <>
-                    <input class="dm-slider" type="range" disabled={busy}
-                        min={min.to_string()} max={max.to_string()} step={step.to_string()}
-                        value={value.unwrap_or(min).to_string()}
-                        onchange={on_act.reform(move |e: Event| {
-                            let v = field_value(&e);
-                            match set {
-                                None => Action::Write { endpoint, cluster: cluster_id, attribute: attr, value: v },
-                                Some((cmd, field, ref others)) => {
-                                    let mut fields: serde_json::Value = serde_json::from_str(others).unwrap_or_default();
-                                    fields[field] = serde_json::from_str(&v).unwrap_or_default();
-                                    Action::Invoke { endpoint, cluster: cluster_id, command: cmd, fields: fields.to_string() }
-                                }
-                            }
-                        })} />
-                    <span class="dm-control-value">{ shown }</span>
-                </>
+                <Slider {value} {min} max={*max} step={*step} scale={*scale} unit={*unit}
+                    disabled={busy} {on_pick} />
             }
         }
         Kind::Number { attr } => {
@@ -1167,31 +1323,31 @@ fn view_control(
                     })} />
             }
         }
-        Kind::Choice { attr } => {
-            let a = attribute(cluster, *attr);
-            let current = string(a).unwrap_or_default();
-            let names: Vec<String> = a
-                .and_then(|a| a.value_type.as_ref()?.schema)
-                .and_then(|i| model.types.get(i as usize))
-                .map(|info| info.values.iter().map(|v| v.name.clone()).collect())
-                .unwrap_or_default();
-            let writable = a.is_some_and(|a| a.writable);
-            let attr = *attr;
-            // Keyed by the value, so that a new value makes a new select: a
-            // browser ignores the `selected` attribute of an option the user
-            // has picked, and the select would show a stale or the first one.
+        Kind::Choice { attr, only } => choice(
+            model,
+            endpoint,
+            cluster,
+            *attr,
+            only.as_deref(),
+            busy,
+            on_act,
+        ),
+        Kind::Fan {
+            mode,
+            modes,
+            percent,
+        } => {
+            let percent = *percent;
+            let on_pick = on_act.reform(move |v: String| Action::Write {
+                endpoint,
+                cluster: cluster_id,
+                attribute: percent,
+                value: v,
+            });
             html! {
-                <div class="select is-small">
-                    <select key={current.clone()} disabled={busy || !writable}
-                        onchange={on_act.reform(move |e: Event| Action::Write {
-                            endpoint, cluster: cluster_id, attribute: attr,
-                            value: serde_json::Value::String(select_value(e)).to_string(),
-                        })}>
-                        { for names.iter().map(|n| html! {
-                            <option value={n.clone()} selected={*n == current}>{ n.clone() }</option>
-                        }) }
-                    </select>
-                </div>
+                <Slider value={number(attribute(cluster, percent))} min={0.0} max={100.0} step={1.0}
+                    scale={1.0} unit="%" disabled={busy} {on_pick}
+                    lead={choice(model, endpoint, cluster, *mode, modes.as_deref(), busy, on_act)} />
             }
         }
         Kind::Pick {
@@ -1268,25 +1424,24 @@ fn view_control(
                 .filter(|m| *m > 0.0)
                 .map(|m| (1e6 / m).round());
             let (lowest, highest) = ((1e6 / max_mireds).round(), (1e6 / min_mireds).round());
+            let on_pick = on_act.reform(move |v: String| {
+                let kelvin = v.parse::<f64>().unwrap_or(lowest).max(1.0);
+                Action::Invoke {
+                    endpoint,
+                    cluster: cluster_id,
+                    command: 0x0A,
+                    fields: json!({
+                        "ColorTemperatureMireds": (1e6 / kelvin).round() as u64,
+                        "TransitionTime": 0,
+                        "OptionsMask": ["ExecuteIfOff"],
+                        "OptionsOverride": ["ExecuteIfOff"],
+                    })
+                    .to_string(),
+                }
+            });
             html! {
-                <>
-                    <input class="dm-slider is-kelvin" type="range" disabled={busy}
-                        min={lowest.to_string()} max={highest.to_string()} step="50"
-                        value={kelvin.unwrap_or(lowest).to_string()}
-                        onchange={on_act.reform(move |e: Event| {
-                            let kelvin = field_value(&e).parse::<f64>().unwrap_or(lowest).max(1.0);
-                            Action::Invoke {
-                                endpoint, cluster: cluster_id, command: 0x0A,
-                                fields: json!({
-                                    "ColorTemperatureMireds": (1e6 / kelvin).round() as u64,
-                                    "TransitionTime": 0,
-                                    "OptionsMask": ["ExecuteIfOff"],
-                                    "OptionsOverride": ["ExecuteIfOff"],
-                                }).to_string(),
-                            }
-                        })} />
-                    <span class="dm-control-value">{ kelvin.map_or_else(|| "—".into(), |k| format!("{k} K")) }</span>
-                </>
+                <Slider class="is-kelvin" value={kelvin} min={lowest} max={highest} step={50.0}
+                    scale={1.0} unit="K" disabled={busy} {on_pick} />
             }
         }
         Kind::Color { picker } => {
@@ -1391,6 +1546,135 @@ fn view_control(
         Kind::Reading { attr, unit } => html! {
             <span class="dm-control-value is-reading">{ reading(cluster, *attr, *unit) }</span>
         },
+        Kind::Note { text } => html! {
+            <span class="dm-control-note">{ text.clone() }</span>
+        },
+    }
+}
+
+/// A select of the values of enum attribute `attr`: `only` those, if given,
+/// and the one it has.
+fn choice(
+    model: &DeviceModel,
+    endpoint: u16,
+    cluster: &ClusterModel,
+    attr: u32,
+    only: Option<&[&str]>,
+    busy: bool,
+    on_act: &Callback<Action>,
+) -> Html {
+    let cluster_id = cluster.id;
+    let a = attribute(cluster, attr);
+    let current = string(a).unwrap_or_default();
+    let names: Vec<String> = a
+        .and_then(|a| a.value_type.as_ref()?.schema)
+        .and_then(|i| model.types.get(i as usize))
+        .map(|info| {
+            info.values
+                .iter()
+                .map(|v| v.name.clone())
+                .filter(|n| *n == current || only.is_none_or(|only| only.contains(&n.as_str())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let writable = a.is_some_and(|a| a.writable);
+    // Keyed by the value, so that a new value makes a new select: a browser
+    // ignores the `selected` attribute of an option the user has picked, and
+    // the select would show a stale or the first one.
+    html! {
+        <div class="select is-small">
+            <select key={current.clone()} disabled={busy || !writable}
+                onchange={on_act.reform(move |e: Event| Action::Write {
+                    endpoint, cluster: cluster_id, attribute: attr,
+                    value: serde_json::Value::String(select_value(e)).to_string(),
+                })}>
+                { for names.iter().map(|n| html! {
+                    <option value={n.clone()} selected={*n == current}>{ n.clone() }</option>
+                }) }
+            </select>
+        </div>
+    }
+}
+
+/// What a [`Slider`] shows and takes.
+#[derive(Properties, PartialEq)]
+struct SliderProps {
+    /// The value now (raw), if known.
+    value: Option<f64>,
+    min: f64,
+    max: f64,
+    step: f64,
+    /// The raw value is shown divided by `scale`, in `unit`.
+    scale: f64,
+    unit: &'static str,
+    #[prop_or_default]
+    class: &'static str,
+    /// What goes in front of it.
+    #[prop_or_default]
+    lead: Html,
+    disabled: bool,
+    /// Gets the value picked (raw).
+    on_pick: Callback<String>,
+}
+
+/// A slider with a button to each side, for a pace down and up. It shows the
+/// value under the thumb while the thumb moves, and until the device answers.
+#[function_component(Slider)]
+fn slider(props: &SliderProps) -> Html {
+    let picked = use_state_eq(|| None::<f64>);
+    {
+        let picked = picked.clone();
+        use_effect_with(
+            (props.value.map(f64::to_bits), props.disabled),
+            move |(_, disabled)| {
+                if !disabled {
+                    picked.set(None);
+                }
+            },
+        );
+    }
+
+    let (min, max) = (props.min, props.max);
+    let at = (*picked).or(props.value);
+    // A button moves by the step, or by about a fiftieth of a long range.
+    let pace = props.step * ((max - min) / props.step / 50.0).round().max(1.0);
+
+    let button = |by: f64, title: &'static str, glyph: Icon| {
+        let to = at.map(|v| (v + by).clamp(min, max));
+        let (picked, on_pick) = (picked.clone(), props.on_pick.clone());
+        html! {
+            <button class="dm-slider-step" type="button" {title}
+                disabled={props.disabled || to.is_none() || to == at}
+                onclick={move |_| if let Some(to) = to {
+                    picked.set(Some(to));
+                    on_pick.emit(to.to_string());
+                }}>
+                { icon(glyph, 14) }
+            </button>
+        }
+    };
+
+    let oninput = {
+        let picked = picked.clone();
+        move |e: InputEvent| picked.set(field_value(&e).parse().ok())
+    };
+    let onchange = props.on_pick.reform(|e: Event| field_value(&e));
+
+    html! {
+        <>
+            <div class="dm-slider-row">
+                { props.lead.clone() }
+                { button(-pace, "Lower", Icon::Minus) }
+                <input class={classes!("dm-slider", props.class)} type="range" disabled={props.disabled}
+                    min={min.to_string()} max={max.to_string()} step={props.step.to_string()}
+                    value={at.unwrap_or(min).to_string()}
+                    {oninput} {onchange} />
+                { button(pace, "Higher", Icon::Plus) }
+            </div>
+            <span class={classes!("dm-control-value", picked.is_some().then_some("is-picked"))}>
+                { at.map_or_else(|| "—".to_string(), |v| scaled(v, props.scale, props.unit)) }
+            </span>
+        </>
     }
 }
 
@@ -1510,15 +1794,19 @@ fn present(cluster: &ClusterModel, controls: Vec<Control>) -> Vec<Control> {
             | Kind::Slider { attr, .. }
             | Kind::Kelvin { attr, .. }
             | Kind::Number { attr }
-            | Kind::Choice { attr }
+            | Kind::Choice { attr, .. }
             | Kind::Reading { attr, .. } => attribute(cluster, *attr).is_some(),
             Kind::Pick { list, .. } => attribute(cluster, *list).is_some(),
+            Kind::Fan { mode, percent, .. } => {
+                attribute(cluster, *mode).is_some() && attribute(cluster, *percent).is_some()
+            }
             Kind::Color { .. } => attribute(cluster, COLOR_MODE).is_some(),
             Kind::Flip { turn_on, .. } => accepts(cluster, turn_on.0),
             Kind::Buttons { buttons } | Kind::Pin { buttons } => {
                 buttons.iter().any(|b| accepts(cluster, b.cmd))
             }
             Kind::Keypad { cmd } => accepts(cluster, *cmd),
+            Kind::Note { .. } => true,
         })
         .collect()
 }
@@ -1834,6 +2122,13 @@ fn string(attr: Option<&AttributeModel>) -> Option<String> {
     json(attr)?.as_str().map(str::to_string)
 }
 
+/// Whether the cluster's FeatureMap names `feature`.
+fn has_feature(cluster: &ClusterModel, feature: &str) -> bool {
+    json(attribute(cluster, FEATURE_MAP))
+        .and_then(|v| v.as_array().map(|bits| bits.iter().any(|b| b == feature)))
+        .unwrap_or(false)
+}
+
 fn is_on(attr: Option<&AttributeModel>) -> bool {
     match json(attr) {
         Some(serde_json::Value::Bool(b)) => b,
@@ -1912,6 +2207,162 @@ mod tests {
 
     fn fields(json: &str) -> Value {
         serde_json::from_str(json).unwrap()
+    }
+
+    fn labels(controls: &[Control]) -> Vec<&str> {
+        controls.iter().map(|c| c.label.as_str()).collect()
+    }
+
+    /// A thermostat that heats and cools, with both setpoints and a 2 °C
+    /// deadband, in `mode`.
+    fn thermostat(mode: &str) -> ClusterModel {
+        cluster(
+            THERMOSTAT,
+            &[
+                (0x0000, json!(2100)),
+                (0x0011, json!(2600)),
+                (0x0012, json!(2000)),
+                (0x0019, json!(20)),
+                (0x001B, json!("CoolingAndHeating")),
+                (0x001C, json!(mode)),
+                (FEATURE_MAP, json!(["Heating", "Cooling", "AutoMode"])),
+            ],
+            &[],
+        )
+    }
+
+    fn thermostat_in(mode: &str) -> Vec<Control> {
+        let thermostat = thermostat(mode);
+        present(&thermostat, curated(&thermostat).unwrap())
+    }
+
+    fn only<'c>(controls: &'c [Control], label: &str) -> &'c Option<Vec<&'static str>> {
+        match &controls
+            .iter()
+            .find(|c| c.label == label)
+            .expect(label)
+            .kind
+        {
+            Kind::Choice { only, .. } => only,
+            Kind::Fan { modes, .. } => modes,
+            _ => panic!("{label} is no choice"),
+        }
+    }
+
+    #[test]
+    fn a_thermostat_offers_the_modes_it_has() {
+        let both = thermostat_in("Heat");
+        assert_eq!(
+            only(&both, "Mode"),
+            &Some(vec!["Off", "Auto", "Cool", "Heat"])
+        );
+
+        let mut heater = thermostat("Heat");
+        for a in &mut heater.attributes {
+            match a.id {
+                0x001B => a.value = Some(json!("HeatingOnly").to_string()),
+                FEATURE_MAP => a.value = Some(json!(["Heating"]).to_string()),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            only(&curated(&heater).unwrap(), "Mode"),
+            &Some(vec!["Off", "Heat"])
+        );
+    }
+
+    #[test]
+    fn a_fan_offers_the_modes_of_its_sequence_next_to_its_speed() {
+        let fan = cluster(
+            FAN_CONTROL,
+            &[
+                (0x0000, json!("High")),
+                (0x0001, json!("OffLowHighAuto")),
+                (0x0002, json!(80)),
+            ],
+            &[],
+        );
+        let controls = present(&fan, curated(&fan).unwrap());
+
+        assert_eq!(labels(&controls), ["Fan"]);
+        assert_eq!(
+            only(&controls, "Fan"),
+            &Some(vec!["Off", "Low", "High", "Auto"])
+        );
+    }
+
+    #[test]
+    fn a_thermostat_hides_the_temperature_sensor_beside_it() {
+        let sensor = || {
+            let mut sensor = cluster(TEMPERATURE, &[(0x0000, json!(2100))], &[]);
+            sensor.name = Some("TemperatureMeasurement".into());
+            sensor.attributes[0].name = Some("MeasuredValue".into());
+            sensor
+        };
+        let shows_sensor = |clusters: Vec<ClusterModel>| {
+            let endpoint = EndpointModel {
+                id: 1,
+                device_types: Vec::new(),
+                clusters,
+            };
+            of(&endpoint, false)
+                .iter()
+                .any(|g| g.cluster.id == TEMPERATURE)
+        };
+
+        assert!(shows_sensor(vec![sensor()]));
+        assert!(!shows_sensor(vec![thermostat("Heat"), sensor()]));
+    }
+
+    #[test]
+    fn a_thermostat_shows_the_humidity_under_the_room_temperature_if_known() {
+        let hygrometer = |value: Value| {
+            let mut hygrometer = cluster(HUMIDITY, &[(0x0000, value)], &[]);
+            hygrometer.name = Some("RelativeHumidityMeasurement".into());
+            hygrometer.attributes[0].name = Some("MeasuredValue".into());
+            hygrometer
+        };
+        let rows = |clusters: Vec<ClusterModel>| {
+            let endpoint = EndpointModel {
+                id: 1,
+                device_types: Vec::new(),
+                clusters,
+            };
+            of(&endpoint, true)
+                .iter()
+                .flat_map(|g| g.controls.iter().map(|c| c.label.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            rows(vec![thermostat("Heat"), hygrometer(json!(4500))]),
+            ["Room temperature", "Relative humidity", "Mode", "Heat to"]
+        );
+        assert_eq!(
+            rows(vec![thermostat("Heat"), hygrometer(Value::Null)]),
+            ["Room temperature", "Mode", "Heat to"]
+        );
+        // Alone, it shows, known or not.
+        assert_eq!(rows(vec![hygrometer(Value::Null)]), ["Relative humidity"]);
+    }
+
+    #[test]
+    fn a_thermostat_shows_the_setpoint_of_its_mode() {
+        let heat = thermostat_in("Heat");
+        assert_eq!(labels(&heat), ["Room temperature", "Mode", "Heat to"]);
+
+        let cool = thermostat_in("Cool");
+        assert_eq!(labels(&cool), ["Room temperature", "Mode", "Cool to"]);
+
+        let auto = thermostat_in("Auto");
+        assert_eq!(
+            labels(&auto),
+            ["Room temperature", "Mode", "Heat to", "Cool to", ""]
+        );
+        let Kind::Note { text } = &auto[4].kind else {
+            panic!("no note");
+        };
+        assert!(text.contains("2.0 °C"), "{text}");
     }
 
     #[test]
